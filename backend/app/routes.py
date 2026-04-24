@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import uuid
 import zipfile
 from datetime import datetime, timezone
@@ -305,7 +306,7 @@ async def generate_thumbnails_endpoint(project_id: str, user=Depends(get_current
             "name": f"Thumbnail Concept #{i}",
             "asset_type": "thumbnail_concept",
             "file_path": None,
-            "source": "llm" if True else "fallback",
+            "source": "llm" if os.environ.get("EMERGENT_LLM_KEY") else "fallback",
             "tags": ["thumbnail", "concept"],
             "status": "ready",
             "brief": c,
