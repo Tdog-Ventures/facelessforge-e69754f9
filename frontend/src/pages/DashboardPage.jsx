@@ -95,7 +95,7 @@ export default function DashboardPage() {
                 live
               </span>
             </div>
-            <div style={{ height: 240 }}>
+            <div style={{ width: "100%", height: 240 }}>
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={statusData} margin={{ top: 10, right: 0, left: -10, bottom: 0 }}>
                   <CartesianGrid vertical={false} stroke="#27272A" />
@@ -130,15 +130,17 @@ export default function DashboardPage() {
                 {analytics ? analytics.total_estimated_cost.toFixed(2) : "—"}
               </div>
             </div>
-            <div className="pt-4 border-t border-zinc-800" style={{ height: 100 }}>
+            <div className="pt-4 border-t border-zinc-800" style={{ width: "100%", height: 100 }}>
               <span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500 block mb-2">
                 Created over time
               </span>
-              <ResponsiveContainer width="100%" height={60}>
-                <LineChart data={timeData}>
-                  <Line type="monotone" dataKey="count" stroke="#7B61FF" strokeWidth={2} dot={false} />
-                </LineChart>
-              </ResponsiveContainer>
+              <div style={{ width: "100%", height: 60 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={timeData}>
+                    <Line type="monotone" dataKey="count" stroke="#7B61FF" strokeWidth={2} dot={false} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
             </div>
           </div>
         </div>

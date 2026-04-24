@@ -15,6 +15,7 @@ import SharePanel from "../components/SharePanel";
 import { api, formatApiError, API } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { formatCurrency, formatDuration } from "../lib/format";
+import { useConfirm } from "../components/ConfirmDialog";
 
 const TABS = [
   { id: "overview", label: "Overview" },
@@ -33,6 +34,7 @@ export default function ProjectDetailPage() {
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState("overview");
   const [deleting, setDeleting] = useState(false);
+  const confirm = useConfirm();
 
   const canEdit = user && user.role !== "viewer";
 
@@ -53,7 +55,13 @@ export default function ProjectDetailPage() {
   }, [id]);
 
   const remove = async () => {
-    if (!window.confirm("Delete this project? This cannot be undone.")) return;
+    const ok = await confirm({
+      title: "Delete this project?",
+      description: "This permanently removes the project, script, scenes, metadata, assets, and any render jobs. This cannot be undone.",
+      confirmLabel: "Delete project",
+      tone: "destructive",
+    });
+    if (!ok) return;
     setDeleting(true);
     try {
       await api.delete(`/projects/${id}`);

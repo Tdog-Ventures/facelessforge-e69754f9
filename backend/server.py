@@ -46,11 +46,23 @@ async def health():
 
 app.include_router(api_router)
 
-cors_origins = os.environ.get("CORS_ORIGINS", "*").split(",")
+# CORS: in dev, use wildcard-credentials only if DEV_MODE.
+# In production, only allow explicit FRONTEND_URL.
+_dev = os.environ.get("DEV_MODE", "false").lower() in ("1", "true", "yes")
+_frontend = os.environ.get("FRONTEND_URL")
+if _frontend:
+    _allow_origins = [o.strip() for o in _frontend.split(",") if o.strip()]
+elif _dev:
+    # Dev fallback: allow local dev origins
+    _allow_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
+else:
+    _allow_origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=cors_origins,
+    allow_origins=_allow_origins or ["*"],
+    allow_origin_regex=r"https://.*\.preview\.emergentagent\.com" if _dev else None,
     allow_methods=["*"],
     allow_headers=["*"],
 )

@@ -4,6 +4,7 @@ import { Toaster } from "sonner";
 import "@/App.css";
 
 import { AuthProvider, useAuth } from "@/lib/auth";
+import { ConfirmProvider } from "@/components/ConfirmDialog";
 import LandingPage from "@/pages/LandingPage";
 import LoginPage from "@/pages/LoginPage";
 import RegisterPage from "@/pages/RegisterPage";
@@ -50,7 +51,8 @@ export default function App() {
   return (
     <div className="App">
       <AuthProvider>
-        <BrowserRouter>
+        <ConfirmProvider>
+          <BrowserRouter>
           <Routes>
             <Route path="/" element={<LandingPage />} />
             <Route path="/s/:token" element={<PublicSharePage />} />
@@ -85,6 +87,7 @@ export default function App() {
             }}
           />
         </BrowserRouter>
+        </ConfirmProvider>
       </AuthProvider>
     </div>
   );

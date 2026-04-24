@@ -1,11 +1,70 @@
 import React, { useEffect, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import axios from "axios";
-import { Copy, Check, ArrowRight, ExternalLink } from "lucide-react";
+import { Copy, Check, ArrowRight } from "lucide-react";
 import { toast, Toaster } from "sonner";
 import StatusBadge from "../components/StatusBadge";
 import { qualityColor, qualityLabel } from "../lib/format";
 import { API } from "../lib/api";
+
+function setMetaTag(attr, attrValue, content) {
+  if (typeof document === "undefined") return;
+  let el = document.querySelector(`meta[${attr}="${attrValue}"]`);
+  if (!el) {
+    el = document.createElement("meta");
+    el.setAttribute(attr, attrValue);
+    document.head.appendChild(el);
+  }
+  el.setAttribute("content", content || "");
+}
+
+function setCanonical(href) {
+  if (typeof document === "undefined") return;
+  let el = document.querySelector('link[rel="canonical"]');
+  if (!el) {
+    el = document.createElement("link");
+    el.setAttribute("rel", "canonical");
+    document.head.appendChild(el);
+  }
+  el.setAttribute("href", href);
+}
+
+function useShareSocialMeta(data, url) {
+  useEffect(() => {
+    if (!data) return;
+    const title = data.display_title || data.project_name || "FacelessForge share";
+    const desc = data.metadata?.description
+      ? (data.metadata.description.slice(0, 240) + (data.metadata.description.length > 240 ? "…" : ""))
+      : `Created with FacelessForge · quality ${data.quality_score}/100 · ${data.niche}`;
+    const og = {
+      title: `${title} · FacelessForge`,
+      description: desc,
+      url,
+      image: `${window.location.origin}/og-share-default.svg`,
+      type: "article",
+      site: "FacelessForge",
+    };
+
+    const prevTitle = document.title;
+    document.title = og.title;
+    setMetaTag("name", "description", desc);
+    setMetaTag("property", "og:title", og.title);
+    setMetaTag("property", "og:description", og.description);
+    setMetaTag("property", "og:url", og.url);
+    setMetaTag("property", "og:image", og.image);
+    setMetaTag("property", "og:type", og.type);
+    setMetaTag("property", "og:site_name", og.site);
+    setMetaTag("name", "twitter:card", "summary_large_image");
+    setMetaTag("name", "twitter:title", og.title);
+    setMetaTag("name", "twitter:description", og.description);
+    setMetaTag("name", "twitter:image", og.image);
+    setCanonical(url);
+
+    return () => {
+      document.title = prevTitle;
+    };
+  }, [data, url]);
+}
 
 function CopyChip({ text, label, testId }) {
   const [copied, setCopied] = useState(false);
@@ -34,6 +93,7 @@ export default function PublicSharePage() {
   const { token } = useParams();
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
+  const publicUrl = typeof window !== "undefined" ? `${window.location.origin}/s/${token}` : `/s/${token}`;
 
   useEffect(() => {
     (async () => {
@@ -45,6 +105,8 @@ export default function PublicSharePage() {
       }
     })();
   }, [token]);
+
+  useShareSocialMeta(data, publicUrl);
 
   if (error) {
     return (

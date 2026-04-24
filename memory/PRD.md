@@ -55,6 +55,15 @@ Build a production-ready SaaS web app **FacelessForge**: a creator-first faceles
 
 ### Phase 2 — 2026-02 (shipping now)
 - [x] **Public share links**: toggle per project, tokenised `/s/{token}` public page, read-only, view counter, last-viewed timestamp, title override, regenerate/disable actions, gated on METADATA_GENERATED+, private fields scrubbed. 44/44 backend + 100% frontend tests pass.
+- [x] **Forgot-password flow**: POST `/api/auth/forgot-password` (rate-limited, no enumeration, TTL-indexed tokens, dev-mode reset link in response), POST `/api/auth/reset-password` (one-time use, expiry-safe). Dedicated `/forgot-password` + `/reset-password` pages. 54/54 backend tests pass including 10 new forgot-password cases.
+- [x] **Deploy hardening**:
+  - CORS: allow_origin from `FRONTEND_URL` env + regex fallback for preview; `*` only if no env set
+  - Cookies: `SameSite=None; Secure` in prod, `Lax` in dev — auto-detected via `DEV_MODE`
+  - Rate-limit now honours `X-Forwarded-For` first-hop (fixes k8s ingress pod IP rotation bypass)
+  - Dev reset URL only logged when `DEV_MODE=true`
+  - Dark themed `ConfirmDialog` (shadcn alert-dialog) replaces all `window.confirm` calls (regenerate + delete)
+  - Recharts ResponsiveContainer width/height warnings eliminated
+- [x] **Share page social unfurl**: client-side OG/Twitter meta tags (`og:title`, `og:description`, `og:url`, `og:image`, `twitter:card=summary_large_image`, canonical link) populated from the public share payload; `/og-share-default.svg` branded fallback image served from `public/`. Deferred: true server-side rendering for no-JS crawlers.
 
 ## Seeded Content
 - `admin@facelessforge.io` / `admin123`

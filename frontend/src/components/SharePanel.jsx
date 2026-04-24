@@ -3,12 +3,14 @@ import { toast } from "sonner";
 import { Share2, Copy, RefreshCcw, EyeOff, Loader2, ExternalLink, Pencil, Check, X } from "lucide-react";
 import { api, formatApiError } from "../lib/api";
 import { relativeTime } from "../lib/format";
+import { useConfirm } from "./ConfirmDialog";
 
 export default function SharePanel({ projectId, share, projectStatus, canEdit, onChange }) {
   const shareable = ["METADATA_GENERATED", "ASSETS_READY", "READY_TO_RENDER", "COMPLETED"].includes(projectStatus);
   const [busy, setBusy] = useState(false);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState(share?.title_override || "");
+  const confirm = useConfirm();
 
   const origin = typeof window !== "undefined" ? window.location.origin : "";
   const shareUrl = share?.token ? `${origin}/s/${share.token}` : null;
@@ -36,7 +38,13 @@ export default function SharePanel({ projectId, share, projectStatus, canEdit, o
   };
 
   const regenerate = async () => {
-    if (!window.confirm("Regenerate the share link? The old URL will stop working immediately.")) return;
+    const ok = await confirm({
+      title: "Regenerate share link?",
+      description: "The old URL will stop working immediately. Anyone using the previous link will see a 404.",
+      confirmLabel: "Regenerate token",
+      tone: "warning",
+    });
+    if (!ok) return;
     setBusy(true);
     try {
       await api.post(`/projects/${projectId}/share/regenerate`);

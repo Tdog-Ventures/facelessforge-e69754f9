@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="rgba(255,255,255,0.04)" stroke-width="1"/>
+    </pattern>
+  </defs>
+  <rect width="1200" height="630" fill="#0A0A0A"/>
+  <rect width="1200" height="630" fill="url(#grid)"/>
+  <g transform="translate(80,80)">
+    <polygon points="0,0 60,0 60,42 51,60 0,60" fill="#00E5FF"/>
+    <text x="18" y="46" font-family="JetBrains Mono, monospace" font-weight="900" font-size="46" fill="#000">F</text>
+    <text x="90" y="42" font-family="Inter, sans-serif" font-weight="700" font-size="34" fill="#FFFFFF" letter-spacing="-0.5">FacelessForge</text>
+    <text x="90" y="74" font-family="JetBrains Mono, monospace" font-size="14" fill="#A1A1AA" letter-spacing="2">CREATOR OPERATIONS</text>
+  </g>
+  <g transform="translate(80,240)">
+    <text x="0" y="0" font-family="Inter, sans-serif" font-weight="800" font-size="72" fill="#FFFFFF" letter-spacing="-2">Turn any idea into a</text>
+    <text x="0" y="88" font-family="Inter, sans-serif" font-weight="800" font-size="72" fill="#00E5FF" letter-spacing="-2">YouTube-ready package.</text>
+  </g>
+  <g transform="translate(80,500)">
+    <rect x="0" y="0" width="10" height="10" fill="#00FF66"/>
+    <text x="24" y="10" font-family="JetBrains Mono, monospace" font-size="14" fill="#A1A1AA" letter-spacing="2">SHARED PROJECT · READ-ONLY PREVIEW</text>
+  </g>
+  <rect x="1100" y="0" width="4" height="630" fill="#7B61FF"/>
+  <rect x="1110" y="0" width="2" height="630" fill="#00E5FF"/>
+</svg>

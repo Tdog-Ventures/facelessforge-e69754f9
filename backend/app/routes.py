@@ -130,7 +130,9 @@ async def forgot_password(body: ForgotPasswordRequest, request: Request):
 
     db = get_db()
     email = body.email.lower()
-    ip = request.client.host if request.client else "unknown"
+    # Trust X-Forwarded-For first-hop (set by k8s ingress / proxy) for rate limiting.
+    fwd = request.headers.get("x-forwarded-for", "")
+    ip = (fwd.split(",")[0].strip() if fwd else "") or (request.client.host if request.client else "unknown")
     identifier = f"{ip}:{email}"
     now = _now()
 
@@ -172,9 +174,8 @@ async def forgot_password(body: ForgotPasswordRequest, request: Request):
         # Build reset link (frontend route)
         frontend = os.environ.get("FRONTEND_URL") or request.headers.get("origin") or ""
         reset_url = f"{frontend}/reset-password?token={token}" if frontend else f"/reset-password?token={token}"
-        logger.warning("[DEV reset] %s -> %s", email, reset_url)
-
         if _dev_mode():
+            logger.warning("[DEV reset] %s -> %s", email, reset_url)
             response_payload["dev_reset_token"] = token
             response_payload["dev_reset_url"] = reset_url
             response_payload["dev_expires_in_minutes"] = ttl_minutes

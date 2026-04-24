@@ -49,13 +49,18 @@ def create_refresh_token(user_id: str) -> str:
 
 
 def set_auth_cookies(response, access_token: str, refresh_token: str) -> None:
+    dev_mode = os.environ.get("DEV_MODE", "false").lower() in ("1", "true", "yes")
+    # In production (cross-origin HTTPS), cookies need SameSite=None + Secure.
+    # In dev (same-origin HTTP), SameSite=Lax + Secure=False.
+    samesite = "lax" if dev_mode else "none"
+    secure = not dev_mode
     response.set_cookie(
         key="access_token", value=access_token, httponly=True,
-        secure=False, samesite="lax", max_age=ACCESS_TTL_MINUTES * 60, path="/",
+        secure=secure, samesite=samesite, max_age=ACCESS_TTL_MINUTES * 60, path="/",
     )
     response.set_cookie(
         key="refresh_token", value=refresh_token, httponly=True,
-        secure=False, samesite="lax", max_age=REFRESH_TTL_DAYS * 86400, path="/",
+        secure=secure, samesite=samesite, max_age=REFRESH_TTL_DAYS * 86400, path="/",
     )
 
 
