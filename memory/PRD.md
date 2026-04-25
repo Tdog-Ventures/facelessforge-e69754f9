@@ -150,7 +150,28 @@ Build a production-ready SaaS web app **FacelessForge**: a creator-first faceles
 - [x] **Diagnostics**: `/api/admin/diagnostics.storage` now exposes `mode`, `bucket`, `region`, `endpoint_url`, `public_url_strategy`, `public_base_url`, `credentials_present`, `ok`, and a `warning` string set when `STORAGE_MODE=local` AND `DEV_MODE=false` (production with local disk) OR object mode is misconfigured. Diagnostics page renders the storage block with a green/amber state pill + warning banner.
 - [x] **No-leak guarantees**: the public share payload, ZIP exports, and frontend asset cards never render `/app/backend/...`, `file_path`, `output_path`, or `storage_key`.
 - [x] **Env vars** (object mode): `STORAGE_MODE`, `STORAGE_BUCKET`, `STORAGE_REGION`, `STORAGE_ENDPOINT_URL`, `STORAGE_PUBLIC_BASE_URL`, `STORAGE_SIGNED_URL_TTL`, `STORAGE_ACCESS_KEY_ID`, `STORAGE_SECRET_ACCESS_KEY`, `STORAGE_RETENTION_DAYS`. `boto3==1.42.86` pinned.
-- [x] **Tests**: +9 `TestStorageAbstraction` (local URL shape, path-traversal rejection, status helper, object-mode misconfig warning, mocked boto3 upload + delete + presigned fallback, render local-mode backwards compat, share/zip leak guard, retention safety for user data). **124/124 backend pytest pass** in 180s. Frontend `yarn build` ✅ (`main.81626857.js`, 927K). Health ✅. Render smoke ✅ (existing MP4 served via ingress, 200 / `video/mp4`).
+### Phase 8b — Deep health probe (2026-02)
+- [x] **`/api/health/deep`**: new endpoint that runs a Mongo `ping` + a live storage round-trip probe (upload → verify → delete). Always returns 200 so monitoring tools can read JSON; inspect `ok`/`mongo.ok`/`storage.ok` per-section.
+  - Local probe writes a 10-byte file to `static/health/probe-{ts}-{rand}.txt`, verifies size, deletes — leaves no artifacts behind.
+  - Object probe (S3-compatible) does `put_object` → `head_object` → `delete_object` against `health/probe-{ts}-{rand}.txt`. Bounded with a 10s timeout. Pre-flights `STORAGE_BUCKET` to give a clean error if missing.
+  - Errors are passed through `_safe_error()` which redacts known credential patterns (`AKIA`, `AWS_SECRET`, `STORAGE_SECRET`, `X-Amz-Signature`, presigned `Signature=` chunks) and caps length at 240 chars.
+  - Cheap `/api/health` remains unchanged for k8s liveness/readiness; deep check is for monitoring/admin only.
+- [x] **Tests**: +8 `TestHealthDeep` (endpoint shape + ok=true on local, local unit, object success with mocked client, upload-failure clean message, delete-failure clean message, missing bucket clean error, redaction unit, cheap-health untouched). **132/132 backend pytest** pass in 193s.
+
+### Files changed (Phase 8b)
+- Modified: `/app/backend/app/storage.py` (added `probe()` to backend interface + Local/S3 impls + `_safe_error()` + redaction patterns), `/app/backend/server.py` (added `/api/health/deep`), `/app/backend/tests/backend_test.py` (+`TestHealthDeep`)
+
+### Deep health response shape
+```json
+{
+  "service": "facelessforge",
+  "checked_at": "2026-04-25T06:37:16.086060+00:00",
+  "mongo":   { "ok": true, "latency_ms": 0, "error": null },
+  "storage": { "ok": true, "mode": "local", "latency_ms": 0,
+               "error": null, "probed_at": "..." },
+  "ok": true
+}
+```
 
 ## Seeded Content
 - `admin@facelessforge.io` / `admin123`

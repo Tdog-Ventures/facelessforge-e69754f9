@@ -2177,3 +2177,197 @@ class TestStorageAbstraction:
         assert vo_after == vo_before
         assert thumb_after == thumb_before
 
+
+
+class TestHealthDeep:
+    """Deep health check — Mongo ping + live storage round-trip probe."""
+
+    def test_local_probe_success_via_endpoint(self):
+        """In default local mode the deep check should be ok=true."""
+        r = requests.get(f"{BASE_URL}/api/health/deep", timeout=15)
+        assert r.status_code == 200
+        d = r.json()
+        for k in ("service", "checked_at", "mongo", "storage", "ok"):
+            assert k in d
+        assert d["mongo"]["ok"] is True
+        assert d["storage"]["ok"] is True
+        assert d["storage"]["mode"] == "local"
+        assert d["storage"]["error"] is None
+        assert isinstance(d["storage"]["latency_ms"], int)
+        assert d["ok"] is True
+        # No credential leakage
+        text = repr(d).lower()
+        for needle in ("akia", "secret_access_key", "aws_secret", "x-amz-signature"):
+            assert needle not in text
+
+    def test_local_probe_unit(self):
+        from app import storage as storage_mod
+        os.environ["STORAGE_MODE"] = "local"
+        storage_mod.reset_for_tests()
+        store = storage_mod.get_storage()
+        r = store.probe()
+        assert r["ok"] is True
+        assert r["mode"] == "local"
+        assert r["error"] is None
+        assert "probed_at" in r
+        # No probe artifact left behind
+        from pathlib import Path
+        leftover = list((Path(__file__).parent.parent / "static" / "health").glob("probe-*.txt")) \
+            if (Path(__file__).parent.parent / "static" / "health").exists() else []
+        assert leftover == []
+
+    def test_object_probe_success_with_mock_client(self, monkeypatch):
+        """Object probe end-to-end using a fake boto3 client."""
+        prev = {k: os.environ.get(k) for k in
+                ("STORAGE_MODE", "STORAGE_BUCKET",
+                 "STORAGE_ACCESS_KEY_ID", "STORAGE_SECRET_ACCESS_KEY")}
+        os.environ["STORAGE_MODE"] = "object"
+        os.environ["STORAGE_BUCKET"] = "ff-test"
+        os.environ["STORAGE_ACCESS_KEY_ID"] = "AKIA_FAKE"
+        os.environ["STORAGE_SECRET_ACCESS_KEY"] = "FAKE_SECRET"
+        try:
+            from app import storage as storage_mod
+            storage_mod.reset_for_tests()
+            store = storage_mod.get_storage()
+            assert store.mode == "object"
+
+            calls = []
+
+            class FakeClient:
+                def put_object(self, **kwargs):
+                    calls.append(("put", kwargs.get("Key")))
+                    assert kwargs["Body"] == b"facelessfg"  # 10 bytes
+                def head_object(self, Bucket, Key):
+                    calls.append(("head", Key))
+                def delete_object(self, Bucket, Key):
+                    calls.append(("delete", Key))
+
+            store._client = FakeClient()
+            r = store.probe()
+            assert r["ok"] is True
+            assert r["mode"] == "object"
+            assert r["error"] is None
+            ops = [c[0] for c in calls]
+            assert ops == ["put", "head", "delete"]
+            assert calls[0][1].startswith("health/probe-")
+            # All three ops referenced the same key
+            assert calls[0][1] == calls[1][1] == calls[2][1]
+        finally:
+            for k, v in prev.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            from app import storage as storage_mod
+            storage_mod.reset_for_tests()
+
+    def test_object_probe_upload_failure(self):
+        prev = {k: os.environ.get(k) for k in
+                ("STORAGE_MODE", "STORAGE_BUCKET",
+                 "STORAGE_ACCESS_KEY_ID", "STORAGE_SECRET_ACCESS_KEY")}
+        os.environ["STORAGE_MODE"] = "object"
+        os.environ["STORAGE_BUCKET"] = "ff-test"
+        os.environ["STORAGE_ACCESS_KEY_ID"] = "AKIA_FAKE"
+        os.environ["STORAGE_SECRET_ACCESS_KEY"] = "FAKE_SECRET"
+        try:
+            from app import storage as storage_mod
+            storage_mod.reset_for_tests()
+            store = storage_mod.get_storage()
+
+            class FailingPut:
+                def put_object(self, **kwargs):
+                    raise RuntimeError("bucket not found: ff-test")
+                def head_object(self, **kwargs):
+                    raise AssertionError("must not reach head")
+                def delete_object(self, **kwargs):
+                    raise AssertionError("must not reach delete")
+
+            store._client = FailingPut()
+            r = store.probe()
+            assert r["ok"] is False
+            assert r["mode"] == "object"
+            assert "upload failed" in r["error"]
+            # Error must not leak credentials
+            assert "AKIA_FAKE" not in r["error"]
+            assert "FAKE_SECRET" not in r["error"]
+        finally:
+            for k, v in prev.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            from app import storage as storage_mod
+            storage_mod.reset_for_tests()
+
+    def test_object_probe_delete_failure(self):
+        prev = {k: os.environ.get(k) for k in
+                ("STORAGE_MODE", "STORAGE_BUCKET",
+                 "STORAGE_ACCESS_KEY_ID", "STORAGE_SECRET_ACCESS_KEY")}
+        os.environ["STORAGE_MODE"] = "object"
+        os.environ["STORAGE_BUCKET"] = "ff-test"
+        os.environ["STORAGE_ACCESS_KEY_ID"] = "AKIA_FAKE"
+        os.environ["STORAGE_SECRET_ACCESS_KEY"] = "FAKE_SECRET"
+        try:
+            from app import storage as storage_mod
+            storage_mod.reset_for_tests()
+            store = storage_mod.get_storage()
+
+            class FailingDelete:
+                def put_object(self, **kwargs):
+                    return None
+                def head_object(self, **kwargs):
+                    return None
+                def delete_object(self, **kwargs):
+                    raise RuntimeError("access denied for s3:DeleteObject")
+
+            store._client = FailingDelete()
+            r = store.probe()
+            assert r["ok"] is False
+            assert "delete failed" in r["error"]
+            assert "AKIA_FAKE" not in r["error"]
+        finally:
+            for k, v in prev.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            from app import storage as storage_mod
+            storage_mod.reset_for_tests()
+
+    def test_object_probe_missing_bucket_clean_error(self):
+        prev = {k: os.environ.get(k) for k in
+                ("STORAGE_MODE", "STORAGE_BUCKET")}
+        os.environ["STORAGE_MODE"] = "object"
+        os.environ.pop("STORAGE_BUCKET", None)
+        try:
+            from app import storage as storage_mod
+            storage_mod.reset_for_tests()
+            store = storage_mod.get_storage()
+            r = store.probe()
+            assert r["ok"] is False
+            assert "STORAGE_BUCKET" in r["error"]
+        finally:
+            for k, v in prev.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            from app import storage as storage_mod
+            storage_mod.reset_for_tests()
+
+    def test_safe_error_redaction(self):
+        from app import storage as storage_mod
+        e = RuntimeError("Failed: AKIA1234567890ABCDEF was rejected")
+        msg = storage_mod._safe_error(e)
+        assert "AKIA" not in msg
+        assert "<redacted>" in msg
+        e2 = RuntimeError("Bucket not found")
+        assert storage_mod._safe_error(e2) == "RuntimeError: Bucket not found"
+
+    def test_health_endpoint_unaffected(self):
+        """The cheap /api/health stays simple — no storage / mongo probing."""
+        r = requests.get(f"{BASE_URL}/api/health", timeout=10)
+        assert r.status_code == 200
+        d = r.json()
+        assert d == {"ok": True, "service": "facelessforge"}
+

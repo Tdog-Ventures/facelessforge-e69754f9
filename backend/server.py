@@ -65,6 +65,53 @@ async def health():
     return {"ok": True, "service": "facelessforge"}
 
 
+@app.get("/api/health/deep")
+async def health_deep():
+    """Deep health check — runs a live storage round-trip probe and a Mongo
+    ping. Slower than /api/health (do NOT use for k8s liveness/readiness).
+    Use for monitoring, smoke checks, and admin diagnostics. Always returns
+    200 so monitoring tools can read the JSON; inspect `ok` and per-section
+    flags for actual status."""
+    import asyncio as _aio
+    from datetime import datetime as _dt, timezone as _tz
+    from app.storage import get_storage
+    from app.db import get_db
+
+    out = {
+        "service": "facelessforge",
+        "checked_at": _dt.now(_tz.utc).isoformat(),
+        "mongo": {"ok": False, "latency_ms": None, "error": None},
+        "storage": {"ok": False, "mode": None, "latency_ms": None, "error": None},
+    }
+    # Mongo ping
+    try:
+        import time as _t
+        t0 = _t.time()
+        await _aio.wait_for(get_db().command("ping"), timeout=3.0)
+        out["mongo"] = {"ok": True, "latency_ms": int((_t.time() - t0) * 1000), "error": None}
+    except _aio.TimeoutError:
+        out["mongo"] = {"ok": False, "latency_ms": 3000, "error": "ping timed out"}
+    except Exception as e:  # noqa: BLE001
+        out["mongo"] = {"ok": False, "latency_ms": None, "error": f"{type(e).__name__}"}
+
+    # Storage probe (off-thread; bounded)
+    try:
+        store = get_storage()
+        result = await _aio.wait_for(_aio.to_thread(store.probe), timeout=10.0)
+        out["storage"] = result
+    except _aio.TimeoutError:
+        out["storage"] = {"ok": False, "mode": getattr(store, "mode", None) if 'store' in locals() else None,
+                          "latency_ms": 10000, "error": "probe timed out",
+                          "probed_at": _dt.now(_tz.utc).isoformat()}
+    except Exception as e:  # noqa: BLE001
+        out["storage"] = {"ok": False, "mode": None, "latency_ms": None,
+                          "error": f"{type(e).__name__}",
+                          "probed_at": _dt.now(_tz.utc).isoformat()}
+
+    out["ok"] = bool(out["mongo"]["ok"] and out["storage"]["ok"])
+    return out
+
+
 app.include_router(api_router)
 
 # Static mount for generated images. Served via /api/static/thumbs/{project_id}/{asset_id}.{ext}

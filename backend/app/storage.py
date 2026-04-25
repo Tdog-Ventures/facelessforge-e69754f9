@@ -37,6 +37,24 @@ logger = logging.getLogger("facelessforge.storage")
 STATIC_ROOT = Path(__file__).parent.parent / "static"
 
 
+# Sensitive substrings we never echo back into health responses.
+_REDACT_PATTERNS = (
+    "AKIA", "ASIA", "aws_secret", "AWS_SECRET", "STORAGE_SECRET",
+    "STORAGE_ACCESS", "X-Amz-Signature", "Signature=",
+)
+
+
+def _safe_error(exc: BaseException, max_len: int = 240) -> str:
+    """Stringify an exception without leaking secrets."""
+    raw = f"{type(exc).__name__}: {exc}"
+    for pat in _REDACT_PATTERNS:
+        if pat.lower() in raw.lower():
+            return f"{type(exc).__name__}: <redacted>"
+    if len(raw) > max_len:
+        raw = raw[:max_len] + "…"
+    return raw
+
+
 # ============================ INTERFACE ============================
 
 @dataclass
@@ -58,6 +76,12 @@ class StorageBackend:
         raise NotImplementedError
 
     def healthcheck(self) -> dict:
+        raise NotImplementedError
+
+    def probe(self) -> dict:
+        """Live round-trip probe: upload → verify → delete. Returns:
+            {ok: bool, mode: str, latency_ms: int, error: Optional[str], probed_at: iso}
+        Never raises. Never returns credentials."""
         raise NotImplementedError
 
 
@@ -122,6 +146,39 @@ class LocalStorage(StorageBackend):
             "public_url_strategy": "fastapi_static_mount",
             "warning": None,
         }
+
+    def probe(self) -> dict:
+        from datetime import datetime as _dt, timezone as _tz
+        from secrets import token_hex
+        import time
+        ts = int(time.time())
+        key = f"health/probe-{ts}-{token_hex(4)}.txt"
+        path = None
+        t0 = time.time()
+        try:
+            path = self._abs(key)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"facelessfg")  # 10 bytes
+            if not path.exists() or path.stat().st_size != 10:
+                raise RuntimeError("write verification failed")
+            path.unlink()
+            return {
+                "ok": True, "mode": "local", "error": None,
+                "latency_ms": int((time.time() - t0) * 1000),
+                "probed_at": _dt.now(_tz.utc).isoformat(),
+            }
+        except Exception as e:  # noqa: BLE001
+            try:
+                if path and path.exists():
+                    path.unlink()
+            except Exception:
+                pass
+            return {
+                "ok": False, "mode": "local",
+                "error": _safe_error(e),
+                "latency_ms": int((time.time() - t0) * 1000),
+                "probed_at": _dt.now(_tz.utc).isoformat(),
+            }
 
 
 # ============================ OBJECT (S3-compatible) ============================
@@ -220,6 +277,61 @@ class S3Storage(StorageBackend):
         out["ok"] = ok
         out["warning"] = None if ok else "Object storage misconfigured: STORAGE_BUCKET / STORAGE_ACCESS_KEY_ID / STORAGE_SECRET_ACCESS_KEY required."
         return out
+
+    def probe(self) -> dict:
+        """Upload a 10-byte object → head_object → delete. Cheap and short."""
+        from datetime import datetime as _dt, timezone as _tz
+        from secrets import token_hex
+        import time
+        ts = int(time.time())
+        key = f"health/probe-{ts}-{token_hex(4)}.txt"
+        t0 = time.time()
+        # Pre-flight: config sanity
+        if not self.bucket:
+            return {"ok": False, "mode": "object", "error": "STORAGE_BUCKET not set",
+                    "latency_ms": 0,
+                    "probed_at": _dt.now(_tz.utc).isoformat()}
+        try:
+            client = self._client_or_raise()
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "mode": "object", "error": _safe_error(e),
+                    "latency_ms": int((time.time() - t0) * 1000),
+                    "probed_at": _dt.now(_tz.utc).isoformat()}
+        # Upload
+        try:
+            client.put_object(
+                Bucket=self.bucket, Key=key, Body=b"facelessfg",
+                ContentType="text/plain", CacheControl="no-store",
+            )
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "mode": "object",
+                    "error": f"upload failed: {_safe_error(e)}",
+                    "latency_ms": int((time.time() - t0) * 1000),
+                    "probed_at": _dt.now(_tz.utc).isoformat()}
+        # Verify
+        try:
+            client.head_object(Bucket=self.bucket, Key=key)
+        except Exception as e:  # noqa: BLE001
+            # Try cleanup before returning
+            try:
+                client.delete_object(Bucket=self.bucket, Key=key)
+            except Exception:
+                pass
+            return {"ok": False, "mode": "object",
+                    "error": f"verify failed: {_safe_error(e)}",
+                    "latency_ms": int((time.time() - t0) * 1000),
+                    "probed_at": _dt.now(_tz.utc).isoformat()}
+        # Delete
+        try:
+            client.delete_object(Bucket=self.bucket, Key=key)
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "mode": "object",
+                    "error": f"delete failed: {_safe_error(e)}",
+                    "latency_ms": int((time.time() - t0) * 1000),
+                    "probed_at": _dt.now(_tz.utc).isoformat()}
+        return {"ok": True, "mode": "object", "error": None,
+                "latency_ms": int((time.time() - t0) * 1000),
+                "probed_at": _dt.now(_tz.utc).isoformat()}
 
 
 # ============================ ACCESSOR ============================
