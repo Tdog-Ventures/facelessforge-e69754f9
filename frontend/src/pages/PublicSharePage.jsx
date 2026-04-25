@@ -131,7 +131,7 @@ export default function PublicSharePage() {
     );
   }
 
-  const { display_title, project_name, niche, status, quality_score, metadata, thumbnails, selected_thumbnail_url } = data;
+  const { display_title, project_name, niche, status, quality_score, metadata, thumbnails, selected_thumbnail_url, selected_voiceover } = data;
   const color = qualityColor(quality_score);
 
   return (
@@ -185,6 +185,25 @@ export default function PublicSharePage() {
               </div>
             </div>
           </div>
+
+          {selected_voiceover?.preview_url && (
+            <div
+              data-testid="share-voiceover-player"
+              className="mt-8 border border-zinc-800 bg-[#121212] rounded-sm p-4 space-y-2 max-w-2xl"
+            >
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-[10px] uppercase tracking-widest text-[#FF66CC]">
+                  Preview voiceover
+                </span>
+                {selected_voiceover.voice_style && (
+                  <span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+                    · {selected_voiceover.voice_style}
+                  </span>
+                )}
+              </div>
+              <audio controls preload="metadata" src={selected_voiceover.preview_url} className="w-full h-10" />
+            </div>
+          )}
         </div>
       </header>
 

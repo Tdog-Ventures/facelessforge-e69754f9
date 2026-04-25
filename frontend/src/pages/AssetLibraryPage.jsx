@@ -12,12 +12,15 @@ const TYPE_META = {
   stock_video: { label: "Video · Pexels", color: "#7B61FF" },
   stock_image: { label: "Photo · Pexels", color: "#00E5FF" },
   thumbnail_concept: { label: "Thumbnail brief", color: "#FFB020" },
+  generated_thumbnail: { label: "Thumbnail · image", color: "#00FF66" },
+  voiceover_audio: { label: "Voiceover · audio", color: "#FF66CC" },
 };
 
 const FILTERS = [
   { id: "all", label: "All" },
   { id: "stock", label: "Stock" },
   { id: "thumbnail_concept", label: "Thumbnails" },
+  { id: "voiceover_audio", label: "Voiceover" },
 ];
 
 export default function AssetLibraryPage() {
@@ -122,6 +125,8 @@ export default function AssetLibraryPage() {
             {visible.map((a) => {
               const meta = TYPE_META[a.asset_type] || { label: a.asset_type, color: "#A1A1AA" };
               const isStock = a.asset_type === "stock_video" || a.asset_type === "stock_image";
+              const isVoiceover = a.asset_type === "voiceover_audio";
+              const isThumbnailImage = a.asset_type === "generated_thumbnail";
               return (
                 <div
                   key={a.id}
@@ -152,6 +157,39 @@ export default function AssetLibraryPage() {
                           {a.duration}s
                         </span>
                       ) : null}
+                    </div>
+                  ) : isThumbnailImage && a.preview_url ? (
+                    <div className="relative aspect-video bg-[#1A1A1A] overflow-hidden">
+                      <img
+                        src={a.preview_url}
+                        alt={a.name || ""}
+                        className="w-full h-full object-cover"
+                        loading="lazy"
+                      />
+                      <span
+                        className="absolute top-2 left-2 font-mono text-[9px] uppercase tracking-widest px-1.5 py-0.5 rounded-sm border"
+                        style={{
+                          color: meta.color,
+                          background: meta.color + "15",
+                          borderColor: meta.color + "4D",
+                        }}
+                      >
+                        {meta.label}
+                      </span>
+                    </div>
+                  ) : isVoiceover ? (
+                    <div className="relative bg-[#1A1A1A] p-4 space-y-2">
+                      <span
+                        className="inline-block font-mono text-[9px] uppercase tracking-widest px-1.5 py-0.5 rounded-sm border"
+                        style={{
+                          color: meta.color,
+                          background: meta.color + "15",
+                          borderColor: meta.color + "4D",
+                        }}
+                      >
+                        {meta.label}
+                      </span>
+                      <audio controls src={a.preview_url} className="w-full h-9" preload="metadata" />
                     </div>
                   ) : (
                     <div className="aspect-video bg-[#1A1A1A] flex items-center justify-center">
@@ -211,7 +249,7 @@ export default function AssetLibraryPage() {
                         <ExternalLink size={11} strokeWidth={1.5} /> Source
                       </a>
                     )}
-                    {canEdit && isStock && (
+                    {canEdit && (isStock || isVoiceover) && (
                       <button
                         data-testid={`asset-remove-${a.id}`}
                         onClick={() => remove(a.projectId, a)}

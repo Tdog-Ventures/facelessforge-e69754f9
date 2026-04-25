@@ -878,6 +878,232 @@ async def reject_thumbnail(project_id: str, asset_id: str, user=Depends(get_curr
     return await _attach_project_view(db, await db.projects.find_one({"id": project_id}, {"_id": 0}))
 
 
+# ============================ VOICEOVER (TTS) ============================
+from . import tts as tts_service
+from .models import GenerateVoiceoverRequest
+
+
+@router.get("/tts/meta")
+async def tts_meta(user=Depends(get_current_user)):
+    return tts_service.provider_info()
+
+
+def _voice_style_for(project: dict, override: Optional[str]) -> str:
+    """Map a free-form project.voice_style ("neutral male narrator") to a tts key."""
+    if override and override in tts_service.VOICE_STYLE_MAP:
+        return override
+    raw = (project.get("voice_style") or "").lower()
+    for key in tts_service.VOICE_STYLE_MAP.keys():
+        if key in raw:
+            return key
+    if "male" in raw or "narrator" in raw or "deep" in raw:
+        return "narrator"
+    if "upbeat" in raw or "energy" in raw or "fast" in raw:
+        return "energetic"
+    if "doc" in raw or "neutral" in raw:
+        return "documentary"
+    return os.environ.get("DEFAULT_VOICE_STYLE", "narrator")
+
+
+@router.post("/projects/{project_id}/voiceover/generate-script")
+async def generate_full_voiceover(
+    project_id: str,
+    body: GenerateVoiceoverRequest = Body(default=None),
+    user=Depends(get_current_user),
+):
+    db = get_db()
+    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    _ensure_project_access(project, user, write=True)
+    if user["role"] == "viewer":
+        raise HTTPException(status_code=403, detail="Viewer cannot generate voiceovers")
+    script = await db.scripts.find_one({"project_id": project_id}, {"_id": 0})
+    if not script or not script.get("full_script", "").strip():
+        raise HTTPException(status_code=400, detail="Generate a script before voiceover.")
+    body = body or GenerateVoiceoverRequest()
+    text = (body.text_override or script["full_script"]).strip()
+    voice = _voice_style_for(project, body.voice_style)
+
+    asset_id = str(uuid.uuid4())
+    try:
+        payload = await tts_service.generate_voiceover(
+            text=text, voice_style=voice, project_id=project_id,
+            asset_id=asset_id, scene_id=None, name_suffix="(Full script)",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Voiceover generation failed: {e}")
+
+    payload["text_excerpt"] = text[:240]
+    payload["created_at"] = _now()
+    payload["updated_at"] = _now()
+    await db.assets.insert_one(dict(payload))
+
+    if not payload.get("mock"):
+        cost = float(payload.get("cost_estimate") or 0)
+        if cost:
+            await db.projects.update_one(
+                {"id": project_id},
+                {"$set": {"estimated_cost": float(project.get("estimated_cost", 0)) + cost, "updated_at": _now()}},
+            )
+    return await _attach_project_view(db, await db.projects.find_one({"id": project_id}, {"_id": 0}))
+
+
+@router.post("/projects/{project_id}/scenes/{scene_id}/voiceover/generate")
+async def generate_scene_voiceover(
+    project_id: str, scene_id: str,
+    body: GenerateVoiceoverRequest = Body(default=None),
+    user=Depends(get_current_user),
+):
+    db = get_db()
+    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    _ensure_project_access(project, user, write=True)
+    if user["role"] == "viewer":
+        raise HTTPException(status_code=403, detail="Viewer cannot generate voiceovers")
+    scene = await db.scenes.find_one({"id": scene_id, "project_id": project_id}, {"_id": 0})
+    if not scene:
+        raise HTTPException(status_code=404, detail="Scene not found")
+    body = body or GenerateVoiceoverRequest()
+    text = (body.text_override or scene.get("narration_text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Scene has no narration text. Generate scenes first.")
+    voice = _voice_style_for(project, body.voice_style)
+
+    asset_id = str(uuid.uuid4())
+    try:
+        payload = await tts_service.generate_voiceover(
+            text=text, voice_style=voice, project_id=project_id,
+            asset_id=asset_id, scene_id=scene_id,
+            name_suffix=f"(Scene {scene.get('scene_number', '?'):02d})" if isinstance(scene.get('scene_number'), int) else "(Scene)",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Voiceover generation failed: {e}")
+
+    payload["text_excerpt"] = text[:240]
+    payload["scene_number"] = scene.get("scene_number")
+    payload["created_at"] = _now()
+    payload["updated_at"] = _now()
+    # Demote any other voiceover for this scene to "generated", mark this one selected
+    await db.assets.update_many(
+        {"project_id": project_id, "scene_id": scene_id, "asset_type": "voiceover_audio", "status": "selected"},
+        {"$set": {"status": "generated", "updated_at": _now()}},
+    )
+    payload["status"] = "selected"
+    await db.assets.insert_one(dict(payload))
+
+    if not payload.get("mock"):
+        cost = float(payload.get("cost_estimate") or 0)
+        if cost:
+            await db.projects.update_one(
+                {"id": project_id},
+                {"$set": {"estimated_cost": float(project.get("estimated_cost", 0)) + cost, "updated_at": _now()}},
+            )
+    return await _attach_project_view(db, await db.projects.find_one({"id": project_id}, {"_id": 0}))
+
+
+@router.post("/projects/{project_id}/voiceover/{asset_id}/select")
+async def select_voiceover(project_id: str, asset_id: str, user=Depends(get_current_user)):
+    db = get_db()
+    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    _ensure_project_access(project, user, write=True)
+    if user["role"] == "viewer":
+        raise HTTPException(status_code=403, detail="Viewer cannot select voiceovers")
+    asset = await db.assets.find_one(
+        {"id": asset_id, "project_id": project_id, "asset_type": "voiceover_audio"},
+        {"_id": 0},
+    )
+    if not asset:
+        raise HTTPException(status_code=404, detail="Voiceover not found")
+    now = _now()
+    if asset.get("scene_id"):
+        # Per-scene exclusivity
+        await db.assets.update_many(
+            {"project_id": project_id, "scene_id": asset["scene_id"],
+             "asset_type": "voiceover_audio", "status": "selected"},
+            {"$set": {"status": "generated", "updated_at": now}},
+        )
+        await db.assets.update_one(
+            {"id": asset_id, "project_id": project_id},
+            {"$set": {"status": "selected", "updated_at": now}},
+        )
+    else:
+        # Full-script exclusivity — demote prior selected full-script voiceovers
+        await db.assets.update_many(
+            {"project_id": project_id, "scene_id": None,
+             "asset_type": "voiceover_audio", "status": "selected"},
+            {"$set": {"status": "generated", "updated_at": now}},
+        )
+        await db.assets.update_one(
+            {"id": asset_id, "project_id": project_id},
+            {"$set": {"status": "selected", "updated_at": now}},
+        )
+        await db.projects.update_one(
+            {"id": project_id},
+            {"$set": {"selected_voiceover_asset_id": asset_id, "updated_at": now}},
+        )
+    return await _attach_project_view(db, await db.projects.find_one({"id": project_id}, {"_id": 0}))
+
+
+@router.post("/projects/{project_id}/voiceover/{asset_id}/reject")
+async def reject_voiceover(project_id: str, asset_id: str, user=Depends(get_current_user)):
+    db = get_db()
+    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    _ensure_project_access(project, user, write=True)
+    if user["role"] == "viewer":
+        raise HTTPException(status_code=403, detail="Viewer cannot reject voiceovers")
+    asset = await db.assets.find_one(
+        {"id": asset_id, "project_id": project_id, "asset_type": "voiceover_audio"},
+        {"_id": 0},
+    )
+    if not asset:
+        raise HTTPException(status_code=404, detail="Voiceover not found")
+    now = _now()
+    await db.assets.update_one(
+        {"id": asset_id, "project_id": project_id},
+        {"$set": {"status": "rejected", "updated_at": now}},
+    )
+    if not asset.get("scene_id") and project.get("selected_voiceover_asset_id") == asset_id:
+        await db.projects.update_one(
+            {"id": project_id},
+            {"$set": {"selected_voiceover_asset_id": None, "updated_at": now}},
+        )
+    return await _attach_project_view(db, await db.projects.find_one({"id": project_id}, {"_id": 0}))
+
+
+@router.delete("/projects/{project_id}/voiceover/{asset_id}")
+async def delete_voiceover(project_id: str, asset_id: str, user=Depends(get_current_user)):
+    db = get_db()
+    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    _ensure_project_access(project, user, write=True)
+    if user["role"] == "viewer":
+        raise HTTPException(status_code=403, detail="Viewer cannot delete voiceovers")
+    asset = await db.assets.find_one(
+        {"id": asset_id, "project_id": project_id, "asset_type": "voiceover_audio"},
+        {"_id": 0},
+    )
+    if not asset:
+        raise HTTPException(status_code=404, detail="Voiceover not found")
+    # Best-effort file removal
+    fp = asset.get("file_path")
+    if fp:
+        try:
+            from pathlib import Path as _P
+            p = _P(fp)
+            if p.exists() and p.is_file():
+                p.unlink()
+        except Exception:  # noqa: BLE001
+            pass
+    await db.assets.delete_one({"id": asset_id, "project_id": project_id})
+    if project.get("selected_voiceover_asset_id") == asset_id:
+        await db.projects.update_one(
+            {"id": project_id},
+            {"$set": {"selected_voiceover_asset_id": None, "updated_at": _now()}},
+        )
+    return await _attach_project_view(db, await db.projects.find_one({"id": project_id}, {"_id": 0}))
+
+
 # ============================ EXPORTS ============================
 
 @router.get("/projects/{project_id}/export/script.txt")
@@ -942,6 +1168,28 @@ async def export_package_zip(project_id: str, user=Depends(get_current_user)):
             zf.writestr("metadata.json", json.dumps(_ser(metadata), indent=2, default=str))
         if assets:
             zf.writestr("assets.json", json.dumps([_ser(a) for a in assets], indent=2, default=str))
+            voiceovers = [a for a in assets if a.get("asset_type") == "voiceover_audio"]
+            if voiceovers:
+                # Trim heavy fields, keep what a renderer / client needs
+                summary = []
+                for v in voiceovers:
+                    summary.append({
+                        "id": v.get("id"),
+                        "scene_id": v.get("scene_id"),
+                        "scene_number": v.get("scene_number"),
+                        "voice_style": v.get("voice_style"),
+                        "duration": v.get("duration"),
+                        "provider": v.get("provider"),
+                        "model": v.get("model"),
+                        "mock": v.get("mock"),
+                        "status": v.get("status"),
+                        "preview_url": v.get("preview_url"),
+                        "preview_path": v.get("preview_path"),
+                        "text_excerpt": v.get("text_excerpt"),
+                        "is_full_script": v.get("scene_id") is None,
+                        "selected_for_project": (project.get("selected_voiceover_asset_id") == v.get("id")),
+                    })
+                zf.writestr("voiceovers.json", json.dumps(summary, indent=2, default=str))
         zf.writestr("README.md",
             f"# {project['name']}\n\nGenerated with FacelessForge.\n\n"
             f"- Niche: {project['niche']}\n- Topic: {project['topic']}\n"
@@ -1157,6 +1405,14 @@ async def public_share(token: str):
             {"_id": 0},
         )
 
+    # Selected full-script voiceover (if any)
+    selected_voice = None
+    if project.get("selected_voiceover_asset_id"):
+        selected_voice = await db.assets.find_one(
+            {"id": project["selected_voiceover_asset_id"], "project_id": project["id"], "asset_type": "voiceover_audio"},
+            {"_id": 0},
+        )
+
     # Increment view count and update last viewed
     await db.projects.update_one(
         {"id": project["id"]},
@@ -1189,6 +1445,11 @@ async def public_share(token: str):
             for t in thumbnails if t.get("brief")
         ],
         "selected_thumbnail_url": selected_thumb.get("preview_url") if selected_thumb else None,
+        "selected_voiceover": ({
+            "preview_url": selected_voice.get("preview_url"),
+            "duration": selected_voice.get("duration"),
+            "voice_style": selected_voice.get("voice_style"),
+        } if selected_voice else None),
         "shared_at": project.get("updated_at").isoformat()
             if isinstance(project.get("updated_at"), datetime) else project.get("updated_at"),
     }

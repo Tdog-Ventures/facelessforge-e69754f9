@@ -12,6 +12,7 @@ import MetadataPanel from "../components/MetadataPanel";
 import ThumbnailPanel from "../components/ThumbnailPanel";
 import RenderPanel from "../components/RenderPanel";
 import SharePanel from "../components/SharePanel";
+import VoiceoverPanel from "../components/VoiceoverPanel";
 import { api, formatApiError, API } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { formatCurrency, formatDuration } from "../lib/format";
@@ -23,6 +24,7 @@ const TABS = [
   { id: "scenes", label: "Scenes" },
   { id: "metadata", label: "Metadata" },
   { id: "thumbnails", label: "Thumbnails" },
+  { id: "voiceover", label: "Voiceover" },
   { id: "render", label: "Render & Export" },
 ];
 
@@ -209,6 +211,17 @@ export default function ProjectDetailPage() {
                 <OverviewTile label="Scenes" ready={scenes.length > 0} sub={scenes.length > 0 ? `${scenes.length} scenes` : "Not generated"} />
                 <OverviewTile label="Metadata" ready={!!metadata} sub={metadata ? `${metadata.title_options?.length || 0} titles` : "Not generated"} />
                 <OverviewTile label="Thumbnails" ready={assets.some(a => a.asset_type === "thumbnail_concept")} sub={`${assets.filter(a => a.asset_type === "thumbnail_concept").length} concepts`} />
+                <OverviewTile
+                  label="Voiceover"
+                  ready={assets.some(a => a.asset_type === "voiceover_audio")}
+                  sub={(() => {
+                    const vos = assets.filter(a => a.asset_type === "voiceover_audio");
+                    const sceneVOs = vos.filter(a => a.scene_id);
+                    const fullVO = vos.find(a => !a.scene_id && a.id === project.selected_voiceover_asset_id);
+                    if (vos.length === 0) return "Not generated";
+                    return `${sceneVOs.length}/${scenes.length} scenes${fullVO ? " · full ready" : ""}`;
+                  })()}
+                />
               </div>
               <SharePanel
                 projectId={project.id}
@@ -233,6 +246,17 @@ export default function ProjectDetailPage() {
               projectId={project.id}
               assets={assets}
               selectedThumbnailId={project.selected_thumbnail_asset_id}
+              canEdit={canEdit}
+              onChange={setView}
+            />
+          )}
+          {tab === "voiceover" && (
+            <VoiceoverPanel
+              projectId={project.id}
+              project={project}
+              scenes={scenes}
+              assets={assets}
+              hasScript={!!script}
               canEdit={canEdit}
               onChange={setView}
             />

@@ -1,0 +1,36 @@
+{
+  "summary": "Phase 5 (Voiceover TTS, mock-first) E2E tested via Playwright against the seeded COMPLETED 'AI trading' project (760aa5f9-2fc0-4142-a348-0ec7ad4362c9). Backend smoke (/api/tts/meta) confirmed mock=true, provider=openai, model=tts-1, default_voice_style=narrator. Frontend: vo-mock-badge visible, vo-style-picker works, 'Dramatic' + generate-full-btn produces a card with Dramatic chip and vo-audio player; per-scene generate via vo-generate-scene-<sid> creates an auto-selected scene card; two full-script VOs + select on each confirms exclusivity (previous loses green 00FF66 ring, new one gains it); reject flips border to #FF3366; vo-download is an <A> with download attr and proper /api/static/audio href; vo-delete opens ConfirmDialog and removes the card. Asset Library voiceover filter shows audio cards. Overview tab voiceover tile renders. Scenes tab shows inline scene-voiceover-<sid> mini players. Public share: enabled via API, /api/public/share/<token> payload includes selected_voiceover with ONLY {preview_url, voice_style, duration} (no provider/cost_estimate/file_path leak); /s/<token> public page renders both hero image and share-voiceover-player. Regression: Dashboard, Projects, Asset Library (all/stock/thumbnails/voiceover filters) all load.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Dashboard (pre-existing carried over from iter 3/4)", "issues": ["Recharts 'width(-1) and height(-1)' warnings on initial Dashboard render — not introduced by Phase 5"]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "VoiceoverPanel.jsx: 'Selected' uses border-[#00FF66] + shadow-[0_0_0_1px_#00FF66] (good visible green ring). Reject uses border-[#FF3366]/40 + opacity-70. The spec description 'green-ring' therefore refers to #00FF66 green, not the brand cyan #00E5FF — matches implementation. No bug.",
+    "Public share payload (/api/public/share/<token>) correctly whitelists selected_voiceover to {preview_url, voice_style, duration} only — provider/cost_estimate/file_path are NOT leaked. Verified by literal key introspection.",
+    "Download uses native <a href=asset.preview_url download> — clean, no JS handler needed. URL points to /api/static/audio/<pid>/<asset_id>.wav served by backend static mount.",
+    "After delete, the <audio> element's src briefly 404s in the console (expected — asset gone, card unmounting); not a user-facing bug but consider unmounting audio before the DELETE request to suppress the console noise.",
+    "Mock badge (vo-mock-badge) is driven off /api/tts/meta.mock; will auto-hide when USE_MOCK_TTS is turned off — good.",
+    "Scene VO auto-selects on creation (observed via green border on newly-generated scene card). Ensure this is documented — behavior is correct for per-scene exclusivity but different from full-script (which requires explicit vo-select-<id>).",
+    "Full-script vs scene exclusivity is enforced server-side: selecting full VO #2 cleared #1's selected state in the DOM after re-fetch — confirms project.selected_voiceover_asset_id single-writer behavior."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (smoke: /api/tts/meta OK; full backend suite not re-run — main agent reported 96/96)", "frontend": "100% on all 12 Phase-5 E2E items + regression"},
+  "test_credentials": "creator@facelessforge.io / creator123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "No new seed. Used existing seeded project 760aa5f9-... Voiceover assets created during testing were cleaned up via the delete flow where practical; a few remain in the seeded project (harmless, already used as select targets). No cross-user pollution.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Phase 5 Voiceover is fully green. For future iterations: target project id for COMPLETED seeded creator project is 760aa5f9-2fc0-4142-a348-0ec7ad4362c9. Voiceover data-testids confirmed: vo-mock-badge, vo-style-picker, vo-style-<id> (narrator|energetic|documentary|calm|dramatic|corporate|mysterious), vo-generate-full-btn, vo-generate-scene-<sceneId>, vo-card-<assetId>, vo-audio-<assetId>, vo-select-<assetId>, vo-reject-<assetId>, vo-download-<assetId> (A tag with download attr), vo-delete-<assetId>. Project detail tab id is tab-voiceover. AssetLibrary filter id is asset-filter-voiceover_audio. Scene inline chip id is scene-voiceover-<sceneId>. Public share player id is share-voiceover-player. Share toggle endpoint: POST /api/projects/{pid}/share {enabled:true} -> {token}. Public payload: /api/public/share/<token>.selected_voiceover = {preview_url, voice_style, duration}. Mock file size caveat: 5-min mock WAV is ~14MB — setting <audio preload='metadata'> already in use, OK. After deleting a VO, console logs a 404 as the audio element tries to re-load the deleted URL during unmount — ignore.",
+  "rca of the issue": "No bugs found in Phase 5. A brief false-negative in my first run was that I asserted the selected-state ring uses color #00E5FF (cyan brand) whereas the implementation uses #00FF66 (green). Re-asserting with #00FF66 confirmed correctness — previous selected card loses 00FF66 ring when a newer full-script VO is selected, demonstrating exclusivity of project.selected_voiceover_asset_id."
+}

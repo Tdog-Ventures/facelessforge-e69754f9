@@ -210,6 +210,12 @@ class GenerateThumbnailImagesRequest(BaseModel):
     variants: int = Field(default=1, ge=1, le=3)
 
 
+# ---------- Voiceover (TTS) ----------
+class GenerateVoiceoverRequest(BaseModel):
+    voice_style: Optional[str] = None  # narrator, energetic, documentary, calm, dramatic, corporate, mysterious
+    text_override: Optional[str] = Field(default=None, max_length=5000)
+
+
 # ---------- Share ----------
 class ShareUpdate(BaseModel):
     title_override: Optional[str] = Field(default=None, max_length=200)

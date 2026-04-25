@@ -46,6 +46,14 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
       (a) => a.scene_id === sceneId && (a.asset_type === "stock_video" || a.asset_type === "stock_image")
     );
 
+  const voiceoverForScene = (sceneId) => {
+    const list = (attachedAssets || []).filter(
+      (a) => a.scene_id === sceneId && a.asset_type === "voiceover_audio"
+    );
+    if (list.length === 0) return null;
+    return list.find((v) => v.status === "selected") || list[0];
+  };
+
   const scenesWithAssets = (scenes || []).filter((s) => assetsForScene(s.id).length > 0).length;
   const scenesWithoutAssets = (scenes || []).length - scenesWithAssets;
 
@@ -174,7 +182,33 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
                   <td className="px-4 py-3 font-mono text-xs text-zinc-400">
                     {formatDuration(s.start_time)} → {formatDuration(s.end_time)}
                   </td>
-                  <td className="px-4 py-3 text-zinc-200 leading-relaxed">{s.narration_text}</td>
+                  <td className="px-4 py-3 text-zinc-200 leading-relaxed">
+                    {s.narration_text}
+                    {(() => {
+                      const v = voiceoverForScene(s.id);
+                      if (!v) return null;
+                      return (
+                        <div data-testid={`scene-voiceover-${s.id}`} className="mt-2 flex items-center gap-2">
+                          <span
+                            className="font-mono text-[9px] uppercase tracking-widest px-1.5 py-0.5 rounded-sm border"
+                            style={{
+                              color: "#FF66CC",
+                              background: "rgba(255,102,204,0.1)",
+                              borderColor: "rgba(255,102,204,0.4)",
+                            }}
+                          >
+                            VO · {v.voice_style}
+                          </span>
+                          <audio
+                            src={v.preview_url}
+                            controls
+                            preload="none"
+                            className="h-8 max-w-[260px]"
+                          />
+                        </div>
+                      );
+                    })()}
+                  </td>
                   <td className="px-4 py-3">
                     <div className="text-zinc-300 mb-1">{s.visual_direction}</div>
                     <div className="font-mono text-[10px] uppercase tracking-widest text-[#7B61FF]">
