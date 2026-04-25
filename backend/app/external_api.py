@@ -84,6 +84,17 @@ class ExternalStatusResponse(BaseModel):
     error: Optional[str]
 
 
+class ExternalCancelRequest(BaseModel):
+    job_id: str = Field(min_length=8, max_length=64)
+
+
+class ExternalCancelResponse(BaseModel):
+    job_id: str
+    project_id: str
+    status: str  # "cancelled" | "completed" | "failed"
+    already_terminal: bool = False
+
+
 # ============================ AUTH ============================
 
 def _enabled() -> bool:
@@ -448,3 +459,49 @@ async def external_render_status(
         height=1080,
         error=job.get("error_message"),
     )
+
+
+@router.post("/render-video/cancel", response_model=ExternalCancelResponse)
+async def external_render_cancel(
+    body: ExternalCancelRequest = Body(...),
+    x_facelessforge_key: Optional[str] = Header(default=None, alias="X-FacelessForge-Key"),
+):
+    """Cancel an active render job. Idempotent — already-terminal jobs return
+    their current state with `already_terminal=true` (no error)."""
+    _require_external_key(x_facelessforge_key)
+    db = get_db()
+    job = await db.render_jobs.find_one({"id": body.job_id}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    internal_status = job.get("status", "")
+    public = _PUBLIC_STATUS_MAP.get(internal_status, internal_status)
+
+    # Idempotent fast-path for already-terminal states
+    if internal_status in ("cancelled", "completed", "failed", "expired_artifact"):
+        return ExternalCancelResponse(
+            job_id=job["id"],
+            project_id=job["project_id"],
+            status=public,
+            already_terminal=True,
+        )
+
+    ok = await render_service.cancel_render(job["project_id"], job["id"])
+    # Re-read job to surface the post-cancel state authoritatively
+    job = await db.render_jobs.find_one({"id": body.job_id}, {"_id": 0}) or job
+    if not ok:
+        # Race: job may have flipped to terminal between fetch and cancel.
+        public = _PUBLIC_STATUS_MAP.get(job.get("status", ""), job.get("status", ""))
+        if public in ("completed", "failed", "cancelled", "expired"):
+            return ExternalCancelResponse(
+                job_id=job["id"], project_id=job["project_id"],
+                status=public, already_terminal=True,
+            )
+        raise HTTPException(status_code=409, detail="Job is not cancellable in its current state.")
+    return ExternalCancelResponse(
+        job_id=job["id"],
+        project_id=job["project_id"],
+        status=_PUBLIC_STATUS_MAP.get(job.get("status", ""), "cancelled"),
+        already_terminal=False,
+    )
+

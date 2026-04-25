@@ -174,6 +174,13 @@ Build a production-ready SaaS web app **FacelessForge**: a creator-first faceles
 - New: `/app/backend/app/external_api.py`
 - Modified: `/app/backend/server.py` (router include), `/app/backend/.env` (added 2 keys), `/app/backend/tests/backend_test.py` (+`TestExternalRenderAPI`)
 
+### Phase 9b — External cancel endpoint (2026-02)
+- [x] **`POST /api/external/render-video/cancel`** — same `X-FacelessForge-Key` auth, body `{job_id: str}`. Resolves job → project, then calls existing `render_service.cancel_render(project_id, job_id)`. Render pipeline untouched.
+- [x] **Idempotent**: terminal jobs (`completed`/`failed`/`cancelled`/`expired_artifact`) return 200 with `already_terminal: true` and the current public status. Race between fetch and cancel handled — flips during the window are surfaced as terminal too.
+- [x] **Errors**: missing key → 401, invalid key → 401, disabled → 404, unknown job → 404, malformed body → 422.
+- [x] **No leak**: response carries only `{job_id, project_id, status, already_terminal}`.
+- [x] **Tests**: +6 `TestExternalRenderCancel` (missing key, invalid key, unknown job 404, validation 422, active-job cancel + idempotent retry, completed-job idempotent). **147/147 backend pytest pass** in 338s.
+
 ### Deep health response shape
 ```json
 {

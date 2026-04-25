@@ -2563,3 +2563,117 @@ class TestExternalRenderAPI:
         finally:
             mc.close()
 
+
+
+class TestExternalRenderCancel:
+    """External cancel endpoint — same key auth, idempotent, no pipeline change."""
+
+    BASE = f"{BASE_URL}/api/external"
+
+    @pytest.fixture(scope="class")
+    def ext_key(self):
+        from dotenv import load_dotenv
+        load_dotenv("/app/backend/.env")
+        k = os.environ.get("EXTERNAL_RENDER_API_KEY")
+        assert k, "EXTERNAL_RENDER_API_KEY required"
+        return k
+
+    @pytest.fixture
+    def short_payload(self):
+        return {
+            "title": "TEST_ext_cancel small",
+            "script": "Cancel test. Two short scenes.",
+            "scene_breakdown": [
+                {"scene_number": 1, "duration": 5,
+                 "narration_text": "Scene one cancel test.",
+                 "caption_text": "one"},
+                {"scene_number": 2, "duration": 5,
+                 "narration_text": "Scene two cancel test.",
+                 "caption_text": "two"},
+            ],
+        }
+
+    def test_cancel_missing_key_rejected(self):
+        r = requests.post(f"{self.BASE}/render-video/cancel",
+                          json={"job_id": "abcdefghij"}, timeout=15)
+        assert r.status_code == 401
+
+    def test_cancel_invalid_key_rejected(self):
+        r = requests.post(f"{self.BASE}/render-video/cancel",
+                          json={"job_id": "abcdefghij"},
+                          headers={"X-FacelessForge-Key": "bad-key"}, timeout=15)
+        assert r.status_code == 401
+
+    def test_cancel_unknown_job_404(self, ext_key):
+        r = requests.post(f"{self.BASE}/render-video/cancel",
+                          json={"job_id": "unknown-job-xxxx"},
+                          headers={"X-FacelessForge-Key": ext_key}, timeout=15)
+        assert r.status_code == 404
+
+    def test_cancel_validation_short_job_id(self, ext_key):
+        r = requests.post(f"{self.BASE}/render-video/cancel",
+                          json={"job_id": "x"},
+                          headers={"X-FacelessForge-Key": ext_key}, timeout=15)
+        assert r.status_code == 422
+
+    def test_cancel_active_job_succeeds(self, ext_key, short_payload):
+        # Queue a render
+        r = requests.post(f"{self.BASE}/render-video", json=short_payload,
+                          headers={"X-FacelessForge-Key": ext_key}, timeout=120)
+        assert r.status_code == 200, r.text
+        job_id = r.json()["job_id"]
+        project_id = r.json()["project_id"]
+
+        # Cancel before it finishes
+        c = requests.post(f"{self.BASE}/render-video/cancel",
+                          json={"job_id": job_id},
+                          headers={"X-FacelessForge-Key": ext_key}, timeout=15)
+        assert c.status_code == 200, c.text
+        cd = c.json()
+        assert cd["job_id"] == job_id
+        assert cd["project_id"] == project_id
+        assert cd["status"] in ("cancelled", "completed")
+        assert "file_path" not in repr(cd)
+        assert "/app/backend/" not in repr(cd)
+
+        # Idempotent — same call again must not error
+        c2 = requests.post(f"{self.BASE}/render-video/cancel",
+                           json={"job_id": job_id},
+                           headers={"X-FacelessForge-Key": ext_key}, timeout=15)
+        assert c2.status_code == 200, c2.text
+        cd2 = c2.json()
+        assert cd2["status"] in ("cancelled", "completed")
+        assert cd2["already_terminal"] is True
+
+        # Status endpoint reflects terminal state
+        s = requests.get(f"{self.BASE}/render-video-status?job_id={job_id}",
+                         headers={"X-FacelessForge-Key": ext_key}, timeout=15).json()
+        assert s["status"] in ("cancelled", "completed")
+
+    def test_cancel_completed_job_idempotent(self, ext_key, short_payload):
+        # Queue + wait for completion
+        r = requests.post(f"{self.BASE}/render-video", json=short_payload,
+                          headers={"X-FacelessForge-Key": ext_key}, timeout=120)
+        assert r.status_code == 200
+        job_id = r.json()["job_id"]
+        # Poll up to 90s
+        final_status = None
+        for _ in range(45):
+            time.sleep(2)
+            s = requests.get(f"{self.BASE}/render-video-status?job_id={job_id}",
+                             headers={"X-FacelessForge-Key": ext_key}, timeout=15).json()
+            if s["status"] in ("completed", "failed", "cancelled"):
+                final_status = s["status"]
+                break
+        assert final_status, "render did not finish in time"
+
+        # Cancel a terminal job — idempotent success with already_terminal=true
+        c = requests.post(f"{self.BASE}/render-video/cancel",
+                          json={"job_id": job_id},
+                          headers={"X-FacelessForge-Key": ext_key}, timeout=15)
+        assert c.status_code == 200
+        cd = c.json()
+        assert cd["job_id"] == job_id
+        assert cd["already_terminal"] is True
+        assert cd["status"] == final_status
+
