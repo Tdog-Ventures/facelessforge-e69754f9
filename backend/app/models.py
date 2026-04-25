@@ -216,6 +216,12 @@ class GenerateVoiceoverRequest(BaseModel):
     text_override: Optional[str] = Field(default=None, max_length=5000)
 
 
+# ---------- Render ----------
+class RenderStartRequest(BaseModel):
+    # Server constructs all ffmpeg args; this body intentionally has no codec/args fields.
+    force: Optional[bool] = False  # allow concurrent renders if explicitly forced (admin/owner)
+
+
 # ---------- Share ----------
 class ShareUpdate(BaseModel):
     title_override: Optional[str] = Field(default=None, max_length=200)

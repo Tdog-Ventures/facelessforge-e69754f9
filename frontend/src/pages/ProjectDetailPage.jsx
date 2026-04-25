@@ -222,7 +222,32 @@ export default function ProjectDetailPage() {
                     return `${sceneVOs.length}/${scenes.length} scenes${fullVO ? " · full ready" : ""}`;
                   })()}
                 />
+                <OverviewTile
+                  label="Final video"
+                  ready={!!render_job && render_job.status === "completed" && !!render_job.output_url}
+                  sub={
+                    render_job && render_job.status === "completed" && render_job.output_url
+                      ? `MP4 ready · ${render_job.duration ? `${Math.round(render_job.duration)}s` : ""}`
+                      : render_job && ["queued","validating","preparing_assets","rendering"].includes(render_job.status)
+                      ? `Rendering · ${render_job.progress || 0}%`
+                      : "Not rendered"
+                  }
+                />
               </div>
+              {render_job?.status === "completed" && render_job.output_url && (
+                <div data-testid="overview-final-video" className="border border-[#00FF66]/30 bg-[#00FF66]/5 rounded-sm p-4 space-y-3">
+                  <div className="font-mono text-[10px] uppercase tracking-widest text-[#00FF66]">
+                    Final video · ready
+                  </div>
+                  <video
+                    controls
+                    src={render_job.output_url}
+                    poster={assets.find(a => a.id === project.selected_thumbnail_asset_id)?.preview_url}
+                    preload="metadata"
+                    className="w-full rounded-sm border border-zinc-800 bg-black aspect-video"
+                  />
+                </div>
+              )}
               <SharePanel
                 projectId={project.id}
                 share={share}
@@ -269,7 +294,6 @@ export default function ProjectDetailPage() {
               scenes={scenes}
               metadata={metadata}
               assets={assets}
-              renderJob={render_job}
               canEdit={canEdit}
               onChange={setView}
             />

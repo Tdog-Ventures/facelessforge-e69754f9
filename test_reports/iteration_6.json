@@ -1,0 +1,30 @@
+{
+  "summary": "Phase 6 (ffmpeg render queue) frontend E2E verified on the seeded COMPLETED 'AI trading' project (760aa5f9-2fc0-4142-a348-0ec7ad4362c9). Login as creator -> /app/projects/<id> -> tab-render. render-checklist shows all 6 prerequisite tiles (pre-script, pre-scenes, pre-metadata, pre-thumbnail, pre-voiceover, pre-scene_assets) all green. render-preview-thumbnail (<img>) and render-preview-voiceover (<audio>) both visible. render-start-btn enabled; click triggered render-job-preparing_assets with render-cancel-btn visible throughout. Progress polled every 2.5s and advanced 49->53->58->62->66->71->75->80% then flipped to completed at ~177s. render-job-completed container contains render-output with render-video-player (<video src https://.../api/static/renders/760aa5f9.../3309af74-....mp4 poster=thumbnail), render-download-btn is an <A> with download='AI_Is_Quietly_Replacing_Stock_Traders.mp4' and /api/static/renders/ href, and render-retry-btn present. Overview tab shows overview-final-video with embedded <video>. Toast 'Render complete / MP4 ready below.' displayed. Public share: enabled via share-enable-btn; /s/<token> renders share-final-video (<VIDEO> tag) inside share-hero-thumbnail container with poster=selected_thumbnail and src under /api/static/renders/. /api/public/share/<token>.final_video keys = ['url','duration','width','height'] — NO file_path leak. Regression: tab-script, tab-scenes, tab-metadata, tab-thumbnails, tab-voiceover, tab-render, tab-overview all clickable; /app/assets loads with asset-filter-voiceover_audio present.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Dashboard (pre-existing, carried over)", "issues": ["Recharts width(-1)/height(-1) warnings — unchanged from prior iterations"]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/backend_test.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "RenderPanel polling cadence is 2500ms (matches spec '2.5s'). TERMINAL states wired correctly — on completion, preflight+jobs+full project are re-fetched and onChange(full) bubbles to parent so Overview tile reflects final_video immediately. Good.",
+    "render-download-btn is a native <a href=output_url download=<name>.mp4> — no JS handler, clean. 'download' attribute is respected same-origin.",
+    "Public share final_video shape is correctly whitelisted to {url, duration, width, height}. file_path is NOT leaked. Verified on live token.",
+    "When a previous cancelled job exists, RenderPanel shows it as the latest activeJob on mount. Start button remains enabled because cancelled is not in ACTIVE_STATES (correct).",
+    "Tooltip on disabled render-start-btn uses native HTML title attribute — readable but not screenshotable in Playwright; consider a ShadCN Tooltip for better a11y/testability in a future iteration.",
+    "No retry/backoff logic on the polling fetch — silent retries only. A 2-minute backend outage would keep the UI stuck in the last known state forever; low priority."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "not re-tested (108/108 reported by main agent)", "frontend": "11/12 Phase-6 items fully verified; 1 item (negative test on a blank project) partially verified via code review only — see note"},
+  "test_credentials": "creator@facelessforge.io / creator123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "No new seed. Used existing COMPLETED project 760aa5f9-2fc0-4142-a348-0ec7ad4362c9. One render job created during this run (3309af74-c613-4595-b738-3381e6f8cca8.mp4 under /api/static/renders/760aa5f9-...). Public share token regenerated (fBnG6KxHdUbU48g5h-NoHzhEtmEGQl-U). No cleanup needed.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Render testids confirmed live: tab-render, render-checklist, pre-script|scenes|metadata|thumbnail|voiceover|scene_assets (class includes #00FF66 when ok, #FF3366 when failing), render-preview-thumbnail, render-preview-voiceover, render-start-btn, render-cancel-btn, render-job-<status> where status ∈ {queued,validating,preparing_assets,rendering,completed,failed,cancelled}, render-error, render-output, render-video-player, render-download-btn (<A> with download attr), render-retry-btn, render-refresh, render-history-<jobId>, export-package-zip. Render duration for the 16-scene seeded project ≈ 3 minutes end-to-end. Share testids: share-panel, share-enable-btn, share-url-input, share-copy-btn, share-open-btn, share-regenerate-btn, share-disable-btn. Public page: share-hero-thumbnail, share-final-video (<VIDEO> w/ poster), share-voiceover-player, share-display-title. Overview tile: overview-final-video (contains <video>). /api/public/share/<token>.final_video shape is {url, duration, width, height}.",
+  "partial_coverage_note": "The 'blank project' negative test was NOT executed end-to-end: (a) UI CreateProject form submit did not advance (unknown required field testids) and (b) direct POST /api/projects via page.request returned 422 with the naive payload used. The start-btn disabled state + tooltip + 'Missing requirements' toast path was verified by code inspection of RenderPanel.jsx (disabled={!canRender||starting}, title=`Missing: ${issues.join(', ')}`, toast.error('Cannot start render', {description: detail.issues.join(' · ')}) when backend returns {issues:[...]}). Recommend main agent or next testing agent re-run the negative path after confirming the Project create schema fields (e.g., sub_niche, description, keywords) required by Pydantic.",
+  "rca of the issue": "No bugs. Everything rendered and served as designed."
+}

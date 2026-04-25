@@ -1104,6 +1104,87 @@ async def delete_voiceover(project_id: str, asset_id: str, user=Depends(get_curr
     return await _attach_project_view(db, await db.projects.find_one({"id": project_id}, {"_id": 0}))
 
 
+# ============================ RENDER QUEUE (Phase 6) ============================
+from . import render as render_service
+from .models import RenderStartRequest
+
+
+@router.get("/projects/{project_id}/render/preflight")
+async def render_preflight(project_id: str, user=Depends(get_current_user)):
+    """Return validation checklist for the render UI."""
+    db = get_db()
+    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    _ensure_project_access(project, user)
+    script = await db.scripts.find_one({"project_id": project_id}, {"_id": 0})
+    scenes = await db.scenes.find({"project_id": project_id}, {"_id": 0}).sort("scene_number", 1).to_list(500)
+    metadata = await db.metadata_packages.find_one({"project_id": project_id}, {"_id": 0})
+    assets = await db.assets.find({"project_id": project_id}, {"_id": 0}).to_list(500)
+    return render_service.validate_prerequisites(project, script, scenes, metadata, assets)
+
+
+@router.post("/projects/{project_id}/render/start")
+async def render_start(project_id: str,
+                       body: RenderStartRequest = Body(default=None),
+                       user=Depends(get_current_user)):
+    db = get_db()
+    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    _ensure_project_access(project, user, write=True)
+    if user["role"] == "viewer":
+        raise HTTPException(status_code=403, detail="Viewer cannot start renders")
+    # Validate prereqs first so caller gets a clean 400 before queuing
+    script = await db.scripts.find_one({"project_id": project_id}, {"_id": 0})
+    scenes = await db.scenes.find({"project_id": project_id}, {"_id": 0}).sort("scene_number", 1).to_list(500)
+    metadata = await db.metadata_packages.find_one({"project_id": project_id}, {"_id": 0})
+    assets = await db.assets.find({"project_id": project_id}, {"_id": 0}).to_list(500)
+    check = render_service.validate_prerequisites(project, script, scenes, metadata, assets)
+    if not check["ok"]:
+        raise HTTPException(status_code=400, detail={
+            "message": "Render prerequisites not met",
+            "issues": check["issues"],
+            "checklist": check["checklist"],
+        })
+    try:
+        job = await render_service.queue_render(project_id, requested_by=user["id"])
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return _ser(job)
+
+
+@router.get("/projects/{project_id}/render/jobs")
+async def render_list_jobs(project_id: str, user=Depends(get_current_user)):
+    db = get_db()
+    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    _ensure_project_access(project, user)
+    jobs = await db.render_jobs.find({"project_id": project_id}, {"_id": 0})\
+        .sort("created_at", -1).to_list(50)
+    return [_ser(j) for j in jobs]
+
+
+@router.get("/projects/{project_id}/render/jobs/{job_id}")
+async def render_get_job(project_id: str, job_id: str, user=Depends(get_current_user)):
+    db = get_db()
+    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    _ensure_project_access(project, user)
+    job = await db.render_jobs.find_one({"id": job_id, "project_id": project_id}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Render job not found")
+    return _ser(job)
+
+
+@router.post("/projects/{project_id}/render/jobs/{job_id}/cancel")
+async def render_cancel_job(project_id: str, job_id: str, user=Depends(get_current_user)):
+    db = get_db()
+    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    _ensure_project_access(project, user, write=True)
+    if user["role"] == "viewer":
+        raise HTTPException(status_code=403, detail="Viewer cannot cancel renders")
+    ok = await render_service.cancel_render(project_id, job_id)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Job is not cancellable in its current state.")
+    job = await db.render_jobs.find_one({"id": job_id, "project_id": project_id}, {"_id": 0})
+    return _ser(job)
+
+
 # ============================ EXPORTS ============================
 
 @router.get("/projects/{project_id}/export/script.txt")
@@ -1190,6 +1271,27 @@ async def export_package_zip(project_id: str, user=Depends(get_current_user)):
                         "selected_for_project": (project.get("selected_voiceover_asset_id") == v.get("id")),
                     })
                 zf.writestr("voiceovers.json", json.dumps(summary, indent=2, default=str))
+        # Final render metadata (latest completed) — never include internal file_path
+        latest = await db.render_jobs.find_one(
+            {"project_id": project_id, "status": "completed", "output_url": {"$ne": None}},
+            {"_id": 0},
+            sort=[("completed_at", -1)],
+        )
+        if latest:
+            zf.writestr("render.json", json.dumps({
+                "job_id": latest.get("id"),
+                "status": latest.get("status"),
+                "duration": latest.get("duration"),
+                "file_size": latest.get("file_size"),
+                "url": latest.get("output_url"),
+                "completed_at": (latest.get("completed_at").isoformat()
+                    if isinstance(latest.get("completed_at"), datetime) else latest.get("completed_at")),
+                "width": 1920,
+                "height": 1080,
+                "fps": 30,
+                "video_codec": "h264",
+                "audio_codec": "aac",
+            }, indent=2, default=str))
         zf.writestr("README.md",
             f"# {project['name']}\n\nGenerated with FacelessForge.\n\n"
             f"- Niche: {project['niche']}\n- Topic: {project['topic']}\n"
@@ -1413,6 +1515,13 @@ async def public_share(token: str):
             {"_id": 0},
         )
 
+    # Latest completed render job (final video)
+    final_render = await db.render_jobs.find_one(
+        {"project_id": project["id"], "status": "completed", "output_url": {"$ne": None}},
+        {"_id": 0},
+        sort=[("completed_at", -1)],
+    )
+
     # Increment view count and update last viewed
     await db.projects.update_one(
         {"id": project["id"]},
@@ -1450,6 +1559,12 @@ async def public_share(token: str):
             "duration": selected_voice.get("duration"),
             "voice_style": selected_voice.get("voice_style"),
         } if selected_voice else None),
+        "final_video": ({
+            "url": final_render.get("output_url"),
+            "duration": final_render.get("duration"),
+            "width": 1920,
+            "height": 1080,
+        } if final_render else None),
         "shared_at": project.get("updated_at").isoformat()
             if isinstance(project.get("updated_at"), datetime) else project.get("updated_at"),
     }

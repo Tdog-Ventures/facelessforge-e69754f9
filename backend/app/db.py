@@ -35,6 +35,8 @@ async def ensure_indexes():
     await db.metadata_packages.create_index("project_id", unique=True)
     await db.assets.create_index("project_id")
     await db.render_jobs.create_index("project_id")
+    await db.render_jobs.create_index([("project_id", 1), ("status", 1)])
+    await db.render_jobs.create_index("created_at")
     await db.cost_logs.create_index("project_id")
     await db.provider_settings.create_index("user_id")
     await db.login_attempts.create_index("identifier")

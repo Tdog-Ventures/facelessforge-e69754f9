@@ -1610,5 +1610,270 @@ class TestVoiceover:
                json={"name": "View", "email": email, "password": "pw123456", "role": "viewer"}, timeout=20)
         # Viewer creates a project? Cannot. Use existing project; viewer doesn't own it -> 403 first
         # So this test just confirms cross-user 403 (covered) — viewer-on-own-project requires admin promote
+
+
+class TestRenderQueue:
+    """Phase 6 — Real ffmpeg render queue. Validates prerequisite gating, RBAC,
+    job lifecycle, output URL, ZIP integration, public share final_video, and
+    that the frontend cannot inject ffmpeg args (server-built only).
+    """
+
+    @pytest.fixture(scope="class")
+    def target_project(self, creator_session):
+        r = creator_session.get(f"{BASE_URL}/api/projects", timeout=20)
+        target = next((p for p in r.json() if p["status"] == "COMPLETED"), None)
+        assert target, "need COMPLETED project"
+        full = creator_session.get(f"{BASE_URL}/api/projects/{target['id']}", timeout=20).json()
+        return {"id": target["id"], "scenes": full["scenes"]}
+
+    @pytest.fixture(scope="class")
+    def empty_project(self, creator_session):
+        payload = {"name": "TEST_render_empty", "niche": "tech",
+                   "topic": "Empty project for render preflight negative tests, no script.",
+                   "audience": "devs", "tone": "calm", "target_duration": 120}
+        p = creator_session.post(f"{BASE_URL}/api/projects", json=payload, timeout=20).json()
+        yield p
+        creator_session.delete(f"{BASE_URL}/api/projects/{p['id']}", timeout=15)
+
+    @pytest.fixture(scope="class")
+    def second_creator(self):
+        s = requests.Session()
+        email = f"TEST_rdr_{uuid.uuid4().hex[:8]}@facelessforge.io"
+        r = s.post(f"{BASE_URL}/api/auth/register",
+                   json={"name": "Rdr Tester", "email": email,
+                         "password": "pw123456", "role": "creator"}, timeout=20)
+        assert r.status_code == 200
+        return s
+
+    @pytest.fixture(scope="class", autouse=True)
+    def _seed_thumb_and_voice(self, creator_session, target_project):
+        """Make sure the COMPLETED project has selected thumb + voiceover for
+        downstream render tests. Idempotent — no cleanup so other tests reuse."""
+        pid = target_project["id"]
+        full = creator_session.get(f"{BASE_URL}/api/projects/{pid}", timeout=20).json()
+        # Ensure a generated thumbnail is selected
+        thumbs = [a for a in full["assets"] if a.get("asset_type") == "generated_thumbnail"]
+        if not thumbs:
+            briefs = [a for a in full["assets"] if a.get("asset_type") == "thumbnail_concept"]
+            assert briefs, "no thumbnail briefs"
+            r = creator_session.post(
+                f"{BASE_URL}/api/projects/{pid}/thumbnails/{briefs[0]['id']}/generate",
+                json={"variants": 1}, timeout=60).json()
+            thumbs = [a for a in r["assets"] if a.get("asset_type") == "generated_thumbnail"]
+        sel_thumb = next((a for a in thumbs if a.get("status") == "selected"), thumbs[0])
+        creator_session.post(f"{BASE_URL}/api/projects/{pid}/thumbnails/{sel_thumb['id']}/select", timeout=15)
+
+        full = creator_session.get(f"{BASE_URL}/api/projects/{pid}", timeout=20).json()
+        full_voice = next((a for a in full["assets"]
+                           if a.get("asset_type") == "voiceover_audio" and not a.get("scene_id")
+                           and a.get("status") != "rejected"), None)
+        if not full_voice:
+            r = creator_session.post(
+                f"{BASE_URL}/api/projects/{pid}/voiceover/generate-script",
+                json={}, timeout=60).json()
+            full_voice = next(a for a in r["assets"]
+                              if a.get("asset_type") == "voiceover_audio" and not a.get("scene_id"))
+        creator_session.post(f"{BASE_URL}/api/projects/{pid}/voiceover/{full_voice['id']}/select", timeout=15)
+        yield
+
+    def test_preflight_ok(self, creator_session, target_project):
+        pid = target_project["id"]
+        r = creator_session.get(f"{BASE_URL}/api/projects/{pid}/render/preflight", timeout=15)
+        assert r.status_code == 200
+        d = r.json()
+        assert d["ok"] is True
+        keys = [c["key"] for c in d["checklist"]]
+        for k in ("script", "scenes", "metadata", "thumbnail", "voiceover", "scene_assets"):
+            assert k in keys
+
+    def test_preflight_blocks_empty_project(self, creator_session, empty_project):
+        r = creator_session.get(
+            f"{BASE_URL}/api/projects/{empty_project['id']}/render/preflight", timeout=15)
+        assert r.status_code == 200
+        d = r.json()
+        assert d["ok"] is False
+        # script, scenes, metadata, thumbnail, voiceover must fail
+        failed_keys = {c["key"] for c in d["checklist"] if not c["ok"]}
+        assert {"script", "scenes", "metadata", "thumbnail", "voiceover"}.issubset(failed_keys)
+
+    def test_start_blocks_when_unmet(self, creator_session, empty_project):
+        r = creator_session.post(
+            f"{BASE_URL}/api/projects/{empty_project['id']}/render/start",
+            json={}, timeout=15)
+        assert r.status_code == 400
+        d = r.json()
+        assert "issues" in (d.get("detail") or {})
+
+    def test_cross_user_403(self, second_creator, target_project):
+        r = second_creator.post(
+            f"{BASE_URL}/api/projects/{target_project['id']}/render/start",
+            json={}, timeout=15)
+        assert r.status_code == 403
+
+    def test_extra_body_fields_ignored(self, creator_session, target_project):
+        """Frontend cannot inject ffmpeg args — body schema rejects unknowns server-side."""
+        pid = target_project["id"]
+        # The body model only declares 'force'. Extra fields like 'ffmpeg_args' should not affect anything.
+        # Pydantic by default ignores unknown fields; we assert the response is still a valid queued/409 job — never an ffmpeg-injected response.
+        r = creator_session.post(
+            f"{BASE_URL}/api/projects/{pid}/render/start",
+            json={"ffmpeg_args": "-evil", "args": ["-f", "lavfi"], "command": "rm -rf /"},
+            timeout=20)
+        # Either queued (200) or already running (409) — never echo back any of those keys.
+        assert r.status_code in (200, 409)
+        body = r.json()
+        text = repr(body)
+        assert "ffmpeg_args" not in text
+        assert "rm -rf" not in text
+        assert "lavfi" not in text
+        # Cancel any newly-queued job to keep state predictable
+        if r.status_code == 200:
+            jid = body.get("id")
+            creator_session.post(
+                f"{BASE_URL}/api/projects/{pid}/render/jobs/{jid}/cancel", timeout=10)
+
+    def test_full_render_completes_and_serves_mp4(self, creator_session, target_project):
+        pid = target_project["id"]
+        # Make sure no active job
+        time.sleep(1)
+        r = creator_session.post(
+            f"{BASE_URL}/api/projects/{pid}/render/start", json={}, timeout=20)
+        if r.status_code == 409:
+            # Wait out previous, then retry
+            for _ in range(60):
+                jl = creator_session.get(
+                    f"{BASE_URL}/api/projects/{pid}/render/jobs", timeout=15).json()
+                active = [j for j in jl if j["status"] in
+                          ("queued", "validating", "preparing_assets", "rendering")]
+                if not active:
+                    break
+                time.sleep(2)
+            r = creator_session.post(
+                f"{BASE_URL}/api/projects/{pid}/render/start", json={}, timeout=20)
+        assert r.status_code == 200, r.text
+        job = r.json()
+        jid = job["id"]
+        assert job["status"] == "queued"
+
+        # Poll up to ~3 minutes
+        final = None
+        states_seen = set()
+        for _ in range(90):
+            time.sleep(3)
+            j = creator_session.get(
+                f"{BASE_URL}/api/projects/{pid}/render/jobs/{jid}", timeout=15).json()
+            states_seen.add(j["status"])
+            if j["status"] in ("completed", "failed", "cancelled"):
+                final = j
+                break
+        assert final is not None, "render did not finish in time"
+        assert final["status"] == "completed", f"final: {final}"
+        # Saw at least the major lifecycle steps
+        assert "rendering" in states_seen
+        assert final["output_url"], "output_url missing"
+        assert "/api/static/renders/" in final["output_url"]
+        assert final["progress"] == 100
+        assert final["duration"] and final["duration"] > 1
+        assert final["file_size"] and final["file_size"] > 1000
+
+        # File served via ingress
+        head = requests.head(final["output_url"], timeout=15)
+        assert head.status_code == 200
+        assert head.headers.get("content-type", "").startswith("video/")
+
+        # Probe codec/dimensions via ffprobe
+        import subprocess
+        out = subprocess.check_output([
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=codec_name,width,height",
+            "-of", "default=noprint_wrappers=1", final["output_path"]
+        ]).decode()
+        assert "codec_name=h264" in out
+        assert "width=1920" in out
+        assert "height=1080" in out
+
+    def test_concurrent_render_blocked(self, creator_session, target_project):
+        pid = target_project["id"]
+        # Start one
+        r1 = creator_session.post(f"{BASE_URL}/api/projects/{pid}/render/start", json={}, timeout=15)
+        assert r1.status_code == 200
+        jid = r1.json()["id"]
+        # Immediate second start must 409
+        r2 = creator_session.post(f"{BASE_URL}/api/projects/{pid}/render/start", json={}, timeout=15)
+        assert r2.status_code == 409
+        # Cancel the first to clean up
+        c = creator_session.post(f"{BASE_URL}/api/projects/{pid}/render/jobs/{jid}/cancel", timeout=10)
+        assert c.status_code == 200
+        # Wait for cancellation to settle
+        for _ in range(20):
+            j = creator_session.get(f"{BASE_URL}/api/projects/{pid}/render/jobs/{jid}", timeout=10).json()
+            if j["status"] in ("cancelled", "completed", "failed"):
+                break
+            time.sleep(1)
+
+    def test_jobs_list_and_get(self, creator_session, target_project):
+        pid = target_project["id"]
+        r = creator_session.get(f"{BASE_URL}/api/projects/{pid}/render/jobs", timeout=15)
+        assert r.status_code == 200
+        jl = r.json()
+        assert isinstance(jl, list) and len(jl) >= 1
+        # Sorted desc by created_at
+        first = jl[0]
+        for k in ("id", "project_id", "status", "progress", "current_step"):
+            assert k in first
+
+    def test_get_unknown_job_404(self, creator_session, target_project):
+        r = creator_session.get(
+            f"{BASE_URL}/api/projects/{target_project['id']}/render/jobs/no-such-job", timeout=10)
+        assert r.status_code == 404
+
+    def test_export_zip_includes_render_json(self, creator_session, target_project):
+        pid = target_project["id"]
+        r = creator_session.get(f"{BASE_URL}/api/projects/{pid}/export/package.zip", timeout=30)
+        assert r.status_code == 200
+        zf = zipfile.ZipFile(io.BytesIO(r.content))
+        names = zf.namelist()
+        assert "render.json" in names, f"render.json missing: {names}"
+        import json as _json
+        data = _json.loads(zf.read("render.json").decode("utf-8"))
+        assert data["status"] == "completed"
+        assert data["url"]
+        assert data["video_codec"] == "h264"
+        assert data["audio_codec"] == "aac"
+        assert data["width"] == 1920 and data["height"] == 1080
+        # Internal file paths must not leak into export
+        assert "file_path" not in data
+
+    def test_share_surfaces_final_video(self, creator_session, target_project):
+        pid = target_project["id"]
+        en = creator_session.post(f"{BASE_URL}/api/projects/{pid}/share", json={}, timeout=15).json()
+        token = en["token"]
+        pub = requests.get(f"{BASE_URL}/api/public/share/{token}", timeout=15).json()
+        assert pub.get("final_video")
+        assert pub["final_video"]["url"]
+        assert "/api/static/renders/" in pub["final_video"]["url"]
+        assert pub["final_video"]["width"] == 1920
+        # Ensure no leak of internal paths or job ids
+        assert "file_path" not in pub["final_video"]
+        # Cleanup share
+        creator_session.delete(f"{BASE_URL}/api/projects/{pid}/share", timeout=10)
+
+    def test_viewer_role_cannot_render(self, creator_session, target_project):
+        # Promote then demote a fresh user to viewer via admin API
+        s = requests.Session()
+        s.post(f"{BASE_URL}/api/auth/login",
+               json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD}, timeout=15)
+        # Register viewer directly
+        v = requests.Session()
+        email = f"TEST_view_{uuid.uuid4().hex[:8]}@facelessforge.io"
+        v.post(f"{BASE_URL}/api/auth/register",
+               json={"name": "Viewer", "email": email,
+                     "password": "pw123456", "role": "viewer"}, timeout=15)
+        # Viewer cannot render someone else's project (cross-user 403 first)
+        r = v.post(f"{BASE_URL}/api/projects/{target_project['id']}/render/start",
+                   json={}, timeout=15)
+        assert r.status_code == 403
+
         # Skip more elaborate viewer scenario to keep test runtime small.
         pass

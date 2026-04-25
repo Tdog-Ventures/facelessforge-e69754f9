@@ -131,7 +131,7 @@ export default function PublicSharePage() {
     );
   }
 
-  const { display_title, project_name, niche, status, quality_score, metadata, thumbnails, selected_thumbnail_url, selected_voiceover } = data;
+  const { display_title, project_name, niche, status, quality_score, metadata, thumbnails, selected_thumbnail_url, selected_voiceover, final_video } = data;
   const color = qualityColor(quality_score);
 
   return (
@@ -153,13 +153,25 @@ export default function PublicSharePage() {
 
           {selected_thumbnail_url && (
             <div className="mb-10 border border-zinc-800 rounded-sm overflow-hidden bg-[#121212]" data-testid="share-hero-thumbnail">
-              <img
-                src={selected_thumbnail_url}
-                alt={display_title}
-                className="w-full h-auto block"
-                style={{ aspectRatio: "16 / 9", objectFit: "cover" }}
-                loading="eager"
-              />
+              {final_video?.url ? (
+                <video
+                  data-testid="share-final-video"
+                  controls
+                  poster={selected_thumbnail_url}
+                  src={final_video.url}
+                  preload="metadata"
+                  className="w-full block"
+                  style={{ aspectRatio: "16 / 9", objectFit: "cover" }}
+                />
+              ) : (
+                <img
+                  src={selected_thumbnail_url}
+                  alt={display_title}
+                  className="w-full h-auto block"
+                  style={{ aspectRatio: "16 / 9", objectFit: "cover" }}
+                  loading="eager"
+                />
+              )}
             </div>
           )}
 
