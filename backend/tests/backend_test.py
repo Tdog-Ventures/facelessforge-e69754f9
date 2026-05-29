@@ -1411,11 +1411,14 @@ class TestVoiceover:
         r = creator_session.get(f"{BASE_URL}/api/tts/meta", timeout=15)
         assert r.status_code == 200
         d = r.json()
-        assert d["mock"] is True
-        assert d["provider"] == "openai"
-        assert d["model"] == "tts-1"
+        # Provider/model now resolve at runtime (elevenlabs|openai|mock).
+        # Validate the contract, not a hardcoded provider.
+        assert isinstance(d["mock"], bool)
+        assert d["provider"] in ("elevenlabs", "openai")
+        assert d["model"]
         assert "narrator" in d["voices"]
         assert d["default_voice_style"] == "narrator"
+        assert d["fallback_chain"] == ["elevenlabs", "openai", "mock"]
 
     def test_tts_meta_unauth(self):
         r = requests.get(f"{BASE_URL}/api/tts/meta", timeout=15)
@@ -1433,8 +1436,9 @@ class TestVoiceover:
         v = vos[0]
         self._vo_ids.append((pid, v["id"]))
         assert v["voice_style"] == "dramatic"
-        assert v["mock"] is True
-        assert v["source"] == "mock_tts"
+        # Source depends on active provider: mock_tts | openai_tts | elevenlabs_tts
+        assert v["source"] in ("mock_tts", "openai_tts", "elevenlabs_tts")
+        assert v["mock"] == (v["source"] == "mock_tts")
         assert v["status"] == "generated"
         assert v["duration"] >= 1
         assert v["preview_path"].startswith("/api/static/audio/")

@@ -1,24 +1,24 @@
-"""TTS service — OpenAI first (via Emergent LLM key), deterministic mock fallback.
+"""TTS service — ElevenLabs primary, OpenAI fallback, mock-safe.
 
-Designed for ElevenLabs to drop in later by extending `PROVIDERS` and `_provider_name()`.
+Provider chain (each step falls through to the next on failure):
+    1. ElevenLabs   (requires ELEVENLABS_API_KEY, TTS_PROVIDER=elevenlabs)
+    2. OpenAI TTS   (Emergent LLM key)
+    3. Mock WAV     (deterministic silence)
 
 Public API:
     await generate_voiceover(
         text,
         voice_style,
         project_id,
-        asset_id=None,        # pre-generated uuid for file path
-        scene_id=None,        # if scene-level
+        asset_id=None,
+        scene_id=None,
     ) -> dict
-
-Returned dict is a normalised asset ready to be inserted in db.assets.
 """
 from __future__ import annotations
 
 import logging
 import os
 import re
-import struct
 import uuid
 import wave
 from pathlib import Path
@@ -30,15 +30,15 @@ logger = logging.getLogger("facelessforge.tts")
 STATIC_ROOT = Path(__file__).parent.parent / "static" / "audio"
 STATIC_ROOT.mkdir(parents=True, exist_ok=True)
 
-# Voice style → OpenAI TTS voice name. Keep same keys for ElevenLabs later.
+# Voice style → per-provider voice. Keys are stable contract for the frontend.
 VOICE_STYLE_MAP = {
-    "narrator":     {"openai_voice": "onyx",    "eleven_voice_hint": "narrative, low, male"},
-    "energetic":    {"openai_voice": "nova",    "eleven_voice_hint": "bright, upbeat"},
-    "documentary":  {"openai_voice": "sage",    "eleven_voice_hint": "neutral, measured"},
-    "calm":         {"openai_voice": "alloy",   "eleven_voice_hint": "warm, smooth"},
-    "dramatic":     {"openai_voice": "fable",   "eleven_voice_hint": "theatrical, bold"},
-    "corporate":    {"openai_voice": "echo",    "eleven_voice_hint": "professional, even"},
-    "mysterious":   {"openai_voice": "shimmer", "eleven_voice_hint": "breathy, intimate"},
+    "narrator":     {"openai_voice": "onyx",    "eleven_env": "ELEVENLABS_VOICE_NARRATOR",    "eleven_default": "pNInz6obpgDQGcFmaJgB"},
+    "energetic":    {"openai_voice": "nova",    "eleven_env": "ELEVENLABS_VOICE_ENERGETIC",   "eleven_default": "MF3mGyEYCl7XYWbV9V6O"},
+    "documentary":  {"openai_voice": "sage",    "eleven_env": "ELEVENLABS_VOICE_DOCUMENTARY", "eleven_default": "ErXwobaYiN019PkySvjV"},
+    "calm":         {"openai_voice": "alloy",   "eleven_env": "ELEVENLABS_VOICE_CALM",        "eleven_default": "EXAVITQu4vr4xnSDxMaL"},
+    "dramatic":     {"openai_voice": "fable",   "eleven_env": "ELEVENLABS_VOICE_DRAMATIC",    "eleven_default": "VR6AewLTigWG4xSOukaG"},
+    "corporate":    {"openai_voice": "echo",    "eleven_env": "ELEVENLABS_VOICE_CORPORATE",   "eleven_default": "TxGEqnHWrfWFTfGW9XjX"},
+    "mysterious":   {"openai_voice": "shimmer", "eleven_env": "ELEVENLABS_VOICE_MYSTERIOUS",  "eleven_default": "AZnzlk1v7XfdyXxAFdtl"},
 }
 
 SUPPORTED_STYLES = list(VOICE_STYLE_MAP.keys())
@@ -46,10 +46,37 @@ SUPPORTED_STYLES = list(VOICE_STYLE_MAP.keys())
 MAX_TEXT_CHARS = 5000
 
 
+# ---------------- Provider detection ----------------
+
+def _force_mock_flag() -> bool:
+    return os.environ.get("USE_MOCK_TTS", "true").strip().lower() in ("1", "true", "yes")
+
+
+def _has_elevenlabs() -> bool:
+    return bool(os.environ.get("ELEVENLABS_API_KEY", "").strip())
+
+
+def _has_openai() -> bool:
+    return bool(
+        os.environ.get("EMERGENT_LLM_KEY", "").strip()
+        or os.environ.get("OPENAI_API_KEY", "").strip()
+    )
+
+
+def _preferred_provider() -> str:
+    """Resolve the requested primary provider from env. Falls back through the
+    chain at runtime if the preferred one fails."""
+    raw = os.environ.get("TTS_PROVIDER", "openai").strip().lower()
+    if raw in ("elevenlabs", "eleven", "11labs", "11"):
+        return "elevenlabs"
+    return "openai"
+
+
 def _use_mock() -> bool:
-    key = os.environ.get("EMERGENT_LLM_KEY", "").strip() or os.environ.get("OPENAI_API_KEY", "").strip()
-    flag = os.environ.get("USE_MOCK_TTS", "true").strip().lower() in ("1", "true", "yes")
-    return flag or not key
+    """True when neither real provider is usable, or USE_MOCK_TTS=true."""
+    if _force_mock_flag():
+        return True
+    return not (_has_elevenlabs() or _has_openai())
 
 
 def is_mock_mode() -> bool:
@@ -57,12 +84,21 @@ def is_mock_mode() -> bool:
 
 
 def provider_info() -> dict:
+    preferred = _preferred_provider()
     return {
         "mock": _use_mock(),
-        "provider": os.environ.get("TTS_PROVIDER", "openai"),
-        "model": os.environ.get("OPENAI_TTS_MODEL", "tts-1"),
+        "provider": preferred,
+        "preferred": preferred,
+        "elevenlabs_available": _has_elevenlabs(),
+        "openai_available": _has_openai(),
+        "model": (
+            os.environ.get("ELEVENLABS_MODEL", "eleven_multilingual_v2")
+            if preferred == "elevenlabs"
+            else os.environ.get("OPENAI_TTS_MODEL", "tts-1")
+        ),
         "voices": SUPPORTED_STYLES,
         "default_voice_style": os.environ.get("DEFAULT_VOICE_STYLE", "narrator"),
+        "fallback_chain": ["elevenlabs", "openai", "mock"],
     }
 
 
@@ -81,7 +117,6 @@ def _write_mock_wav(path: Path, duration_s: int) -> None:
         w.setnchannels(1)
         w.setsampwidth(2)
         w.setframerate(sample_rate)
-        # Write silence in chunks to avoid huge memory
         chunk = b"\x00\x00" * 4096
         remaining = n_samples
         while remaining > 0:
@@ -90,37 +125,92 @@ def _write_mock_wav(path: Path, duration_s: int) -> None:
             remaining -= take
 
 
-# ---------------- Real OpenAI path ----------------
+# ---------------- ElevenLabs ----------------
+
+def _elevenlabs_voice_for(style: str) -> str:
+    cfg = VOICE_STYLE_MAP.get(style, VOICE_STYLE_MAP["narrator"])
+    return os.environ.get(cfg["eleven_env"], cfg["eleven_default"])
+
+
+def _elevenlabs_voice_settings():
+    """Build a VoiceSettings dict honouring env overrides."""
+    def _f(key: str, default: float) -> float:
+        try:
+            return float(os.environ.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    return {
+        "stability": _f("ELEVENLABS_STABILITY", 0.5),
+        "similarity_boost": _f("ELEVENLABS_SIMILARITY_BOOST", 0.75),
+        "style": _f("ELEVENLABS_STYLE", 0.0),
+        "use_speaker_boost": os.environ.get("ELEVENLABS_USE_SPEAKER_BOOST", "true").lower() in ("1", "true", "yes"),
+    }
+
+
+async def _elevenlabs_tts(text: str, style: str, out_path: Path) -> tuple[bool, int]:
+    """Generate audio via ElevenLabs. Returns (ok, duration_seconds_estimate)."""
+    api_key = os.environ.get("ELEVENLABS_API_KEY", "").strip()
+    if not api_key:
+        return False, _estimate_duration_seconds(text)
+    model_id = os.environ.get("ELEVENLABS_MODEL", "eleven_multilingual_v2")
+    output_format = os.environ.get("ELEVENLABS_OUTPUT_FORMAT", "mp3_44100_128")
+    voice_id = _elevenlabs_voice_for(style)
+    settings = _elevenlabs_voice_settings()
+    try:
+        from elevenlabs import ElevenLabs, VoiceSettings
+        client = ElevenLabs(api_key=api_key)
+        audio_stream = client.text_to_speech.convert(
+            voice_id=voice_id,
+            model_id=model_id,
+            text=text,
+            output_format=output_format,
+            voice_settings=VoiceSettings(**settings),
+        )
+        # The SDK returns a byte-chunk iterator.
+        with open(out_path, "wb") as f:
+            for chunk in audio_stream:
+                if chunk:
+                    f.write(chunk)
+        if out_path.stat().st_size == 0:
+            logger.warning("ElevenLabs returned empty audio; falling back.")
+            return False, _estimate_duration_seconds(text)
+        return True, _estimate_duration_seconds(text)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("ElevenLabs TTS failed (%s). Falling back.", e)
+        try:
+            if out_path.exists() and out_path.stat().st_size == 0:
+                out_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False, _estimate_duration_seconds(text)
+
+
+# ---------------- OpenAI ----------------
 
 def _openai_voice_for(style: str) -> str:
     return VOICE_STYLE_MAP.get(style, VOICE_STYLE_MAP["narrator"])["openai_voice"]
 
 
 async def _openai_tts(text: str, style: str, out_path: Path) -> tuple[bool, int]:
-    """Try to call OpenAI TTS via Emergent-friendly OpenAI SDK.
-
-    Returns (ok, duration_seconds_estimate). On any failure returns (False, est).
-    """
+    """Try OpenAI TTS via Emergent-friendly OpenAI SDK. Returns (ok, dur)."""
     api_key = os.environ.get("EMERGENT_LLM_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
         return False, _estimate_duration_seconds(text)
     model = os.environ.get("OPENAI_TTS_MODEL", "tts-1")
     voice = _openai_voice_for(style)
     try:
-        # Lazy import so a missing SDK never breaks mock path.
         from openai import OpenAI
         base_url = os.environ.get("OPENAI_BASE_URL") or None
         kwargs = {"api_key": api_key}
         if base_url:
             kwargs["base_url"] = base_url
         client = OpenAI(**kwargs)
-        # text is clamped upstream
         response = client.audio.speech.create(model=model, voice=voice, input=text)
-        # Save binary MP3
         response.stream_to_file(str(out_path))
         return True, _estimate_duration_seconds(text)
     except Exception as e:  # noqa: BLE001
-        logger.warning("OpenAI TTS failed (%s). Falling back to mock audio.", e)
+        logger.warning("OpenAI TTS failed (%s). Falling back.", e)
         return False, _estimate_duration_seconds(text)
 
 
@@ -143,22 +233,39 @@ async def generate_voiceover(
         voice_style = os.environ.get("DEFAULT_VOICE_STYLE", "narrator")
 
     aid = asset_id or str(uuid.uuid4())
-    info = provider_info()
     dir_path = STATIC_ROOT / project_id
     dir_path.mkdir(parents=True, exist_ok=True)
 
     ext = "wav"
     source = "mock_tts"
     duration = _estimate_duration_seconds(text)
+    model_used: str | None = None
 
-    use_real = not _use_mock()
+    forced_mock = _force_mock_flag()
     real_ok = False
-    if use_real:
-        out_path = dir_path / f"{aid}.mp3"
-        real_ok, duration = await _openai_tts(text, voice_style, out_path)
-        if real_ok:
-            ext = "mp3"
-            source = "openai_tts"
+
+    if not forced_mock:
+        preferred = _preferred_provider()
+        order = ["elevenlabs", "openai"] if preferred == "elevenlabs" else ["openai", "elevenlabs"]
+
+        for provider in order:
+            if real_ok:
+                break
+            if provider == "elevenlabs" and _has_elevenlabs():
+                out_path = dir_path / f"{aid}.mp3"
+                real_ok, duration = await _elevenlabs_tts(text, voice_style, out_path)
+                if real_ok:
+                    ext = "mp3"
+                    source = "elevenlabs_tts"
+                    model_used = os.environ.get("ELEVENLABS_MODEL", "eleven_multilingual_v2")
+            elif provider == "openai" and _has_openai():
+                out_path = dir_path / f"{aid}.mp3"
+                real_ok, duration = await _openai_tts(text, voice_style, out_path)
+                if real_ok:
+                    ext = "mp3"
+                    source = "openai_tts"
+                    model_used = os.environ.get("OPENAI_TTS_MODEL", "tts-1")
+
     if not real_ok:
         out_path = dir_path / f"{aid}.wav"
         _write_mock_wav(out_path, duration)
@@ -169,6 +276,20 @@ async def generate_voiceover(
     content_type = "audio/mpeg" if ext == "mp3" else "audio/wav"
     saved = store.save_file(out_path, key, content_type=content_type)
 
+    # Cost estimate (per provider, approximate)
+    cost = 0.0
+    if source == "elevenlabs_tts":
+        # ElevenLabs charges ~$0.30 per 1k characters on Creator tier
+        cost = round(len(text) / 1000 * 0.30, 4)
+    elif source == "openai_tts":
+        cost = round(len(text) / 1000 * 0.015, 4)
+
+    provider_name = {
+        "elevenlabs_tts": "elevenlabs",
+        "openai_tts": "openai",
+        "mock_tts": "mock_tts",
+    }[source]
+
     return {
         "id": aid,
         "project_id": project_id,
@@ -178,8 +299,8 @@ async def generate_voiceover(
         "name": (f"Voiceover {name_suffix}" if name_suffix else "Voiceover") + (" (mock)" if source == "mock_tts" else ""),
         "text_source": "scene_narration" if scene_id else "full_script",
         "voice_style": voice_style,
-        "provider": info["provider"] if source != "mock_tts" else "mock_tts",
-        "model": info["model"] if source != "mock_tts" else None,
+        "provider": provider_name,
+        "model": model_used,
         "duration": duration,
         "file_path": str(saved.file_path) if saved.file_path else None,
         "preview_url": saved.url,
@@ -191,5 +312,5 @@ async def generate_voiceover(
         "tags": ["voiceover", voice_style],
         "mock": source == "mock_tts",
         "status": "generated",
-        "cost_estimate": round(len(text) / 1000 * 0.015, 4) if source == "openai_tts" else 0.0,
+        "cost_estimate": cost,
     }

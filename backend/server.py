@@ -2,6 +2,15 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+# Load user-managed secret blocks from /app/secrets/*.env (gitignored).
+# These OVERRIDE values from backend/.env so users can drop in real API keys
+# without touching the tracked .env. Order is deterministic (sorted).
+from pathlib import Path as _SecretsPath
+_secrets_dir = _SecretsPath(__file__).resolve().parent.parent / "secrets"
+if _secrets_dir.is_dir():
+    for _f in sorted(_secrets_dir.glob("*.env")):
+        load_dotenv(_f, override=True)
+
 import asyncio
 import logging
 import os
@@ -110,6 +119,14 @@ async def health_deep():
                           "probed_at": _dt.now(_tz.utc).isoformat()}
 
     out["ok"] = bool(out["mongo"]["ok"] and out["storage"]["ok"])
+
+    # TTS provider snapshot (non-blocking — informational only)
+    try:
+        from app.tts import provider_info as _tts_info
+        out["tts"] = _tts_info()
+    except Exception as e:  # noqa: BLE001
+        out["tts"] = {"error": f"{type(e).__name__}"}
+
     return out
 
 

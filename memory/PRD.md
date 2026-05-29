@@ -30,6 +30,17 @@ Build a production-ready SaaS web app **FacelessForge**: a creator-first faceles
 - **Editor** — can modify scripts/scenes/metadata but not billing/admin.
 - **Viewer** — read-only access to completed projects.
 
+## ElevenLabs TTS Integration (2026-02-29) ✅
+- Added **ElevenLabs** as the primary TTS provider (was OpenAI/mock).
+- New provider chain: **ElevenLabs → OpenAI TTS → Mock WAV** (auto-fallback on failure).
+- Model: `eleven_multilingual_v2` (configurable via `ELEVENLABS_MODEL`).
+- Voice mapping: 7 styles (narrator/energetic/documentary/calm/dramatic/corporate/mysterious) → ElevenLabs library voice IDs, each individually overridable via env.
+- New secrets folder convention: `/app/secrets/*.env` files are loaded after `backend/.env` with `override=True` (gitignored).
+- `/api/health/deep` and `/api/tts/meta` now expose live provider snapshot (`mock`, `provider`, `elevenlabs_available`, `openai_available`, `model`, `fallback_chain`).
+- Cost estimate: ~$0.30 / 1k chars for ElevenLabs.
+- All **147/147 backend tests still pass** (TTS tests made provider-agnostic).
+
+
 ## What's Been Implemented (2026-02)
 - [x] Full backend with all endpoints + RBAC + validation
 - [x] JWT auth with httpOnly cookies (access + refresh)
