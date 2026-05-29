@@ -117,7 +117,7 @@ export default function ScriptPanel({ projectId, script, canEdit, onChange }) {
             const selected = draft.selected_hook === h;
             return (
               <button
-                key={i}
+                key={`hook-${i}-${h.slice(0, 24)}`}
                 type="button"
                 disabled={!canEdit}
                 data-testid={`hook-option-${i}`}
@@ -161,7 +161,7 @@ export default function ScriptPanel({ projectId, script, canEdit, onChange }) {
           <div className="font-mono text-[10px] uppercase tracking-widest text-zinc-500 mb-3">Retention beats</div>
           <ul className="space-y-2">
             {script.retention_beats.map((b, i) => (
-              <li key={i} className="flex items-start gap-3 text-sm text-zinc-300">
+              <li key={`beat-${i}-${String(b).slice(0, 32)}`} className="flex items-start gap-3 text-sm text-zinc-300">
                 <span className="font-mono text-[10px] text-[#7B61FF] mt-1">{String(i + 1).padStart(2, "0")}</span>
                 <span>{b}</span>
               </li>

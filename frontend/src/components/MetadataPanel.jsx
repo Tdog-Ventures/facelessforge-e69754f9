@@ -130,7 +130,7 @@ export default function MetadataPanel({ projectId, metadata, canEdit, onChange, 
             const selected = draft.selected_title === t;
             return (
               <button
-                key={i}
+                key={`title-${i}-${t.slice(0, 32)}`}
                 type="button"
                 disabled={!canEdit}
                 data-testid={`title-option-${i}`}
@@ -185,15 +185,15 @@ export default function MetadataPanel({ projectId, metadata, canEdit, onChange, 
             <span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Hashtags</span>
           </div>
           <div className="p-5 flex flex-wrap gap-2">
-            {(metadata.hashtags || []).map((h, i) => (
-              <span key={i} className="font-mono text-xs px-2 py-1 border border-zinc-800 text-[#7B61FF] rounded-sm">{h}</span>
+            {(metadata.hashtags || []).map((h) => (
+              <span key={`hashtag-${h}`} className="font-mono text-xs px-2 py-1 border border-zinc-800 text-[#7B61FF] rounded-sm">{h}</span>
             ))}
           </div>
           <div className="border-t border-zinc-800 px-5 py-3">
             <span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Chapters</span>
             <ul className="mt-3 space-y-1">
-              {(metadata.chapters || []).map((c, i) => (
-                <li key={i} className="flex items-center gap-3 text-sm">
+              {(metadata.chapters || []).map((c) => (
+                <li key={`chapter-${c.timestamp}-${c.title}`} className="flex items-center gap-3 text-sm">
                   <span className="font-mono text-[11px] text-[#00E5FF] w-14">{c.timestamp}</span>
                   <span className="text-zinc-300">{c.title}</span>
                 </li>
