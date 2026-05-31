@@ -224,7 +224,8 @@ def _pil_caption_frame(out_path: Path, *, title: str, subtitle: str = "",
     return out_path
 
 
-async def _download_to(url: str, out_path: Path, *, max_bytes: int) -> bool:
+async def _download_to(url: str, out_path: Path, *, max_bytes: int,
+                       allow_audio: bool = False) -> bool:
     """Best-effort download. Returns True on success, False on any failure."""
     try:
         timeout = httpx.Timeout(20.0, connect=10.0)
@@ -233,8 +234,11 @@ async def _download_to(url: str, out_path: Path, *, max_bytes: int) -> bool:
                 if resp.status_code != 200:
                     return False
                 ct = resp.headers.get("content-type", "")
-                # Only accept image/video
-                if not (ct.startswith("image/") or ct.startswith("video/") or ct.startswith("application/octet-stream")):
+                # Only accept image/video (or audio when explicitly allowed)
+                allowed = (ct.startswith("image/") or ct.startswith("video/")
+                           or ct.startswith("application/octet-stream")
+                           or (allow_audio and ct.startswith("audio/")))
+                if not allowed:
                     return False
                 total = 0
                 out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -263,6 +267,23 @@ def _local_path_for_asset(asset: dict) -> Optional[Path]:
         if p.exists() and p.is_file():
             return p
     return None
+
+
+async def _ensure_audio_local(asset: dict, work_dir: Path, name: str) -> Optional[Path]:
+    """Return a local Path to the asset's audio file, downloading from remote
+    storage (R2/S3) if needed. Returns None if no usable source."""
+    local = _local_path_for_asset(asset)
+    if local:
+        return local
+    url = asset.get("preview_url") or asset.get("download_url")
+    if not url:
+        return None
+    key = asset.get("storage_key") or url
+    suffix = ".mp3" if key.lower().endswith(".mp3") else ".wav"
+    out = work_dir / f"{name}{suffix}"
+    ok = await _download_to(url, out, max_bytes=80 * 1024 * 1024, allow_audio=True)
+    return out if ok else None
+
 
 
 async def _resolve_thumbnail(asset: dict, project: dict, work_dir: Path) -> Path:
@@ -357,7 +378,7 @@ async def _resolve_audio(project: dict, scenes: list[dict], assets: list[dict],
                  and not a.get("scene_id")
                  and a.get("id") == project.get("selected_voiceover_asset_id")), None)
     if _is_real(full):
-        local = _local_path_for_asset(full)
+        local = await _ensure_audio_local(full, work_dir, "voiceover_full")
         if local:
             return local
 
@@ -374,11 +395,11 @@ async def _resolve_audio(project: dict, scenes: list[dict], assets: list[dict],
         scene_voices_by_id[s["id"]] = sel
     if scene_voices_by_id:
         ordered: list[Path] = []
-        for s in sorted(scenes, key=lambda x: x.get("scene_number", 0)):
+        for idx, s in enumerate(sorted(scenes, key=lambda x: x.get("scene_number", 0))):
             v = scene_voices_by_id.get(s["id"])
             if not v:
                 continue
-            local = _local_path_for_asset(v)
+            local = await _ensure_audio_local(v, work_dir, f"voiceover_scene_{idx:03d}")
             if local:
                 ordered.append(local)
         if ordered:
@@ -659,7 +680,7 @@ async def _run_render(job_id: str, project_id: str):
                 "-filter_complex",
                 f"[2:a]volume={music_db}dB[bed];"
                 f"[1:a]volume=0dB[vo];"
-                f"[vo][bed]amix=inputs=2:duration=first:dropout_transition=0[aout]",
+                f"[vo][bed]amix=inputs=2:duration=first:normalize=0:dropout_transition=0[aout]",
                 "-map", "0:v", "-map", "[aout]",
                 "-c:v", "copy",
                 "-c:a", "aac", "-b:a", "192k",
