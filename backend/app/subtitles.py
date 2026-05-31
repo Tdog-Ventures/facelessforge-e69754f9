@@ -89,3 +89,76 @@ def write_srt(scenes: list[dict], out_path: Path, *, intro_offset_seconds: float
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(build_srt(scenes, intro_offset_seconds=intro_offset_seconds), encoding="utf-8")
     return out_path
+
+
+def build_srt_from_words(
+    words: list[dict],
+    *,
+    intro_offset_seconds: float = 0.0,
+    words_per_cue: int = 5,
+    max_cue_seconds: float = 3.0,
+    min_cue_seconds: float = 0.7,
+) -> str:
+    """Word-synchronised SRT.
+
+    Groups Whisper word records into compact cues that hold for at most
+    ``max_cue_seconds`` and at least ``min_cue_seconds``. Each cue contains
+    up to ``words_per_cue`` words (auto-breaks on long pauses or sentence
+    punctuation for natural reading).
+    """
+    if not words:
+        return ""
+    cues: list[tuple[float, float, str]] = []
+    bucket_words: list[str] = []
+    bucket_start: float | None = None
+    last_end: float = 0.0
+
+    def _flush(end_ts: float):
+        nonlocal bucket_words, bucket_start
+        if not bucket_words or bucket_start is None:
+            return
+        text = " ".join(bucket_words).strip()
+        if text:
+            start = bucket_start + intro_offset_seconds
+            end = max(end_ts, bucket_start + min_cue_seconds) + intro_offset_seconds
+            cues.append((start, end, text))
+        bucket_words = []
+        bucket_start = None
+
+    for i, w in enumerate(words):
+        wt = w["word"].strip()
+        if not wt:
+            continue
+        if bucket_start is None:
+            bucket_start = w["start"]
+        bucket_words.append(wt)
+        last_end = w["end"]
+        long_pause = (i + 1 < len(words)
+                      and words[i + 1]["start"] - w["end"] > 0.45)
+        sentence_break = wt.endswith((".", "!", "?"))
+        cue_full = len(bucket_words) >= words_per_cue
+        cue_too_long = (w["end"] - bucket_start) >= max_cue_seconds
+        if cue_full or sentence_break or long_pause or cue_too_long:
+            _flush(w["end"])
+    _flush(last_end)
+
+    out: list[str] = []
+    for idx, (start, end, text) in enumerate(cues, 1):
+        # Wrap long single-line cues for readability
+        text = _clean_caption(text, max_chars_per_line=42)
+        out.append(f"{idx}\n{_format_ts(start)} --> {_format_ts(end)}\n{text}\n")
+    return "\n".join(out) + ("\n" if out else "")
+
+
+def write_srt_from_words(
+    words: list[dict],
+    out_path: Path,
+    *,
+    intro_offset_seconds: float = 0.0,
+) -> Path:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
+        build_srt_from_words(words, intro_offset_seconds=intro_offset_seconds),
+        encoding="utf-8",
+    )
+    return out_path

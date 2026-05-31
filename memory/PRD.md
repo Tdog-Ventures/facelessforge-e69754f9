@@ -30,6 +30,19 @@ Build a production-ready SaaS web app **FacelessForge**: a creator-first faceles
 - **Editor** — can modify scripts/scenes/metadata but not billing/admin.
 - **Viewer** — read-only access to completed projects.
 
+## Render Quality v2 — Shippable (2026-05-31) ✅
+
+Three end-to-end fixes that move the render from prototype to shippable:
+
+1. **Sub-clip splitting (~7-9 s cuts)** — `render.py` now builds a `_build_subclip_plan` that scales scene durations to match the actual voiceover length and splits each scene into multiple 4-9 s sub-clips against the same Pexels source with cycling `-ss` seek offsets. Result: 16 scenes → 48-65 cuts per long video. Configurable via `MAX_SUBCLIP_SECONDS` / `MIN_SUBCLIP_SECONDS`.
+2. **Audio-matched video duration** — added `_probe_duration_seconds` (ffprobe wrapper) and `-stream_loop -1` on scene encodes so short Pexels clips (3-5 s) get looped to fill the requested duration instead of silently truncating. Video duration now equals voiceover MP3 duration exactly.
+3. **Word-synchronised subtitles** — new `app/transcribe.py` uses OpenAI Whisper via `emergentintegrations.llm.openai.OpenAISpeechToText` with `timestamp_granularities=["word"]`. New `subtitles.build_srt_from_words` groups word records into compact cues (≤5 words / ≤3 s, with auto-breaks on long pauses + sentence punctuation). Falls back to legacy scene-caption SRT if STT fails.
+4. **ElevenLabs sentence chunking** — `tts.py` `MAX_ELEVENLABS_CHARS_PER_REQUEST=4500` with `_split_for_tts` greedy packer; >4500-char scripts are split on sentence boundaries, synthesised per chunk, then ffmpeg-concatenated. Previously a hard `MAX_TEXT_CHARS=5000` truncation silently halved long scripts.
+5. **amix normalize=0 fix** — voice no longer attenuates 6 dB when music bed is mixed in. Output audio now lands at mean -18 dB / max -0.9 dB across the whole track (broadcast-correct).
+
+End-to-end verified: 10:45 narration on a 9,397-char script, 64+ sub-clip cuts, word-sync captioning of actual narration words, music bed audible underneath, real Pexels stock footage with motion. Served via Cloudflare R2 at `videos.ethinx.solutions`.
+
+
 ## Render Quality Upgrade (2026-05-31) ✅
 - **Real Pexels stock video**: `USE_MOCK_PEXELS=false` + Pexels API key wired via `/app/secrets/pexels.env`. Auto-attach now pulls real MP4 clips per scene.
 - **Subtitle burn-in**: new `app/subtitles.py` generates a standards-compliant SRT from each scene's `caption_text` + timings (offset by intro duration). `render.py` runs `subtitles=...:force_style=...` filter as a new "burning_subtitles" pipeline step. Disable via `RENDER_BURN_SUBTITLES=false`.

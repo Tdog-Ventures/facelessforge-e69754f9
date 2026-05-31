@@ -33,7 +33,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .db import get_db
 from .storage import get_storage
-from .subtitles import write_srt
+from .subtitles import write_srt, write_srt_from_words
+from .transcribe import transcribe_words
 
 logger = logging.getLogger("facelessforge.render")
 
@@ -42,6 +43,12 @@ STATIC_RENDERS.mkdir(parents=True, exist_ok=True)
 
 STATIC_MUSIC_DIR = Path(__file__).parent.parent / "static" / "music"
 DEFAULT_MUSIC_BED = STATIC_MUSIC_DIR / "default_bed.mp3"
+
+# Max length of any single sub-clip in seconds. Long scenes are split into
+# multiple sub-clips against the same source footage (different seek offsets)
+# so viewers see cuts every ~7-9 seconds instead of one shot held for 20+.
+MAX_SUBCLIP_SECONDS = 9.0
+MIN_SUBCLIP_SECONDS = 4.0
 
 
 def _resolve_ffmpeg_bin() -> str:
@@ -62,6 +69,57 @@ def _resolve_ffprobe_bin() -> Optional[str]:
     """ffprobe is optional (only used for duration probe). System apt ships it;
     imageio-ffmpeg does not. If absent, we silently skip the probe step."""
     return shutil.which("ffprobe")
+
+
+async def _probe_duration_seconds(path: Path) -> Optional[float]:
+    """Return media duration in seconds via ffprobe, or None on failure."""
+    bin_ = _resolve_ffprobe_bin()
+    if not bin_ or not path.exists():
+        return None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            bin_, "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", str(path),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await proc.communicate()
+        return float(out.decode().strip())
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _build_subclip_plan(scenes: list[dict], audio_duration: Optional[float]) -> list[dict]:
+    """Return a per-scene plan describing how many sub-clips to render and
+    each sub-clip's duration. When ``audio_duration`` is provided, the total
+    video time is stretched/contracted to match the voiceover exactly.
+
+    Each scene entry: ``{"scene_index": i, "subclips": [seconds, ...]}``.
+    """
+    def _scene_dur(s: dict) -> float:
+        return max(2.0, float((s.get("end_time") or 0) - (s.get("start_time") or 0)) or 4.0)
+
+    planned = [_scene_dur(s) for s in scenes]
+    planned_total = sum(planned)
+    if audio_duration and audio_duration > 1.0 and planned_total > 1.0:
+        scale = audio_duration / planned_total
+    else:
+        scale = 1.0
+    plan: list[dict] = []
+    for i, base in enumerate(planned):
+        target = base * scale
+        if target <= MAX_SUBCLIP_SECONDS:
+            subclips = [target]
+        else:
+            import math
+            n = max(2, math.ceil(target / MAX_SUBCLIP_SECONDS))
+            even = target / n
+            # Avoid runt clips
+            if even < MIN_SUBCLIP_SECONDS:
+                n = max(2, int(target // MIN_SUBCLIP_SECONDS) or 2)
+                even = target / n
+            subclips = [round(even, 3)] * n
+        plan.append({"scene_index": i, "subclips": subclips, "target": round(target, 3)})
+    return plan
 
 
 def _resolve_music_bed() -> Optional[Path]:
@@ -453,9 +511,17 @@ def _ffmpeg_normalise_image(src: Path, duration: float, out: Path) -> list[str]:
     ]
 
 
-def _ffmpeg_normalise_video(src: Path, duration: float, out: Path) -> list[str]:
-    return [
-        FFMPEG_BIN, "-y",
+def _ffmpeg_normalise_video(src: Path, duration: float, out: Path,
+                            *, start_offset: float = 0.0) -> list[str]:
+    cmd = [FFMPEG_BIN, "-y"]
+    # `-ss BEFORE -i` enables fast seek; safe because we then re-encode.
+    if start_offset > 0:
+        cmd += ["-ss", f"{start_offset:.2f}"]
+    # `-stream_loop -1` makes ffmpeg loop short clips until the requested
+    # duration is reached. Critical because many Pexels stock clips are
+    # 3-5 s long; without this they'd silently produce a truncated output.
+    cmd += [
+        "-stream_loop", "-1",
         "-i", str(src),
         "-t", f"{duration:.2f}",
         "-vf", (
@@ -467,6 +533,7 @@ def _ffmpeg_normalise_video(src: Path, duration: float, out: Path) -> list[str]:
         "-an",
         str(out),
     ]
+    return cmd
 
 
 # ============================ MAIN PIPELINE ============================
@@ -593,6 +660,17 @@ async def _run_render(job_id: str, project_id: str):
             path, kind = await _resolve_scene_visual(scene, assets, project, work_dir, i)
             scene_visuals.append((path, kind, scene))
 
+        # Probe true voiceover duration so the video matches audio length
+        # instead of being clipped by `-shortest` at the planned scene total.
+        await _set_job(job_id, current_step="probing_audio", progress=40)
+        audio_duration: Optional[float] = None
+        if audio_path and audio_path.exists():
+            audio_duration = await _probe_duration_seconds(audio_path)
+        # Build per-scene sub-clip plan (cuts every ~7-9s, total = audio length)
+        ordered_scenes = sorted(scenes, key=lambda x: x.get("scene_number", 0))
+        plan = _build_subclip_plan(ordered_scenes, audio_duration)
+        plan_by_idx = {p["scene_index"]: p for p in plan}
+
         # ---- rendering ----
         await _set_job(job_id, status="rendering", current_step="encoding_intro", progress=45)
         clips: list[Path] = []
@@ -603,18 +681,37 @@ async def _run_render(job_id: str, project_id: str):
             raise RuntimeError(f"intro encode failed: {err[-300:]}")
         clips.append(intro_out)
 
-        # Scene clips
+        # Scene clips — multiple sub-clips per scene with varying seek offsets
+        total_subclips = sum(len(p["subclips"]) for p in plan)
+        emitted = 0
         for i, (path, kind, scene) in enumerate(scene_visuals):
-            duration = max(2.0, float(scene.get("end_time", 0) - scene.get("start_time", 0)) or 4.0)
-            await _set_job(job_id, current_step=f"encoding_scene_{i+1:02d}",
-                           progress=min(85, 45 + int(35 * (i + 1) / max(1, len(scene_visuals)))))
-            out = work_dir / f"clip_{i+1:03d}.mp4"
-            cmd = (_ffmpeg_normalise_video(path, duration, out) if kind == "video"
-                   else _ffmpeg_normalise_image(path, duration, out))
-            ok, err = await _run_ffmpeg(cmd)
-            if not ok:
-                raise RuntimeError(f"scene {i+1} encode failed: {err[-300:]}")
-            clips.append(out)
+            sub_plan = plan_by_idx.get(i, {"subclips": [4.0], "target": 4.0})
+            subclips = sub_plan["subclips"]
+            # Determine source media duration once per scene for seek offsets
+            src_dur: Optional[float] = None
+            if kind == "video":
+                src_dur = await _probe_duration_seconds(path)
+            for j, dur in enumerate(subclips):
+                emitted += 1
+                await _set_job(
+                    job_id,
+                    current_step=f"encoding_scene_{i+1:02d}_clip_{j+1:02d}",
+                    progress=min(85, 45 + int(35 * emitted / max(1, total_subclips))),
+                )
+                out = work_dir / f"clip_{i+1:03d}_{j:02d}.mp4"
+                if kind == "video":
+                    # Cycle seek offset across sub-clips for visual variety.
+                    if src_dur and src_dur > dur:
+                        offset = (j * dur) % max(0.1, src_dur - dur)
+                    else:
+                        offset = 0.0
+                    cmd = _ffmpeg_normalise_video(path, dur, out, start_offset=offset)
+                else:
+                    cmd = _ffmpeg_normalise_image(path, dur, out)
+                ok, err = await _run_ffmpeg(cmd)
+                if not ok:
+                    raise RuntimeError(f"scene {i+1} clip {j+1} encode failed: {err[-300:]}")
+                clips.append(out)
 
         # Concat
         await _set_job(job_id, current_step="concatenating", progress=88)
@@ -628,20 +725,27 @@ async def _run_render(job_id: str, project_id: str):
         if not ok:
             raise RuntimeError(f"concat failed: {err[-300:]}")
 
-        # ---- subtitle burn-in (hard subs from scene captions) ----
+        # ---- subtitle burn-in: word-synchronised from Whisper STT ----
         burned_out = silent_out  # fallback if subs disabled/empty
         burn_enabled = os.environ.get("RENDER_BURN_SUBTITLES", "true").lower() in ("1", "true", "yes")
-        if burn_enabled and scenes:
-            await _set_job(job_id, current_step="burning_subtitles", progress=90)
+        if burn_enabled and audio_path and audio_path.exists():
+            await _set_job(job_id, current_step="transcribing_audio", progress=89)
+            words = await transcribe_words(audio_path, language="en")
             srt_path = work_dir / "captions.srt"
             try:
-                write_srt(scenes, srt_path, intro_offset_seconds=INTRO_DURATION_SECONDS)
+                if words:
+                    write_srt_from_words(words, srt_path,
+                                         intro_offset_seconds=INTRO_DURATION_SECONDS)
+                else:
+                    # Fallback: scene caption_text (legacy behaviour)
+                    write_srt(scenes, srt_path,
+                              intro_offset_seconds=INTRO_DURATION_SECONDS)
             except Exception as e:  # noqa: BLE001
                 logger.warning("SRT generation failed (%s) — skipping burn-in", e)
                 srt_path = None
             if srt_path and srt_path.exists() and srt_path.stat().st_size > 0:
+                await _set_job(job_id, current_step="burning_subtitles", progress=91)
                 burned_out = work_dir / "video_subbed.mp4"
-                # Path needs ffmpeg-style escaping for the subtitles filter.
                 srt_escaped = srt_path.as_posix().replace(":", r"\:").replace("'", r"\'")
                 sub_style = (
                     "FontName=DejaVu Sans,FontSize=22,PrimaryColour=&H00FFFFFF&,"

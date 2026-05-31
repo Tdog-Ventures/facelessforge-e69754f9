@@ -43,7 +43,10 @@ VOICE_STYLE_MAP = {
 
 SUPPORTED_STYLES = list(VOICE_STYLE_MAP.keys())
 
-MAX_TEXT_CHARS = 5000
+# ElevenLabs' eleven_multilingual_v2 caps a single request at 5000 characters.
+# Longer scripts are split on sentence boundaries and concatenated.
+MAX_TEXT_CHARS = 100000  # absolute upper bound for sanity
+MAX_ELEVENLABS_CHARS_PER_REQUEST = 4500
 
 
 # ---------------- Provider detection ----------------
@@ -149,7 +152,11 @@ def _elevenlabs_voice_settings():
 
 
 async def _elevenlabs_tts(text: str, style: str, out_path: Path) -> tuple[bool, int]:
-    """Generate audio via ElevenLabs. Returns (ok, duration_seconds_estimate)."""
+    """Generate audio via ElevenLabs. Returns (ok, duration_seconds_estimate).
+
+    Text longer than ``MAX_ELEVENLABS_CHARS_PER_REQUEST`` is split on sentence
+    boundaries; the per-chunk MP3s are concatenated with ffmpeg.
+    """
     api_key = os.environ.get("ELEVENLABS_API_KEY", "").strip()
     if not api_key:
         return False, _estimate_duration_seconds(text)
@@ -160,18 +167,67 @@ async def _elevenlabs_tts(text: str, style: str, out_path: Path) -> tuple[bool, 
     try:
         from elevenlabs import ElevenLabs, VoiceSettings
         client = ElevenLabs(api_key=api_key)
-        audio_stream = client.text_to_speech.convert(
-            voice_id=voice_id,
-            model_id=model_id,
-            text=text,
-            output_format=output_format,
-            voice_settings=VoiceSettings(**settings),
-        )
-        # The SDK returns a byte-chunk iterator.
-        with open(out_path, "wb") as f:
-            for chunk in audio_stream:
-                if chunk:
-                    f.write(chunk)
+        chunks = _split_for_tts(text, MAX_ELEVENLABS_CHARS_PER_REQUEST)
+        if len(chunks) == 1:
+            audio_stream = client.text_to_speech.convert(
+                voice_id=voice_id,
+                model_id=model_id,
+                text=chunks[0],
+                output_format=output_format,
+                voice_settings=VoiceSettings(**settings),
+            )
+            with open(out_path, "wb") as f:
+                for chunk in audio_stream:
+                    if chunk:
+                        f.write(chunk)
+        else:
+            # Generate each chunk, then ffmpeg-concat the MP3s.
+            tmp_dir = out_path.parent / f"_tts_chunks_{out_path.stem}"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            chunk_paths: list[Path] = []
+            for i, ctext in enumerate(chunks):
+                cp = tmp_dir / f"part_{i:03d}.mp3"
+                audio_stream = client.text_to_speech.convert(
+                    voice_id=voice_id,
+                    model_id=model_id,
+                    text=ctext,
+                    output_format=output_format,
+                    voice_settings=VoiceSettings(**settings),
+                )
+                with open(cp, "wb") as f:
+                    for chunk in audio_stream:
+                        if chunk:
+                            f.write(chunk)
+                if cp.stat().st_size == 0:
+                    logger.warning("ElevenLabs returned empty audio for chunk %d", i)
+                    return False, _estimate_duration_seconds(text)
+                chunk_paths.append(cp)
+            # ffmpeg concat
+            concat_list = tmp_dir / "concat.txt"
+            concat_list.write_text("\n".join(f"file '{p.as_posix()}'" for p in chunk_paths) + "\n")
+            import subprocess
+            try:
+                from imageio_ffmpeg import get_ffmpeg_exe
+                ffmpeg_bin = get_ffmpeg_exe()
+            except Exception:  # noqa: BLE001
+                ffmpeg_bin = "/bin/ffmpeg"
+            proc = subprocess.run(
+                [ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error",
+                 "-f", "concat", "-safe", "0", "-i", str(concat_list),
+                 "-c", "copy", str(out_path)],
+                capture_output=True, text=True, timeout=120,
+            )
+            if proc.returncode != 0:
+                logger.warning("ElevenLabs chunk concat failed: %s", proc.stderr[-300:])
+                return False, _estimate_duration_seconds(text)
+            # Best-effort cleanup of chunk files
+            for cp in chunk_paths:
+                cp.unlink(missing_ok=True)
+            concat_list.unlink(missing_ok=True)
+            try:
+                tmp_dir.rmdir()
+            except OSError:
+                pass
         if out_path.stat().st_size == 0:
             logger.warning("ElevenLabs returned empty audio; falling back.")
             return False, _estimate_duration_seconds(text)
@@ -184,6 +240,39 @@ async def _elevenlabs_tts(text: str, style: str, out_path: Path) -> tuple[bool, 
         except OSError:
             pass
         return False, _estimate_duration_seconds(text)
+
+
+def _split_for_tts(text: str, max_chars: int) -> list[str]:
+    """Split on sentence boundaries; pack greedy into chunks ≤ max_chars.
+
+    Falls back to soft-wrap by clause when a single sentence exceeds the
+    limit (rare but possible for run-on copy).
+    """
+    text = text.strip()
+    if len(text) <= max_chars:
+        return [text]
+    # Split on sentence terminators while keeping the punctuation
+    import re
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    chunks: list[str] = []
+    buf = ""
+    for s in sentences:
+        if len(s) > max_chars:
+            # Hard-split very long sentence on commas / spaces
+            for piece in re.split(r"(?<=[,;:])\s+", s):
+                if len(buf) + 1 + len(piece) > max_chars and buf:
+                    chunks.append(buf.strip())
+                    buf = piece
+                else:
+                    buf = (buf + " " + piece).strip()
+        elif len(buf) + 1 + len(s) > max_chars and buf:
+            chunks.append(buf.strip())
+            buf = s
+        else:
+            buf = (buf + " " + s).strip()
+    if buf:
+        chunks.append(buf.strip())
+    return [c for c in chunks if c]
 
 
 # ---------------- OpenAI ----------------
