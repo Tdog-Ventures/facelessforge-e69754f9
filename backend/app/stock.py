@@ -124,12 +124,21 @@ def _normalise_pexels_photo(p: dict, query: str) -> dict:
 def _normalise_pexels_video(v: dict, query: str) -> dict:
     # Pick a reasonable thumbnail
     preview = v.get("image")
-    # Pick mp4 file
+    # Pick best mp4 file: try uhd → hd → sd → ld → any mp4 → first file
     download = None
-    for f in (v.get("video_files") or []):
-        if f.get("file_type") == "video/mp4" and (f.get("quality") in ("hd", "sd")):
-            download = f.get("link")
+    files = list(v.get("video_files") or [])
+    mp4_files = [f for f in files if (f.get("file_type") == "video/mp4")]
+    quality_order = ["uhd", "hd", "sd", "ld"]
+    for q in quality_order:
+        match = next((f for f in mp4_files if f.get("quality") == q), None)
+        if match and match.get("link"):
+            download = match["link"]
             break
+    if not download and mp4_files:
+        download = next((f.get("link") for f in mp4_files if f.get("link")), None)
+    if not download and files:
+        # last resort: take ANY file with a link
+        download = next((f.get("link") for f in files if f.get("link")), None)
     user = v.get("user") or {}
     return {
         "source": "pexels",

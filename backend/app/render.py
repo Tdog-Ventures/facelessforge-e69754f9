@@ -35,6 +35,7 @@ from .db import get_db
 from .storage import get_storage
 from .subtitles import write_srt, write_srt_from_words
 from .transcribe import transcribe_words
+from . import stock as stock_service
 
 logger = logging.getLogger("facelessforge.render")
 
@@ -500,6 +501,68 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
         logger.info("scene=%02d FOOTAGE_SELECT type=pexels_image ext_id=%s size=%d url=%s",
                     idx + 1, ext_id, size, url[:100])
         return (target, "image")
+
+    # ---- Pexels retry: query for fresh results when attached candidates fail ----
+    # Builds a query from (search_terms → asset.query → visual_direction → caption_text)
+    # and walks the result set in order, motion-checking each candidate.
+    sample_asset = next((a for a in candidates if a.get("query")), None)
+    queries: list[str] = []
+    for q in (scene.get("search_terms"),
+              (sample_asset or {}).get("query"),
+              scene.get("visual_direction"),
+              scene.get("caption_text")):
+        if isinstance(q, list):
+            q = " ".join(str(x) for x in q if x)
+        q = (str(q) if q else "").strip()
+        if q and q not in queries:
+            queries.append(q)
+    tried_ext_ids = {str(a.get("external_id")) for a in candidates if a.get("external_id")}
+    retry_results: list[dict] = []
+    for q in queries[:2]:  # at most 2 query variations to bound API spend
+        try:
+            res = await stock_service.search_stock(q, media_type="videos", per_page=15)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("scene=%02d FOOTAGE_RETRY_ERROR query=%r err=%s",
+                           idx + 1, q[:60], e)
+            continue
+        for r in (res.get("results") or []):
+            if r.get("media_type") != "stock_video":
+                continue
+            if str(r.get("external_id")) in tried_ext_ids:
+                continue
+            retry_results.append(r)
+            tried_ext_ids.add(str(r.get("external_id")))
+        if retry_results:
+            logger.info("scene=%02d FOOTAGE_RETRY query=%r got=%d candidates",
+                        idx + 1, q[:60], len(retry_results))
+            break
+
+    for r in retry_results[:6]:  # cap downloads per scene
+        url = r.get("download_url")
+        if not url:
+            continue
+        ext_id = r.get("external_id") or ""
+        target = out_dir / f"scene_{idx:03d}_retry_{ext_id}.mp4"
+        ok = await _download_to(url, target, max_bytes=MAX_VIDEO_DOWNLOAD_BYTES)
+        if not ok:
+            logger.warning("scene=%02d FOOTAGE_RETRY_REJECT reason=download_failed ext_id=%s",
+                           idx + 1, ext_id)
+            continue
+        if not await _video_has_motion(target):
+            size = target.stat().st_size if target.exists() else 0
+            probe = await _probe_duration_seconds(target)
+            logger.warning("scene=%02d FOOTAGE_RETRY_REJECT reason=no_motion ext_id=%s size=%d duration=%ss",
+                           idx + 1, ext_id, size, probe)
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                pass
+            continue
+        size = target.stat().st_size if target.exists() else 0
+        probe = await _probe_duration_seconds(target)
+        logger.info("scene=%02d FOOTAGE_SELECT type=pexels_retry ext_id=%s size=%d duration=%ss url=%s",
+                    idx + 1, ext_id, size, probe, url[:100])
+        return (target, "video")
 
     # Fallback caption
     logger.warning("scene=%02d FOOTAGE_FALLBACK reason=all_candidates_rejected candidates=%d",
