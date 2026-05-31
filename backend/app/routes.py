@@ -681,6 +681,19 @@ async def auto_attach_assets(project_id: str, body: AutoAttachRequest, user=Depe
     if not scenes:
         raise HTTPException(status_code=400, detail="Generate scenes before auto-attach.")
 
+    # ---- Derive (or load cached) project-wide visual tone ----
+    visual_tone = project.get("visual_tone") or ""
+    if not visual_tone:
+        from .visual_query import derive_visual_tone
+        script_doc = await db.scripts.find_one({"project_id": project_id}, {"_id": 0})
+        full_text = (script_doc or {}).get("full_script") or project.get("topic") or ""
+        if full_text:
+            visual_tone = await derive_visual_tone(full_text)
+            if visual_tone:
+                await db.projects.update_one(
+                    {"id": project_id}, {"$set": {"visual_tone": visual_tone}}
+                )
+
     total = len(scenes)
     attached = 0
     skipped = 0
@@ -700,18 +713,15 @@ async def auto_attach_assets(project_id: str, body: AutoAttachRequest, user=Depe
             details.append({"scene_id": scene_id, "scene_number": scene["scene_number"], "status": "skipped", "reason": "already_has_stock"})
             continue
 
-        # Build query
-        query_parts = []
-        if scene.get("search_terms"):
-            query_parts.append(" ".join(scene["search_terms"][:3]))
-        elif scene.get("visual_direction"):
-            query_parts.append(scene["visual_direction"][:80])
-        else:
-            query_parts.append(project.get("topic") or project.get("niche") or "stock")
-        query = " ".join(q for q in query_parts if q).strip() or "stock"
+        # Build query using shared helper (LLM search_terms → deterministic keywords → fallback)
+        from .visual_query import build_scene_query
+        query = build_scene_query(scene)
 
         try:
-            result = await stock_service.search_stock(query, body.media_type, per_page=4)
+            result = await stock_service.search_stock(
+                query, body.media_type, per_page=8,
+                visual_tone=visual_tone or None,
+            )
             top = (result.get("results") or [None])[0]
             if not top:
                 failed += 1

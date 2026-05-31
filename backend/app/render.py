@@ -446,7 +446,11 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
 
     For ``stock_video`` candidates, downloads are probed with ffprobe; any
     single-frame / sub-1s clip is rejected and the next candidate is tried.
+    When all attached candidates fail the motion check, Pexels is re-queried
+    with the project's visual_tone modifier appended for a coherent fallback.
     """
+    from .visual_query import build_scene_query
+    visual_tone = (project or {}).get("visual_tone") or ""
     candidates = [a for a in attached_assets if a.get("scene_id") == scene.get("id")
                   and a.get("asset_type") in ("stock_image", "stock_video")]
     out_dir = work_dir / "scenes"
@@ -503,24 +507,23 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
         return (target, "image")
 
     # ---- Pexels retry: query for fresh results when attached candidates fail ----
-    # Builds a query from (search_terms → asset.query → visual_direction → caption_text)
-    # and walks the result set in order, motion-checking each candidate.
-    sample_asset = next((a for a in candidates if a.get("query")), None)
+    # Builds an LLM/keyword-derived query and appends the project's
+    # visual_tone modifier so all retries pull from the same visual world.
     queries: list[str] = []
-    for q in (scene.get("search_terms"),
-              (sample_asset or {}).get("query"),
-              scene.get("visual_direction"),
-              scene.get("caption_text")):
-        if isinstance(q, list):
-            q = " ".join(str(x) for x in q if x)
-        q = (str(q) if q else "").strip()
-        if q and q not in queries:
-            queries.append(q)
+    primary = build_scene_query(scene, visual_tone=visual_tone or None)
+    if primary:
+        queries.append(primary)
+    # Add a fallback query using just the narration without tone (broader)
+    narration_only = build_scene_query(scene)
+    if narration_only and narration_only not in queries:
+        queries.append(narration_only)
     tried_ext_ids = {str(a.get("external_id")) for a in candidates if a.get("external_id")}
     retry_results: list[dict] = []
     for q in queries[:2]:  # at most 2 query variations to bound API spend
         try:
-            res = await stock_service.search_stock(q, media_type="videos", per_page=15)
+            res = await stock_service.search_stock(
+                q, media_type="videos", per_page=15,
+            )
         except Exception as e:  # noqa: BLE001
             logger.warning("scene=%02d FOOTAGE_RETRY_ERROR query=%r err=%s",
                            idx + 1, q[:60], e)
@@ -533,8 +536,8 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
             retry_results.append(r)
             tried_ext_ids.add(str(r.get("external_id")))
         if retry_results:
-            logger.info("scene=%02d FOOTAGE_RETRY query=%r got=%d candidates",
-                        idx + 1, q[:60], len(retry_results))
+            logger.info("scene=%02d FOOTAGE_RETRY query=%r tone=%r got=%d candidates",
+                        idx + 1, q[:60], visual_tone, len(retry_results))
             break
 
     for r in retry_results[:6]:  # cap downloads per scene

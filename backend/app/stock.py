@@ -31,7 +31,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-from typing import Literal
+from typing import Literal, Optional
 
 import httpx
 
@@ -158,7 +158,8 @@ def _normalise_pexels_video(v: dict, query: str) -> dict:
     }
 
 
-async def _search_pexels(query: str, media_type: MediaType, per_page: int) -> list[dict]:
+async def _search_pexels(query: str, media_type: MediaType, per_page: int,
+                          *, orientation: Optional[str] = None) -> list[dict]:
     key = os.environ.get("PEXELS_API_KEY", "").strip()
     base = os.environ.get("PEXELS_API_BASE_URL", "https://api.pexels.com").rstrip("/")
     headers = {"Authorization": key}
@@ -167,7 +168,10 @@ async def _search_pexels(query: str, media_type: MediaType, per_page: int) -> li
     timeout = httpx.Timeout(10.0, connect=5.0)
     async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
         if media_type in ("both", "photos"):
-            r = await client.get(f"{base}/v1/search", params={"query": query, "per_page": per_page})
+            params = {"query": query, "per_page": per_page}
+            if orientation in ("landscape", "portrait", "square"):
+                params["orientation"] = orientation
+            r = await client.get(f"{base}/v1/search", params=params)
             if r.status_code == 429:
                 raise RuntimeError("pexels_rate_limited")
             r.raise_for_status()
@@ -179,6 +183,8 @@ async def _search_pexels(query: str, media_type: MediaType, per_page: int) -> li
             min_dur = int(os.environ.get("PEXELS_MIN_VIDEO_DURATION", "10"))
             if min_dur > 0:
                 video_params["min_duration"] = min_dur
+            if orientation in ("landscape", "portrait", "square"):
+                video_params["orientation"] = orientation
             r = await client.get(f"{base}/videos/search", params=video_params)
             if r.status_code == 429:
                 raise RuntimeError("pexels_rate_limited")
@@ -191,8 +197,18 @@ async def _search_pexels(query: str, media_type: MediaType, per_page: int) -> li
 
 # ---------------- Public ----------------
 
-async def search_stock(query: str, media_type: MediaType = "both", per_page: int = 12) -> dict:
+async def search_stock(query: str, media_type: MediaType = "both", per_page: int = 12,
+                       *, visual_tone: Optional[str] = None,
+                       orientation: Optional[str] = None) -> dict:
+    """Search Pexels (or mock) for stock footage.
+
+    ``visual_tone`` is appended to the query so every scene in a project
+    pulls from the same visual world. ``orientation`` (landscape/portrait/
+    square) is honoured by the real Pexels API for tighter visual control.
+    """
     query = (query or "").strip()
+    if visual_tone and visual_tone.strip():
+        query = f"{query} {visual_tone.strip()}".strip()
     if not query:
         return {"source": "mock" if _use_mock() else "pexels", "results": [], "mock": _use_mock(), "query": ""}
 
@@ -204,7 +220,7 @@ async def search_stock(query: str, media_type: MediaType = "both", per_page: int
             "query": query,
         }
     try:
-        results = await _search_pexels(query, media_type, per_page)
+        results = await _search_pexels(query, media_type, per_page, orientation=orientation)
         return {"source": "pexels", "results": results, "mock": False, "query": query}
     except RuntimeError as e:
         if str(e) == "pexels_rate_limited":
