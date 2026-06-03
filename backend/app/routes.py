@@ -361,7 +361,7 @@ async def generate_script_endpoint(project_id: str, user=Depends(get_current_use
         "updated_at": _now(),
     }
     await db.scripts.replace_one({"project_id": project_id}, doc, upsert=True)
-    await _log_cost(db, project_id, "script", tokens=max(500, data["word_count"] * 2), cost=0.08)
+    await _log_cost(db, project_id, "script", tokens=max(500, (data.get("word_count", 0) or 0) * 2), cost=0.08)
     await db.projects.update_one({"id": project_id}, {"$set": {"estimated_cost": float(project.get("estimated_cost", 0)) + 0.08, "updated_at": _now()}})
     return await _attach_project_view(db, await db.projects.find_one({"id": project_id}, {"_id": 0}))
 
