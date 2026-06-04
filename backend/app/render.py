@@ -235,8 +235,10 @@ async def _download_to(url: str, out_path: Path, *, max_bytes: int) -> bool:
         return False
 
 
-def _local_path_for_asset(asset: dict) -> Optional[Path]:
+def _local_path_for_asset(asset: Optional[dict]) -> Optional[Path]:
     """If the asset already has a local file_path that exists, return it."""
+    if not asset:
+        return None
     fp = asset.get("file_path")
     if fp:
         p = Path(fp)
@@ -245,7 +247,8 @@ def _local_path_for_asset(asset: dict) -> Optional[Path]:
     return None
 
 
-async def _resolve_thumbnail(asset: dict, project: dict, work_dir: Path) -> Path:
+async def _resolve_thumbnail(asset: Optional[dict], project: dict, work_dir: Path) -> Path:
+    asset = asset or {}
     out = work_dir / "intro.png"
     local = _local_path_for_asset(asset)
     if local and local.suffix.lower() in (".png", ".jpg", ".jpeg"):
@@ -325,29 +328,64 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
 async def _resolve_audio(project: dict, scenes: list[dict], assets: list[dict],
                          work_dir: Path) -> Optional[Path]:
     """Return local audio path or None."""
-    # Prefer the full-script selected
-    full = next((a for a in assets if a.get("asset_type") == "voiceover_audio"
-                 and not a.get("scene_id")
-                 and a.get("id") == project.get("selected_voiceover_asset_id")), None)
+    # Prefer selected full-script voiceover; fall back to selected/newest usable full-script asset.
+    full_candidates = [
+        a for a in assets
+        if a.get("asset_type") == "voiceover_audio"
+        and not a.get("scene_id")
+        and a.get("status") != "rejected"
+    ]
+    selected_full_id = project.get("selected_voiceover_asset_id")
+    full = next(
+        (a for a in full_candidates if selected_full_id and a.get("id") == selected_full_id),
+        None,
+    )
+    if not full and full_candidates:
+        full = next((a for a in full_candidates if a.get("status") == "selected"), None) or max(
+            full_candidates, key=lambda x: str(x.get("created_at") or "")
+        )
     if full:
         local = _local_path_for_asset(full)
         if local:
             return local
+    def _scene_key(scene: dict, index: int) -> str:
+        scene_id = scene.get("id")
+        if scene_id not in (None, ""):
+            return str(scene_id)
+        scene_number = scene.get("scene_number")
+        if scene_number not in (None, ""):
+            return f"scene-{scene_number}"
+        return f"scene-idx-{index}"
 
     # Concat scene-level (pick selected per scene; else newest non-rejected)
     scene_voices_by_id: dict[str, dict] = {}
-    for s in scenes:
-        ss = [a for a in assets if a.get("asset_type") == "voiceover_audio"
-              and a.get("scene_id") == s.get("id") and a.get("status") != "rejected"]
+    for i, s in enumerate(scenes):
+        scene_id = s.get("id")
+        scene_number = s.get("scene_number")
+        acceptable_scene_ids = {
+            str(v)
+            for v in (
+                scene_id,
+                f"scene-{scene_number}" if scene_number not in (None, "") else None,
+                str(scene_number) if scene_number not in (None, "") else None,
+            )
+            if v not in (None, "")
+        }
+        ss = [
+            a for a in assets
+            if a.get("asset_type") == "voiceover_audio"
+            and a.get("scene_id") in acceptable_scene_ids
+            and a.get("status") != "rejected"
+        ]
         if not ss:
             continue
         sel = next((x for x in ss if x.get("status") == "selected"), None) or max(
             ss, key=lambda x: str(x.get("created_at") or ""))
-        scene_voices_by_id[s["id"]] = sel
+        scene_voices_by_id[_scene_key(s, i)] = sel
     if scene_voices_by_id:
         ordered: list[Path] = []
-        for s in sorted(scenes, key=lambda x: x.get("scene_number", 0)):
-            v = scene_voices_by_id.get(s["id"])
+        for i, s in enumerate(sorted(scenes, key=lambda x: x.get("scene_number", 0))):
+            v = scene_voices_by_id.get(_scene_key(s, i))
             if not v:
                 continue
             local = _local_path_for_asset(v)
@@ -523,7 +561,19 @@ async def _run_render(job_id: str, project_id: str):
         if not check["ok"]:
             raise RuntimeError("Missing requirements: " + ", ".join(check["issues"][:5]))
 
-        sel_thumb = next((a for a in assets if a["id"] == project.get("selected_thumbnail_asset_id")), None)
+        selected_thumb_id = project.get("selected_thumbnail_asset_id")
+        thumb_candidates = [
+            a for a in assets
+            if a.get("asset_type") == "generated_thumbnail" and a.get("status") != "rejected"
+        ]
+        sel_thumb = next(
+            (a for a in thumb_candidates if selected_thumb_id and a.get("id") == selected_thumb_id),
+            None,
+        )
+        if not sel_thumb and thumb_candidates:
+            sel_thumb = next((a for a in thumb_candidates if a.get("status") == "selected"), None) or max(
+                thumb_candidates, key=lambda x: str(x.get("created_at") or "")
+            )
 
         # Workdir per job
         work_dir = STATIC_RENDERS / project_id / f"_work_{job_id}"
@@ -645,7 +695,16 @@ async def _run_render(job_id: str, project_id: str):
         try:
             saved = store.save_file(final, key, content_type="video/mp4")
         except Exception as e:  # noqa: BLE001
-            raise RuntimeError(f"storage upload failed: {e}")
+            if getattr(store, "mode", "") == "object":
+                logger.exception("Object storage upload failed; falling back to local storage")
+                from .storage import LocalStorage
+                fallback = LocalStorage()
+                try:
+                    saved = fallback.save_file(final, key, content_type="video/mp4")
+                except Exception as local_err:  # noqa: BLE001
+                    raise RuntimeError(f"storage upload failed: {e}; local fallback failed: {local_err}")
+            else:
+                raise RuntimeError(f"storage upload failed: {e}")
 
         await _set_job(
             job_id,
@@ -655,7 +714,7 @@ async def _run_render(job_id: str, project_id: str):
             output_path=str(saved.file_path) if saved.file_path else None,
             output_url=saved.url,
             output_relative_url=saved.preview_path,
-            output_storage_mode=store.mode,
+            output_storage_mode=("object" if saved.remote else "local"),
             output_storage_key=saved.key,
             file_size=(saved.file_path.stat().st_size if saved.file_path and saved.file_path.exists() else final.stat().st_size if final.exists() else None),
             duration=duration,

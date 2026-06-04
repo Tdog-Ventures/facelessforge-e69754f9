@@ -189,11 +189,23 @@ class S3Storage(StorageBackend):
     def __init__(self):
         self.bucket = os.environ.get("STORAGE_BUCKET", "")
         self.region = os.environ.get("STORAGE_REGION") or None
-        self.endpoint_url = os.environ.get("STORAGE_ENDPOINT_URL") or None
+        self.endpoint_url = (
+            os.environ.get("STORAGE_ENDPOINT_URL")
+            or os.environ.get("STORAGE_ENDPOINT")
+            or None
+        )
         self.public_base = (os.environ.get("STORAGE_PUBLIC_BASE_URL") or "").rstrip("/")
         self.signed_ttl = int(os.environ.get("STORAGE_SIGNED_URL_TTL", "86400"))
-        self.access_key = os.environ.get("STORAGE_ACCESS_KEY_ID") or os.environ.get("AWS_ACCESS_KEY_ID")
-        self.secret_key = os.environ.get("STORAGE_SECRET_ACCESS_KEY") or os.environ.get("AWS_SECRET_ACCESS_KEY")
+        self.access_key = (
+            os.environ.get("STORAGE_ACCESS_KEY_ID")
+            or os.environ.get("STORAGE_ACCESS_KEY")
+            or os.environ.get("AWS_ACCESS_KEY_ID")
+        )
+        self.secret_key = (
+            os.environ.get("STORAGE_SECRET_ACCESS_KEY")
+            or os.environ.get("STORAGE_SECRET_KEY")
+            or os.environ.get("AWS_SECRET_ACCESS_KEY")
+        )
         self._client = None
         self._client_lock = threading.Lock()
 
@@ -275,7 +287,12 @@ class S3Storage(StorageBackend):
         }
         ok = bool(self.bucket) and bool(self.access_key and self.secret_key)
         out["ok"] = ok
-        out["warning"] = None if ok else "Object storage misconfigured: STORAGE_BUCKET / STORAGE_ACCESS_KEY_ID / STORAGE_SECRET_ACCESS_KEY required."
+        out["warning"] = None if ok else (
+            "Object storage misconfigured: STORAGE_BUCKET plus one of "
+            "(STORAGE_ACCESS_KEY_ID/STORAGE_SECRET_ACCESS_KEY), "
+            "(STORAGE_ACCESS_KEY/STORAGE_SECRET_KEY), "
+            "or (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY) is required."
+        )
         return out
 
     def probe(self) -> dict:
