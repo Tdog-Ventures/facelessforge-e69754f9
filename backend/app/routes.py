@@ -415,7 +415,13 @@ async def generate_thumbnails_endpoint(project_id: str, user=Depends(get_current
     db = get_db()
     project = await db.projects.find_one({"id": project_id}, {"_id": 0})
     _ensure_project_access(project, user, write=True)
-    concepts = await gen.generate_thumbnails(project)
+    script = await db.scripts.find_one({"project_id": project_id}, {"_id": 0}) or {}
+    if hasattr(gen, "generate_thumbnails"):
+        concepts = await gen.generate_thumbnails(project)
+    elif hasattr(gen, "generate_thumbnail_concepts"):
+        concepts = await gen.generate_thumbnail_concepts(project, script)
+    else:
+        raise HTTPException(status_code=500, detail="Thumbnail generation function unavailable")
     # Upsert as assets (type=thumbnail_concept)
     await db.assets.delete_many({"project_id": project_id, "asset_type": "thumbnail_concept"})
     for i, c in enumerate(concepts, start=1):
