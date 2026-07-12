@@ -6,31 +6,83 @@ import {
 import { api, formatApiError } from "../lib/api";
 import { useConfirm } from "./ConfirmDialog";
 
-export default function ThumbnailPanel({ projectId, assets, selectedThumbnailId, canEdit, onChange }) {
+export default function ThumbnailPanel({
+  projectId,
+  assets,
+  selectedThumbnailId,
+  canEdit,
+  onChange,
+  autoGeneratingConcepts = false,
+}) {
   const [generating, setGenerating] = useState(null); // brief id currently generating
   const [working, setWorking] = useState(null); // asset id being acted on
+  const [autoSelectFirst, setAutoSelectFirst] = useState(true);
+  const [autoPendingBriefId, setAutoPendingBriefId] = useState(null);
   const [meta, setMeta] = useState({ mock: true, provider: "gemini_nano_banana" });
+  const [metaLoading, setMetaLoading] = useState(true);
+  const [metaError, setMetaError] = useState(null);
   const confirm = useConfirm();
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const { data } = await api.get("/thumbnails/meta");
-        setMeta(data);
-      } catch {/* ignore */}
-    })();
-  }, []);
-
-  const briefs = (assets || []).filter((a) => a.asset_type === "thumbnail_concept" && a.brief);
+  // Derived lists — defined before any effect that reads them so the hooks never
+  // close over an uninitialized variable (and so the panel never crashes when
+  // assets arrive late or missing).
+  const safeAssets = (assets || []).filter(Boolean);
+  const briefs = safeAssets.filter((a) => a?.asset_type === "thumbnail_concept" && a?.brief);
   const generatedByBrief = (briefId) =>
-    (assets || []).filter((a) => a.asset_type === "generated_thumbnail" && a.brief_asset_id === briefId);
+    safeAssets.filter((a) => a?.asset_type === "generated_thumbnail" && a?.brief_asset_id === briefId);
 
-  const refresh = async () => {
-    const { data } = await api.get(`/projects/${projectId}`);
-    onChange(data);
+  const loadMeta = async () => {
+    setMetaLoading(true);
+    setMetaError(null);
+    try {
+      const { data } = await api.get("/thumbnails/meta");
+      setMeta(data || { mock: true, provider: "gemini_nano_banana" });
+    } catch (err) {
+      setMetaError(formatApiError(err.response?.data?.detail) || err.message);
+    } finally {
+      setMetaLoading(false);
+    }
   };
 
+  useEffect(() => {
+    loadMeta();
+  }, []);
+
+  // Auto-select the first thumbnail concept if the user hasn't picked one within 5 seconds.
+  useEffect(() => {
+    if (!canEdit || !autoSelectFirst || selectedThumbnailId || autoGeneratingConcepts || !briefs.length) return;
+    const firstBrief = briefs[0];
+    const firstGens = generatedByBrief(firstBrief.id);
+    if (firstGens.length > 0) {
+      const timer = setTimeout(() => {
+        if (!selectedThumbnailId) select(firstGens[0].id);
+      }, 5000);
+      return () => clearTimeout(timer);
+    }
+    // No generated image yet — kick off generation for the first brief and mark it pending.
+    const timer = setTimeout(() => {
+      if (!selectedThumbnailId) {
+        setAutoPendingBriefId(firstBrief.id);
+        generate(firstBrief.id, 1);
+      }
+    }, 5000);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [briefs.length, selectedThumbnailId, autoSelectFirst, canEdit, autoGeneratingConcepts]);
+
+  // After generating the first brief, select its first variant.
+  useEffect(() => {
+    if (!autoPendingBriefId || selectedThumbnailId) return;
+    const gens = generatedByBrief(autoPendingBriefId);
+    if (gens.length > 0) {
+      select(gens[0].id);
+      setAutoPendingBriefId(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [assets, autoPendingBriefId, selectedThumbnailId]);
+
   const generate = async (briefId, variants = 1) => {
+    if (!projectId || !briefId) return;
     setGenerating(briefId);
     const toastId = toast.loading(
       variants > 1 ? `Generating ${variants} thumbnail variants…` : "Generating thumbnail image…",
@@ -60,6 +112,7 @@ export default function ThumbnailPanel({ projectId, assets, selectedThumbnailId,
   };
 
   const select = async (assetId) => {
+    if (!projectId || !assetId) return;
     setWorking(assetId);
     try {
       const { data } = await api.post(`/projects/${projectId}/thumbnails/${assetId}/select`);
@@ -73,6 +126,7 @@ export default function ThumbnailPanel({ projectId, assets, selectedThumbnailId,
   };
 
   const reject = async (assetId) => {
+    if (!projectId || !assetId) return;
     setWorking(assetId);
     try {
       const { data } = await api.post(`/projects/${projectId}/thumbnails/${assetId}/reject`);
@@ -86,6 +140,7 @@ export default function ThumbnailPanel({ projectId, assets, selectedThumbnailId,
   };
 
   const remove = async (assetId) => {
+    if (!projectId || !assetId) return;
     const ok = await confirm({
       title: "Delete this thumbnail?",
       description: "The generated image file will be permanently removed.",
@@ -119,10 +174,40 @@ export default function ThumbnailPanel({ projectId, assets, selectedThumbnailId,
     </div>
   );
 
+  if (metaLoading) {
+    return (
+      <div className="border border-zinc-800 border-dashed p-10 text-center rounded-sm">
+        <Loader2 size={18} className="animate-spin text-[#00E5FF] mx-auto mb-3" />
+        <p className="text-sm text-zinc-400">Loading thumbnail settings…</p>
+      </div>
+    );
+  }
+
+  if (metaError) {
+    return (
+      <div className="border border-[#FF3366]/30 bg-[#FF3366]/5 p-6 rounded-sm text-center space-y-3">
+        <p className="text-sm text-[#FF3366]">Could not load thumbnail settings: {metaError}</p>
+        <button
+          onClick={loadMeta}
+          className="inline-flex items-center gap-2 font-mono text-[10px] uppercase tracking-widest border border-zinc-700 hover:border-[#00E5FF] text-zinc-300 hover:text-[#00E5FF] px-3 py-2 rounded-sm transition-colors"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
+
   if (briefs.length === 0) {
     return (
       <div className="border border-zinc-800 border-dashed p-10 text-center rounded-sm">
-        <p className="text-sm text-zinc-400">No thumbnail briefs yet. Generate metadata first, then create thumbnail concepts.</p>
+        {autoGeneratingConcepts ? (
+          <div className="flex flex-col items-center gap-3">
+            <Loader2 size={18} className="animate-spin text-[#00E5FF]" />
+            <p className="text-sm text-zinc-400">Generating thumbnail concepts from metadata…</p>
+          </div>
+        ) : (
+          <p className="text-sm text-zinc-400">No thumbnail briefs yet. Generate metadata first, then create thumbnail concepts.</p>
+        )}
       </div>
     );
   }
@@ -131,9 +216,21 @@ export default function ThumbnailPanel({ projectId, assets, selectedThumbnailId,
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div className="font-mono text-[11px] text-zinc-500">
-          {briefs.length} concepts · {meta.mock ? "mock images" : "Gemini Nano Banana"}
+          {autoGeneratingConcepts ? "Generating thumbnail concepts…" : `${briefs.length} concepts · ${meta.mock ? "mock images" : "Gemini Nano Banana"}`}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3">
+          {canEdit && (
+            <label className="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={autoSelectFirst}
+                onChange={(e) => setAutoSelectFirst(e.target.checked)}
+                className="h-3 w-3 accent-[#00E5FF] bg-[#0A0A0A] border-zinc-700 rounded"
+              />
+              Auto-select first concept
+            </label>
+          )}
+          <div className="flex items-center gap-2">
           {meta.mock ? (
             <span
               data-testid="thumb-mock-badge"
@@ -146,6 +243,7 @@ export default function ThumbnailPanel({ projectId, assets, selectedThumbnailId,
               Generated · Gemini
             </span>
           )}
+          </div>
         </div>
       </div>
 
@@ -164,15 +262,15 @@ export default function ThumbnailPanel({ projectId, assets, selectedThumbnailId,
                 <div className="font-mono text-[10px] uppercase tracking-widest text-zinc-500 mb-2">
                   Concept · {String(i + 1).padStart(2, "0")}
                 </div>
-                <div className="text-2xl font-bold tracking-tight text-white">{b.thumbnail_title_text}</div>
+                <div className="text-2xl font-bold tracking-tight text-white">{b?.thumbnail_title_text || "Untitled concept"}</div>
               </div>
 
               <div className="p-5 space-y-3">
-                <Row label="Composition" value={b.visual_composition} />
-                <Row label="Emotion" value={b.emotion_angle} />
-                <Row label="Focal point" value={b.subject_focal_point} />
-                <Row label="Colour" value={b.colour_direction} />
-                <Row label="Click trigger" value={b.click_trigger} />
+                <Row label="Composition" value={b?.visual_composition || "—"} />
+                <Row label="Emotion" value={b?.emotion_angle || "—"} />
+                <Row label="Focal point" value={b?.subject_focal_point || "—"} />
+                <Row label="Colour" value={b?.colour_direction || "—"} />
+                <Row label="Click trigger" value={b?.click_trigger || "—"} />
               </div>
 
               {/* Generated variants */}
@@ -305,7 +403,7 @@ export default function ThumbnailPanel({ projectId, assets, selectedThumbnailId,
               {/* Brief image-prompt display */}
               <div className="border-t border-zinc-800 px-5 py-3">
                 <div className="font-mono text-[10px] uppercase tracking-widest text-zinc-500 mb-1">Base image prompt</div>
-                <div className="font-mono text-xs text-[#7B61FF] leading-relaxed line-clamp-2">{b.image_prompt}</div>
+                <div className="font-mono text-xs text-[#7B61FF] leading-relaxed line-clamp-2">{b?.image_prompt || "No prompt available"}</div>
               </div>
             </div>
           );

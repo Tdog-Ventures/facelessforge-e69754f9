@@ -124,12 +124,21 @@ def _normalise_pexels_photo(p: dict, query: str) -> dict:
 def _normalise_pexels_video(v: dict, query: str) -> dict:
     # Pick a reasonable thumbnail
     preview = v.get("image")
-    # Pick mp4 file
-    download = None
-    for f in (v.get("video_files") or []):
-        if f.get("file_type") == "video/mp4" and (f.get("quality") in ("hd", "sd")):
-            download = f.get("link")
-            break
+    # Pick the best mp4 file: prefer hd, then sd, then any other quality
+    # (e.g. uhd); within a quality class prefer the largest file that is
+    # still ≤1920 wide so downloads stay under the render size cap.
+    mp4s = [f for f in (v.get("video_files") or [])
+            if f.get("file_type") == "video/mp4" and f.get("link")]
+
+    def _rank(f: dict) -> tuple:
+        quality_order = {"hd": 0, "sd": 1}
+        width = int(f.get("width") or 0)
+        return (quality_order.get(f.get("quality"), 2), 1 if width > 1920 else 0, -width)
+
+    download = sorted(mp4s, key=_rank)[0].get("link") if mp4s else None
+    if not download:
+        logger.warning("Pexels video %s has no usable mp4 file (%d video_files) for query '%s'",
+                       v.get("id"), len(v.get("video_files") or []), query)
     user = v.get("user") or {}
     return {
         "source": "pexels",
@@ -163,6 +172,7 @@ async def _search_pexels(query: str, media_type: MediaType, per_page: int) -> li
                 raise RuntimeError("pexels_rate_limited")
             r.raise_for_status()
             data = r.json()
+            logger.info("Pexels photo search '%s' -> %d results", query, len(data.get("photos") or []))
             for p in (data.get("photos") or []):
                 out.append(_normalise_pexels_photo(p, query))
         if media_type in ("both", "videos"):
@@ -171,6 +181,7 @@ async def _search_pexels(query: str, media_type: MediaType, per_page: int) -> li
                 raise RuntimeError("pexels_rate_limited")
             r.raise_for_status()
             data = r.json()
+            logger.info("Pexels video search '%s' -> %d results", query, len(data.get("videos") or []))
             for v in (data.get("videos") or []):
                 out.append(_normalise_pexels_video(v, query))
     return out

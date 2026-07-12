@@ -13,6 +13,7 @@ from starlette.middleware.cors import CORSMiddleware
 
 from app.db import init_db, ensure_indexes, close_db
 from app.routes import router as api_router
+from app.intake import router as intake_router
 from app.external_api import router as external_router
 from app.seed import run_seed
 from app.system import ensure_ffmpeg_available
@@ -114,6 +115,8 @@ async def health_deep():
 
 
 app.include_router(api_router)
+# Intake orchestrator: single-call full pipeline
+app.include_router(intake_router, prefix="/api")
 # External API: thin wrapper exposed at /api/external/...
 app.include_router(external_router, prefix="/api")
 
@@ -148,3 +151,37 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ---------------------------------------------------------------------------
+# SPA catch-all — MUST be the LAST route registered.
+# Serves the built React app (static/frontend/index.html) for any GET request
+# that isn't an /api/ route, so deep links and hard refreshes resolve to the
+# client-side router instead of returning a 404. Real asset files (JS/CSS/img)
+# are served directly when they exist; everything else falls back to index.html.
+# ---------------------------------------------------------------------------
+from fastapi import Request
+from fastapi.responses import FileResponse
+from starlette.responses import Response as _Response
+
+_FRONTEND_DIR = (_STATIC / "frontend").resolve()
+_FRONTEND_INDEX = _FRONTEND_DIR / "index.html"
+
+
+@app.get("/{full_path:path}")
+async def spa_catch_all(full_path: str, request: Request):
+    # Never hijack API routes — let unmatched /api/* return their own 404.
+    if full_path == "api" or full_path.startswith("api/"):
+        return _Response(status_code=404)
+
+    # Serve a real frontend asset (bundle, css, image, etc.) when present.
+    if full_path:
+        candidate = (_FRONTEND_DIR / full_path).resolve()
+        if _FRONTEND_DIR in candidate.parents and candidate.is_file():
+            return FileResponse(str(candidate))
+
+    # Fall back to the SPA shell so React Router can handle the route.
+    if _FRONTEND_INDEX.is_file():
+        return FileResponse(str(_FRONTEND_INDEX))
+
+    return _Response(status_code=404)

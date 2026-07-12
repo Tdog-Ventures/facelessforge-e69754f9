@@ -36,6 +36,7 @@ export default function ProjectDetailPage() {
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState("overview");
   const [deleting, setDeleting] = useState(false);
+  const [autoGeneratingThumbnails, setAutoGeneratingThumbnails] = useState(false);
   const confirm = useConfirm();
 
   const canEdit = user && user.role !== "viewer";
@@ -264,7 +265,14 @@ export default function ProjectDetailPage() {
             <ScenePlanner projectId={project.id} scenes={scenes} canEdit={canEdit} onChange={setView} hasScript={!!script} attachedAssets={assets} />
           )}
           {tab === "metadata" && (
-            <MetadataPanel projectId={project.id} metadata={metadata} canEdit={canEdit} onChange={setView} hasScript={!!script} />
+            <MetadataPanel
+              projectId={project.id}
+              metadata={metadata}
+              canEdit={canEdit}
+              onChange={setView}
+              hasScript={!!script}
+              onThumbnailGeneratingChange={setAutoGeneratingThumbnails}
+            />
           )}
           {tab === "thumbnails" && (
             <ThumbnailPanel
@@ -273,12 +281,14 @@ export default function ProjectDetailPage() {
               selectedThumbnailId={project.selected_thumbnail_asset_id}
               canEdit={canEdit}
               onChange={setView}
+              autoGeneratingConcepts={autoGeneratingThumbnails}
             />
           )}
           {tab === "voiceover" && (
             <VoiceoverPanel
               projectId={project.id}
               project={project}
+              script={script}
               scenes={scenes}
               assets={assets}
               hasScript={!!script}

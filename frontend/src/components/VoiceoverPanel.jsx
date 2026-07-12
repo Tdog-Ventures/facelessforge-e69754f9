@@ -3,7 +3,7 @@ import { toast } from "sonner";
 import {
   AudioLines, Loader2, Star, X as XIcon, Trash2, Download, Mic2,
 } from "lucide-react";
-import { api, formatApiError } from "../lib/api";
+import { api, BACKEND_URL, formatApiError } from "../lib/api";
 import { useConfirm } from "./ConfirmDialog";
 
 const VOICE_STYLES = [
@@ -21,6 +21,31 @@ function fmtSec(s) {
   const m = Math.floor(s / 60);
   const r = Math.round(s % 60);
   return m > 0 ? `${m}m ${String(r).padStart(2, "0")}s` : `${r}s`;
+}
+
+function audioSrc(asset) {
+  // Use the backend-provided URL. Object-storage backends return a public
+  // absolute URL (e.g. R2/S3) that should be used as-is. Local storage returns
+  // either a relative /api/static/... path or an absolute URL rooted at the
+  // configured FRONTEND_URL; in both cases we prepend the backend base so the
+  // audio file is reachable (avoiding a double /api prefix).
+  const raw = asset.preview_url || asset.url || "";
+  if (raw.startsWith("/api/static/")) return `${BACKEND_URL}${raw}`;
+  if (raw.startsWith("http")) {
+    try {
+      const u = new URL(raw);
+      // If the URL points at this API host, keep only the path so it works
+      // when accessed via IP:port as well as via the configured domain.
+      if (u.host === window.location.host) {
+        return `${BACKEND_URL}${u.pathname}`;
+      }
+      // Otherwise trust the backend's public URL (R2/S3/CDN).
+      return raw;
+    } catch {
+      return raw;
+    }
+  }
+  return raw;
 }
 
 export default function VoiceoverPanel({
@@ -204,7 +229,7 @@ export default function VoiceoverPanel({
         <audio
           data-testid={`vo-audio-${asset.id}`}
           controls
-          src={asset.preview_url}
+          src={audioSrc(asset)}
           className="w-full h-10"
           preload="metadata"
         />

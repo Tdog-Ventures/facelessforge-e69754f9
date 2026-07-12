@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useState } from "react";
-import { api, formatApiError } from "./api";
+import { api, API, formatApiError } from "./api";
 
 const AuthContext = createContext(null);
 
@@ -11,9 +11,19 @@ export function AuthProvider({ children }) {
     let cancelled = false;
     (async () => {
       try {
-        const { data } = await api.get("/auth/me");
+        const token = localStorage.getItem("access_token");
+        const headers = { Accept: "application/json" };
+        if (token) headers.Authorization = `Bearer ${token}`;
+        const res = await fetch(`${API}/users/me`, { headers, credentials: "include" });
+        if (!res.ok) {
+          console.warn("/api/users/me returned", res.status, "- clearing auth state");
+          if (!cancelled) setUser(false);
+          return;
+        }
+        const data = await res.json();
         if (!cancelled) setUser(data);
-      } catch {
+      } catch (err) {
+        console.error("Auth check failed:", err);
         if (!cancelled) setUser(false);
       }
     })();

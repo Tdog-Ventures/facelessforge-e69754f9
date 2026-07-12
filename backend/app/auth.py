@@ -48,12 +48,19 @@ def create_refresh_token(user_id: str) -> str:
     return jwt.encode(payload, _secret(), algorithm=JWT_ALGORITHM)
 
 
-def set_auth_cookies(response, access_token: str, refresh_token: str) -> None:
+def set_auth_cookies(response, access_token: str, refresh_token: str, request: Optional[Request] = None) -> None:
     dev_mode = os.environ.get("DEV_MODE", "false").lower() in ("1", "true", "yes")
     # In production (cross-origin HTTPS), cookies need SameSite=None + Secure.
     # In dev (same-origin HTTP), SameSite=Lax + Secure=False.
-    samesite = "lax" if dev_mode else "none"
-    secure = not dev_mode
+    # When the request is available, derive the flags from the actual scheme so
+    # the app works on HTTP deployments without manual DEV_MODE toggles.
+    if request is not None:
+        proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+        secure = proto == "https"
+        samesite = "none" if secure else "lax"
+    else:
+        samesite = "lax" if dev_mode else "none"
+        secure = not dev_mode
     response.set_cookie(
         key="access_token", value=access_token, httponly=True,
         secure=secure, samesite=samesite, max_age=ACCESS_TTL_MINUTES * 60, path="/",

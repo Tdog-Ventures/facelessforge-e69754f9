@@ -98,7 +98,7 @@ async def _seed_project(db, *, user_id: str, spec: dict, created_offset_days: in
     scenes = []
     metadata = None
     if depth in ("scenes", "full"):
-        scenes = await gen.generate_scenes(project, script_data["full_script"])
+        scenes = await gen.generate_scene_plan(project, script_data)
         for sc in scenes:
             sc["project_id"] = pid
             sc["created_at"] = created
@@ -107,13 +107,13 @@ async def _seed_project(db, *, user_id: str, spec: dict, created_offset_days: in
             await db.scenes.insert_many([dict(s) for s in scenes])
 
     if depth == "full":
-        meta = await gen.generate_metadata(project, script_data["full_script"], scenes)
+        meta = await gen.generate_metadata(project, script_data, scenes)
         metadata = {"id": str(uuid.uuid4()), "project_id": pid, **meta,
                     "created_at": created, "updated_at": created}
         await db.metadata_packages.insert_one(metadata)
 
         # thumbnails -> assets
-        thumbs = await gen.generate_thumbnails(project)
+        thumbs = await gen.generate_thumbnail_concepts(project, script_data)
         for i, c in enumerate(thumbs, start=1):
             await db.assets.insert_one({
                 "id": str(uuid.uuid4()), "project_id": pid,

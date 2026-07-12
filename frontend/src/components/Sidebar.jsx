@@ -2,12 +2,13 @@ import React from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Plus, FolderKanban, Settings as SettingsIcon,
-  LogOut, Users, BarChart3, Boxes, ShieldCheck,
+  LogOut, Users, BarChart3, Boxes, ShieldCheck, Video,
 } from "lucide-react";
 import { useAuth } from "../lib/auth";
 
 const NAV_ITEMS = [
   { to: "/app", icon: LayoutDashboard, label: "Dashboard", end: true, testId: "nav-dashboard" },
+  { to: "/app/client-dashboard", icon: Video, label: "Client Dashboard", testId: "nav-client-dashboard" },
   { to: "/app/projects", icon: FolderKanban, label: "Projects", testId: "nav-projects" },
   { to: "/app/projects/new", icon: Plus, label: "Create Project", testId: "nav-create" },
   { to: "/app/analytics", icon: BarChart3, label: "Analytics", testId: "nav-analytics" },

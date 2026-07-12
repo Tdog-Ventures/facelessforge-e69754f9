@@ -180,7 +180,7 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
                 <tr key={s.id} className="border-b border-zinc-800 hover:bg-[#1A1A1A] transition-colors align-top">
                   <td className="px-4 py-3 font-mono text-[#00E5FF] text-xs">{String(s.scene_number).padStart(2, "0")}</td>
                   <td className="px-4 py-3 font-mono text-xs text-zinc-400">
-                    {formatDuration(s.start_time)} → {formatDuration(s.end_time)}
+                    {formatDuration(s.start_time || 0)} → {formatDuration(s.end_time || 0)}
                   </td>
                   <td className="px-4 py-3 text-zinc-200 leading-relaxed">
                     {s.narration_text}
@@ -212,7 +212,7 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
                   <td className="px-4 py-3">
                     <div className="text-zinc-300 mb-1">{s.visual_direction}</div>
                     <div className="font-mono text-[10px] uppercase tracking-widest text-[#7B61FF]">
-                      {s.asset_type.replace(/_/g, " ")}
+                      {(s.asset_type || "").replace(/_/g, " ")}
                     </div>
                     {s.search_terms?.length > 0 && (
                       <div className="mt-2 flex flex-wrap gap-1">

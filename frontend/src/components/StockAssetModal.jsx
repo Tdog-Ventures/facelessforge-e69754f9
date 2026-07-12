@@ -51,8 +51,22 @@ export default function StockAssetModal({ open, onOpenChange, projectId, scene, 
       setResults([]);
       setSource(null);
       setWarning("");
-      // Pre-fill query based on scene search terms
-      const defaultQuery = scene?.search_terms?.slice(0, 3).join(" ") || "";
+      // Use the scene's visual description for stock search, not the narration text.
+      // Fall back to search_terms if visual_direction is empty.
+      const toKeywords = (text = "") =>
+        text
+          .trim()
+          .split(/\s+/)
+          .slice(0, 8)
+          .join(" ");
+      const visual = scene?.visual_direction || "";
+      const defaultQuery = visual
+        ? toKeywords(visual)
+        : (scene?.search_terms || [])
+            .slice(0, 3)
+            .map((t) => t.trim().split(/\s+/).slice(0, 3).join(" "))
+            .filter(Boolean)
+            .join(" ");
       setQuery(defaultQuery);
       search({ media_type: mediaType, per_page: 12, query: defaultQuery || undefined });
     }

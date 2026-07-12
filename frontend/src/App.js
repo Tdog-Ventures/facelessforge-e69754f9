@@ -9,6 +9,8 @@ import LandingPage from "@/pages/LandingPage";
 import LoginPage from "@/pages/LoginPage";
 import RegisterPage from "@/pages/RegisterPage";
 import DashboardPage from "@/pages/DashboardPage";
+import AppShell from "@/components/AppShell";
+import ClientDashboard from "@/components/ClientDashboard";
 import ProjectsPage from "@/pages/ProjectsPage";
 import CreateProjectPage from "@/pages/CreateProjectPage";
 import ProjectDetailPage from "@/pages/ProjectDetailPage";
@@ -63,6 +65,7 @@ export default function App() {
             <Route path="/reset-password" element={<GuestOnly><ResetPasswordPage /></GuestOnly>} />
 
             <Route path="/app" element={<Protected><DashboardPage /></Protected>} />
+            <Route path="/app/client-dashboard" element={<Protected><AppShell><ClientDashboard /></AppShell></Protected>} />
             <Route path="/app/projects" element={<Protected><ProjectsPage /></Protected>} />
             <Route path="/app/projects/new" element={<Protected><CreateProjectPage /></Protected>} />
             <Route path="/app/projects/:id" element={<Protected><ProjectDetailPage /></Protected>} />

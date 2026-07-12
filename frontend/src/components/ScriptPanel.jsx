@@ -7,6 +7,7 @@ import CopyButton from "./CopyButton";
 export default function ScriptPanel({ projectId, script, canEdit, onChange }) {
   const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [autoSelectFirst, setAutoSelectFirst] = useState(true);
   const [draft, setDraft] = useState({
     selected_hook: script?.selected_hook || "",
     full_script: script?.full_script || "",
@@ -20,6 +21,20 @@ export default function ScriptPanel({ projectId, script, canEdit, onChange }) {
       cta_block: script?.cta_block || "",
     });
   }, [script?.id]);
+
+  // Auto-select the first hook if the user hasn't picked one within 5 seconds.
+  useEffect(() => {
+    if (!canEdit || !autoSelectFirst || !script) return;
+    const hooks = [script.hook_option_one, script.hook_option_two, script.hook_option_three].filter(Boolean);
+    if (!hooks.length || draft.selected_hook) return;
+    const timer = setTimeout(() => {
+      if (!draft.selected_hook) {
+        pickHook(hooks[0]);
+      }
+    }, 5000);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [script?.id, autoSelectFirst, canEdit]);
 
   const generate = async () => {
     setGenerating(true);
@@ -77,7 +92,7 @@ export default function ScriptPanel({ projectId, script, canEdit, onChange }) {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4 font-mono text-[11px] text-zinc-500">
-          <span>{script.word_count} words</span>
+          <span>{script?.word_count ?? 0} words</span>
           <span>·</span>
           <span>~{Math.floor(script.estimated_duration / 60)}:{String(script.estimated_duration % 60).padStart(2, "0")} narration</span>
         </div>
@@ -111,6 +126,17 @@ export default function ScriptPanel({ projectId, script, canEdit, onChange }) {
       <div className="border border-zinc-800 bg-[#121212] rounded-sm">
         <div className="px-5 py-3 border-b border-zinc-800 flex items-center justify-between">
           <span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Hook options · pick one</span>
+          {canEdit && (
+            <label className="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={autoSelectFirst}
+                onChange={(e) => setAutoSelectFirst(e.target.checked)}
+                className="h-3 w-3 accent-[#00E5FF] bg-[#0A0A0A] border-zinc-700 rounded"
+              />
+              Auto-select first hook
+            </label>
+          )}
         </div>
         <div className="divide-y divide-zinc-800">
           {hooks.map((h, i) => {

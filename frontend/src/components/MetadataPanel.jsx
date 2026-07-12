@@ -4,7 +4,14 @@ import { Sparkles, Loader2, Save, Download } from "lucide-react";
 import { api, formatApiError, API } from "../lib/api";
 import CopyButton from "./CopyButton";
 
-export default function MetadataPanel({ projectId, metadata, canEdit, onChange, hasScript }) {
+export default function MetadataPanel({
+  projectId,
+  metadata,
+  canEdit,
+  onChange,
+  hasScript,
+  onThumbnailGeneratingChange,
+}) {
   const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [draft, setDraft] = useState({
@@ -21,7 +28,13 @@ export default function MetadataPanel({ projectId, metadata, canEdit, onChange, 
       tags: (metadata?.tags || []).join(", "),
       pinned_comment: metadata?.pinned_comment || "",
     });
-  }, [metadata?.id]);
+  }, [
+    metadata?.description,
+    metadata?.id,
+    metadata?.pinned_comment,
+    metadata?.selected_title,
+    metadata?.tags,
+  ]);
 
   const generate = async () => {
     setGenerating(true);
@@ -30,8 +43,24 @@ export default function MetadataPanel({ projectId, metadata, canEdit, onChange, 
       const { data } = await api.post(`/projects/${projectId}/generate-metadata`);
       onChange(data);
       toast.success("Metadata generated", { id: "gen-meta" });
+
+      onThumbnailGeneratingChange?.(true);
+      toast.loading("Generating thumbnail concepts…", { id: "gen-thumbnails" });
+      try {
+        const { data: thumbnailData } = await api.post(`/projects/${projectId}/generate-thumbnails`);
+        onChange(thumbnailData);
+        toast.success("Thumbnail concepts generated", { id: "gen-thumbnails" });
+      } catch (thumbErr) {
+        toast.error("Thumbnail generation failed", {
+          id: "gen-thumbnails",
+          description: formatApiError(thumbErr.response?.data?.detail) || thumbErr.message,
+        });
+      } finally {
+        onThumbnailGeneratingChange?.(false);
+      }
     } catch (err) {
       toast.error("Generation failed", { id: "gen-meta", description: formatApiError(err.response?.data?.detail) || err.message });
+      onThumbnailGeneratingChange?.(false);
     } finally {
       setGenerating(false);
     }

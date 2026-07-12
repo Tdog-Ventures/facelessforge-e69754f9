@@ -1,0 +1,43 @@
+version: "3.9"
+services:
+  facelessforge-mongo:
+    image: mongo:7
+    container_name: facelessforge-mongo
+    restart: unless-stopped
+    volumes:
+      - facelessforge_mongo_data:/data/db
+    networks:
+      - facelessforge_net
+
+  facelessforge-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: facelessforge-app
+    restart: unless-stopped
+    ports:
+      - "7001:7001"
+    env_file:
+      - .env.facelessforge
+    depends_on:
+      - facelessforge-mongo
+    networks:
+      - facelessforge_net
+    volumes:
+      - facelessforge_renders:/app/backend/static/renders
+      - facelessforge_audio:/app/backend/static/audio
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7001/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  facelessforge_mongo_data:
+  facelessforge_renders:
+  facelessforge_audio:
+
+networks:
+  facelessforge_net:
+    driver: bridge

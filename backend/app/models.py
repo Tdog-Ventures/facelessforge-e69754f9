@@ -45,6 +45,8 @@ class ProjectCreate(BaseModel):
     visual_style: Optional[str] = "cinematic b-roll"
     monetisation_intent: Optional[str] = "ads + affiliate"
     cta_goal: Optional[str] = "subscribe"
+    auto_post: Optional[bool] = False
+    platforms: Optional[List[str]] = []
 
 
 class ProjectUpdate(BaseModel):
@@ -59,6 +61,8 @@ class ProjectUpdate(BaseModel):
     monetisation_intent: Optional[str] = None
     cta_goal: Optional[str] = None
     status: Optional[str] = None
+    auto_post: Optional[bool] = None
+    platforms: Optional[List[str]] = None
 
 
 class Project(BaseModel):
@@ -78,6 +82,8 @@ class Project(BaseModel):
     status: str
     quality_score: int
     estimated_cost: float
+    auto_post: bool = False
+    platforms: List[str] = []
     created_at: datetime
     updated_at: datetime
 
