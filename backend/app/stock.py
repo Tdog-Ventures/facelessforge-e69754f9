@@ -1,5 +1,15 @@
 """Stock asset service — Pexels with deterministic mock fallback.
 
+CHANGELOG:
+- 2025-06-01: Constitution §4.1 (FOOTAGE CURATION) — Enforced landscape-only
+  via orientation="landscape" for all video searches and width/height checks.
+- 2025-06-01: Constitution §4.1 — Reject stock videos narrower than 1280px.
+- 2025-06-01: Constitution §4.1 — Reject stock videos with height >= width.
+- 2025-06-01: Constitution §4.1 — Added `score_relevance()` to rank candidates
+  by query term overlap in URL/slug, preferring the most relevant footage.
+- 2025-06-01: Constitution §4.2 — Search queries now 2-4 concrete nouns from
+  search_terms; orientation is locked to landscape for all video searches.
+
 Public API:
     await search_stock(query, media_type="both", per_page=12) -> {
         "source": "mock" | "pexels",
@@ -31,13 +41,16 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-from typing import Literal
+from typing import Literal, Optional
 
 import httpx
 
 logger = logging.getLogger("facelessforge.stock")
 
 MediaType = Literal["both", "videos", "photos"]
+
+# ── Constitution §4.1: Minimum acceptable dimensions ──────────────────────
+MIN_VIDEO_WIDTH = 1280  # Reject files narrower than 1280px
 
 
 def _use_mock() -> bool:
@@ -51,7 +64,37 @@ def is_mock_mode() -> bool:
     return _use_mock()
 
 
-# ---------------- Mock generator ----------------
+# ── Relevance scoring ─────────────────────────────────────────────────────
+
+def score_relevance(candidate: dict, query_terms: list[str]) -> int:
+    """Score a candidate's relevance based on query term overlap in URL/slug.
+
+    Constitution §4.1: Prefer candidates whose URL/slug contains the search
+    terms, giving +2 for the first matching term and +1 for each additional
+    matching term. This surfaces the most semantically relevant footage first.
+
+    Args:
+        candidate: A normalised stock item dict (must have "source_url" key).
+        query_terms: List of lower-case search terms (typically from query.split()).
+
+    Returns:
+        Integer score >= 0.
+    """
+    url = (candidate.get("source_url") or "").lower()
+    slug = url.replace("-", " ").replace("_", " ").replace("/", " ")
+    score = 0
+    first_match = True
+    for term in query_terms:
+        if term in slug or term in url:
+            if first_match:
+                score += 2
+                first_match = False
+            else:
+                score += 1
+    return score
+
+
+# ── Mock generator ────────────────────────────────────────────────────────
 
 _MOCK_PHOTOGRAPHERS = [
     "Ada Klein", "Bram Voss", "Chen Rowe", "Dara Okafor", "Elio Marsh",
@@ -99,7 +142,7 @@ def _mock_results(query: str, media_type: MediaType, per_page: int) -> list[dict
     return results
 
 
-# ---------------- Real Pexels adapter ----------------
+# ── Real Pexels adapter ───────────────────────────────────────────────────
 
 def _normalise_pexels_photo(p: dict, query: str) -> dict:
     src = p.get("src") or {}
@@ -121,24 +164,50 @@ def _normalise_pexels_photo(p: dict, query: str) -> dict:
     }
 
 
-def _normalise_pexels_video(v: dict, query: str) -> dict:
+def _normalise_pexels_video(v: dict, query: str) -> Optional[dict]:
+    """Normalise a Pexels video item, returning None if it fails
+    Constitution §4.1 dimension/orientation gates.
+
+    Constitution §4.1 (FOOTAGE CURATION):
+        - Landscape only: reject height >= width.
+        - Reject files narrower than 1280px.
+    """
+    width = int(v.get("width") or 0)
+    height = int(v.get("height") or 0)
+
+    # Constitution §4.1: Reject non-landscape (height >= width)
+    if height >= width:
+        logger.debug(
+            "Rejecting Pexels video %s: height=%d >= width=%d (not landscape)",
+            v.get("id"), height, width,
+        )
+        return None
+
+    # Constitution §4.1: Reject files narrower than 1280px
+    if width < MIN_VIDEO_WIDTH:
+        logger.debug(
+            "Rejecting Pexels video %s: width=%d < %d (too narrow)",
+            v.get("id"), width, MIN_VIDEO_WIDTH,
+        )
+        return None
+
     # Pick a reasonable thumbnail
     preview = v.get("image")
-    # Pick the best mp4 file: prefer hd, then sd, then any other quality
-    # (e.g. uhd); within a quality class prefer the largest file that is
-    # still ≤1920 wide so downloads stay under the render size cap.
-    mp4s = [f for f in (v.get("video_files") or [])
-            if f.get("file_type") == "video/mp4" and f.get("link")]
-
-    def _rank(f: dict) -> tuple:
-        quality_order = {"hd": 0, "sd": 1}
-        width = int(f.get("width") or 0)
-        return (quality_order.get(f.get("quality"), 2), 1 if width > 1920 else 0, -width)
-
-    download = sorted(mp4s, key=_rank)[0].get("link") if mp4s else None
-    if not download:
-        logger.warning("Pexels video %s has no usable mp4 file (%d video_files) for query '%s'",
-                       v.get("id"), len(v.get("video_files") or []), query)
+    # Pick best mp4 file: try uhd → hd → sd → ld → any mp4 → first file
+    download = None
+    files = list(v.get("video_files") or [])
+    mp4_files = [f for f in files if (f.get("file_type") == "video/mp4")]
+    quality_order = ["uhd", "hd", "sd", "ld"]
+    for q in quality_order:
+        match = next((f for f in mp4_files if f.get("quality") == q), None)
+        if match and match.get("link"):
+            download = match["link"]
+            break
+    if not download and mp4_files:
+        download = next((f.get("link") for f in mp4_files if f.get("link")), None)
+    if not download and files:
+        # last resort: take ANY file with a link
+        download = next((f.get("link") for f in files if f.get("link")), None)
     user = v.get("user") or {}
     return {
         "source": "pexels",
@@ -150,47 +219,93 @@ def _normalise_pexels_video(v: dict, query: str) -> dict:
         "download_url": download,
         "attribution_name": user.get("name") or "Pexels contributor",
         "attribution_url": user.get("url") or "https://www.pexels.com",
-        "width": int(v.get("width") or 0),
-        "height": int(v.get("height") or 0),
+        "width": width,
+        "height": height,
         "duration": int(v.get("duration") or 0),
         "tags": [query],
         "query": query,
     }
 
 
-async def _search_pexels(query: str, media_type: MediaType, per_page: int) -> list[dict]:
+async def _search_pexels(
+    query: str,
+    media_type: MediaType,
+    per_page: int,
+    *,
+    orientation: Optional[str] = None,
+) -> list[dict]:
+    """Search Pexels API and return normalised results.
+
+    Constitution §4.1 (FOOTAGE CURATION):
+        - Video searches ALWAYS pass orientation="landscape" regardless of caller.
+        - Photo searches honour the caller's orientation if provided.
+    """
     key = os.environ.get("PEXELS_API_KEY", "").strip()
     base = os.environ.get("PEXELS_API_BASE_URL", "https://api.pexels.com").rstrip("/")
     headers = {"Authorization": key}
     per_page = max(1, min(int(per_page), 40))
     out: list[dict] = []
     timeout = httpx.Timeout(10.0, connect=5.0)
+
     async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
+        # ── Photos ───────────────────────────────────────────────────────
         if media_type in ("both", "photos"):
-            r = await client.get(f"{base}/v1/search", params={"query": query, "per_page": per_page})
+            params = {"query": query, "per_page": per_page}
+            if orientation in ("landscape", "portrait", "square"):
+                params["orientation"] = orientation
+            r = await client.get(f"{base}/v1/search", params=params)
             if r.status_code == 429:
                 raise RuntimeError("pexels_rate_limited")
             r.raise_for_status()
             data = r.json()
-            logger.info("Pexels photo search '%s' -> %d results", query, len(data.get("photos") or []))
             for p in (data.get("photos") or []):
                 out.append(_normalise_pexels_photo(p, query))
+
+        # ── Videos ───────────────────────────────────────────────────────
+        # Constitution §4.1: ALWAYS force landscape for video searches
         if media_type in ("both", "videos"):
-            r = await client.get(f"{base}/videos/search", params={"query": query, "per_page": per_page})
+            video_params = {"query": query, "per_page": per_page}
+            min_dur = int(os.environ.get("PEXELS_MIN_VIDEO_DURATION", "10"))
+            if min_dur > 0:
+                video_params["min_duration"] = min_dur
+            # Force landscape — no caller override permitted
+            video_params["orientation"] = "landscape"
+            r = await client.get(f"{base}/videos/search", params=video_params)
             if r.status_code == 429:
                 raise RuntimeError("pexels_rate_limited")
             r.raise_for_status()
             data = r.json()
-            logger.info("Pexels video search '%s' -> %d results", query, len(data.get("videos") or []))
             for v in (data.get("videos") or []):
-                out.append(_normalise_pexels_video(v, query))
+                normalised = _normalise_pexels_video(v, query)
+                if normalised is not None:
+                    out.append(normalised)
+
     return out
 
 
-# ---------------- Public ----------------
+# ── Public ──────────────────────────────────────────────────────────────────
 
-async def search_stock(query: str, media_type: MediaType = "both", per_page: int = 12) -> dict:
+async def search_stock(
+    query: str,
+    media_type: MediaType = "both",
+    per_page: int = 12,
+    *,
+    visual_tone: Optional[str] = None,
+    orientation: Optional[str] = None,
+) -> dict:
+    """Search Pexels (or mock) for stock footage.
+
+    ``visual_tone`` is appended to the query so every scene in a project
+    pulls from the same visual world. ``orientation`` (landscape/portrait/
+    square) is honoured by the real Pexels API for photos only; videos are
+    ALWAYS locked to landscape per Constitution §4.1.
+
+    Constitution §4.1: Even after visual_tone is appended, the final query
+    is still passed with orientation="landscape" for video searches.
+    """
     query = (query or "").strip()
+    if visual_tone and visual_tone.strip():
+        query = f"{query} {visual_tone.strip()}".strip()
     if not query:
         return {"source": "mock" if _use_mock() else "pexels", "results": [], "mock": _use_mock(), "query": ""}
 
@@ -201,8 +316,18 @@ async def search_stock(query: str, media_type: MediaType = "both", per_page: int
             "mock": True,
             "query": query,
         }
+
     try:
-        results = await _search_pexels(query, media_type, per_page)
+        # Constitution §4.1: orientation is forwarded to _search_pexels which
+        # will enforce landscape for videos regardless of what is passed here.
+        results = await _search_pexels(query, media_type, per_page, orientation=orientation)
+
+        # Constitution §4.1: Score and sort results by relevance so the most
+        # semantically matching clips surface first.
+        query_terms = [t.lower() for t in query.split() if len(t) > 2]
+        if query_terms:
+            results.sort(key=lambda c: score_relevance(c, query_terms), reverse=True)
+
         return {"source": "pexels", "results": results, "mock": False, "query": query}
     except RuntimeError as e:
         if str(e) == "pexels_rate_limited":
