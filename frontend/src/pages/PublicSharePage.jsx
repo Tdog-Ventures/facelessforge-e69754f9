@@ -259,8 +259,8 @@ export default function PublicSharePage() {
                     <CopyChip text={metadata.tags.join(", ")} label="Copy all" testId="share-copy-tags" />
                   </div>
                   <div className="p-5 flex flex-wrap gap-2">
-                    {metadata.tags.map((t, i) => (
-                      <span key={i} className="font-mono text-xs px-2 py-1 border border-zinc-800 text-zinc-300 rounded-sm">{t}</span>
+                    {metadata.tags.map((t) => (
+                      <span key={`tag-${t}`} className="font-mono text-xs px-2 py-1 border border-zinc-800 text-zinc-300 rounded-sm">{t}</span>
                     ))}
                   </div>
                 </div>
@@ -273,8 +273,8 @@ export default function PublicSharePage() {
                         <span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Hashtags</span>
                       </div>
                       <div className="p-5 flex flex-wrap gap-2">
-                        {metadata.hashtags.map((h, i) => (
-                          <span key={i} className="font-mono text-xs px-2 py-1 border border-zinc-800 text-[#7B61FF] rounded-sm">{h}</span>
+                        {metadata.hashtags.map((h) => (
+                          <span key={`hashtag-${h}`} className="font-mono text-xs px-2 py-1 border border-zinc-800 text-[#7B61FF] rounded-sm">{h}</span>
                         ))}
                       </div>
                     </>
@@ -285,8 +285,8 @@ export default function PublicSharePage() {
                         <span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Chapters</span>
                       </div>
                       <ul className="p-5 space-y-1.5">
-                        {metadata.chapters.map((c, i) => (
-                          <li key={i} className="flex items-center gap-3 text-sm">
+                        {metadata.chapters.map((c) => (
+                          <li key={`chapter-${c.timestamp}-${c.title}`} className="flex items-center gap-3 text-sm">
                             <span className="font-mono text-[11px] text-[#00E5FF] w-14">{c.timestamp}</span>
                             <span className="text-zinc-300">{c.title}</span>
                           </li>
@@ -317,7 +317,7 @@ export default function PublicSharePage() {
                 <h2 className="text-sm font-semibold mb-3">Thumbnail concepts</h2>
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   {thumbnails.map((t, i) => (
-                    <div key={i} className="border border-zinc-800 bg-[#121212] rounded-sm overflow-hidden">
+                    <div key={t.id || `thumb-${i}`} className="border border-zinc-800 bg-[#121212] rounded-sm overflow-hidden">
                       <div className="px-5 py-4 border-b border-zinc-800 bg-[#0A0A0A]">
                         <div className="font-mono text-[10px] uppercase tracking-widest text-zinc-500 mb-2">
                           Concept · {String(i + 1).padStart(2, "0")}

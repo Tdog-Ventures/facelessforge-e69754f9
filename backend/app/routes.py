@@ -38,30 +38,6 @@ def _now():
     return datetime.now(timezone.utc)
 
 
-def _build_scene_stock_query(scene: dict, project: dict, override: str | None = None) -> str:
-    """Return short, Pexels-friendly keywords for a scene.
-
-    Priority: explicit override > trimmed search_terms > scene.visual_direction > project topic/niche.
-    search_terms are LLM-generated keywords, so they beat the sentence-shaped
-    visual_direction; this avoids feeding paragraph-length text to the stock API.
-    """
-    if override and override.strip():
-        return override.strip()
-    terms = scene.get("search_terms") or []
-    if terms:
-        joined = " ".join(
-            " ".join(t.split()[:3])
-            for t in terms[:3]
-            if t and t.strip()
-        ).strip()
-        if joined:
-            return joined
-    visual = (scene.get("visual_direction") or "").strip()
-    if visual:
-        return " ".join(visual.split()[:6]).strip()
-    return (project.get("topic") or project.get("niche") or "stock").strip()
-
-
 def _ser(doc: dict) -> dict:
     """Drop _id and serialise datetimes for JSON."""
     if not doc:
@@ -88,7 +64,7 @@ def _ensure_project_access(project: dict, user: dict, *, write: bool = False):
 # ============================ AUTH ============================
 
 @router.post("/auth/register")
-async def register(body: RegisterRequest, response: Response, request: Request):
+async def register(body: RegisterRequest, response: Response):
     db = get_db()
     email = body.email.lower()
     existing = await db.users.find_one({"email": email})
@@ -107,12 +83,12 @@ async def register(body: RegisterRequest, response: Response, request: Request):
     await db.users.insert_one(user_doc)
     access = create_access_token(user_id, email, body.role)
     refresh = create_refresh_token(user_id)
-    set_auth_cookies(response, access, refresh, request)
+    set_auth_cookies(response, access, refresh)
     return _ser({**user_doc, "password_hash": None})
 
 
 @router.post("/auth/login")
-async def login(body: LoginRequest, response: Response, request: Request):
+async def login(body: LoginRequest, response: Response):
     db = get_db()
     email = body.email.lower()
     user = await db.users.find_one({"email": email})
@@ -120,7 +96,7 @@ async def login(body: LoginRequest, response: Response, request: Request):
         raise HTTPException(status_code=401, detail="Invalid email or password")
     access = create_access_token(user["id"], email, user["role"])
     refresh = create_refresh_token(user["id"])
-    set_auth_cookies(response, access, refresh, request)
+    set_auth_cookies(response, access, refresh)
     out = dict(user); out.pop("password_hash", None)
     return _ser(out)
 
@@ -133,12 +109,6 @@ async def logout(response: Response, _user=Depends(get_current_user)):
 
 @router.get("/auth/me")
 async def me(user=Depends(get_current_user)):
-    return _ser(user)
-
-
-@router.get("/users/me")
-async def users_me(user=Depends(get_current_user)):
-    """Alias used by some frontend builds — returns the current authenticated user."""
     return _ser(user)
 
 
@@ -307,8 +277,6 @@ async def create_project(body: ProjectCreate, user=Depends(get_current_user)):
         "visual_style": body.visual_style or "cinematic b-roll",
         "monetisation_intent": body.monetisation_intent or "ads + affiliate",
         "cta_goal": body.cta_goal or "subscribe",
-        "auto_post": body.auto_post if body.auto_post is not None else False,
-        "platforms": body.platforms or [],
         "status": "DRAFT",
         "quality_score": 0,
         "estimated_cost": 0.0,
@@ -393,7 +361,7 @@ async def generate_script_endpoint(project_id: str, user=Depends(get_current_use
         "updated_at": _now(),
     }
     await db.scripts.replace_one({"project_id": project_id}, doc, upsert=True)
-    await _log_cost(db, project_id, "script", tokens=max(500, (data.get("word_count", 0) or 0) * 2), cost=0.08)
+    await _log_cost(db, project_id, "script", tokens=max(500, data["word_count"] * 2), cost=0.08)
     await db.projects.update_one({"id": project_id}, {"$set": {"estimated_cost": float(project.get("estimated_cost", 0)) + 0.08, "updated_at": _now()}})
     return await _attach_project_view(db, await db.projects.find_one({"id": project_id}, {"_id": 0}))
 
@@ -406,9 +374,8 @@ async def generate_scenes_endpoint(project_id: str, user=Depends(get_current_use
     script = await db.scripts.find_one({"project_id": project_id}, {"_id": 0})
     if not script:
         raise HTTPException(status_code=400, detail="Generate a script before scenes")
-    scenes = await gen.generate_scene_plan(project, script)
+    scenes = await gen.generate_scenes(project, script["full_script"])
     for sc in scenes:
-        sc["id"] = str(uuid.uuid4())
         sc["project_id"] = project_id
         sc["created_at"] = _now()
         sc["updated_at"] = _now()
@@ -426,10 +393,10 @@ async def generate_metadata_endpoint(project_id: str, user=Depends(get_current_u
     project = await db.projects.find_one({"id": project_id}, {"_id": 0})
     _ensure_project_access(project, user, write=True)
     script = await db.scripts.find_one({"project_id": project_id}, {"_id": 0})
-    scenes = await db.scenes.find({"project_id": project_id}).sort("scene_number", 1).to_list(500)
+    scenes = await db.scenes.find({"project_id": project_id}, {"_id": 0}).sort("scene_number", 1).to_list(500)
     if not script:
         raise HTTPException(status_code=400, detail="Generate a script before metadata")
-    data = await gen.generate_metadata(project, script, scenes)
+    data = await gen.generate_metadata(project, script["full_script"], scenes)
     doc = {
         "id": str(uuid.uuid4()),
         "project_id": project_id,
@@ -440,24 +407,6 @@ async def generate_metadata_endpoint(project_id: str, user=Depends(get_current_u
     await db.metadata_packages.replace_one({"project_id": project_id}, doc, upsert=True)
     await _log_cost(db, project_id, "metadata", tokens=600, cost=0.04)
     await db.projects.update_one({"id": project_id}, {"$set": {"estimated_cost": float(project.get("estimated_cost", 0)) + 0.04, "updated_at": _now()}})
-
-    # Auto-create thumbnail briefs
-    try:
-        concepts = await gen.generate_thumbnail_concepts(project, script)
-        await db.assets.delete_many({"project_id": project_id, "asset_type": "thumbnail_concept"})
-        for concept in concepts:
-            await db.assets.insert_one({
-                "id": __import__("uuid").uuid4().hex,
-                "project_id": project_id,
-                "asset_type": "thumbnail_concept",
-                "brief": concept,
-                "status": "pending",
-                "created_at": _now(),
-                "updated_at": _now(),
-            })
-    except Exception:
-        pass
-
     return await _attach_project_view(db, await db.projects.find_one({"id": project_id}, {"_id": 0}))
 
 
@@ -466,8 +415,7 @@ async def generate_thumbnails_endpoint(project_id: str, user=Depends(get_current
     db = get_db()
     project = await db.projects.find_one({"id": project_id}, {"_id": 0})
     _ensure_project_access(project, user, write=True)
-    script = await db.scripts.find_one({"project_id": project_id}, {"_id": 0}) or {}
-    concepts = await gen.generate_thumbnail_concepts(project, script)
+    concepts = await gen.generate_thumbnails(project)
     # Upsert as assets (type=thumbnail_concept)
     await db.assets.delete_many({"project_id": project_id, "asset_type": "thumbnail_concept"})
     for i, c in enumerate(concepts, start=1):
@@ -647,7 +595,19 @@ async def find_scene_assets(project_id: str, scene_id: str, body: FindAssetsRequ
     if not scene:
         raise HTTPException(status_code=404, detail="Scene not found")
 
-    query = _build_scene_stock_query(scene, project, body.query)
+    # Build the query: explicit body.query > scene.search_terms > visual_direction > project.topic
+    query_parts: list[str] = []
+    if body.query and body.query.strip():
+        query_parts.append(body.query.strip())
+    elif scene.get("search_terms"):
+        # Use first 2-3 terms as a single query
+        query_parts.append(" ".join(scene["search_terms"][:3]))
+    elif scene.get("visual_direction"):
+        query_parts.append(scene["visual_direction"][:80])
+    else:
+        query_parts.append(project.get("topic") or project.get("niche") or "stock")
+    query = " ".join(q for q in query_parts if q).strip()
+
     return await stock_service.search_stock(query, body.media_type, body.per_page)
 
 
@@ -717,9 +677,22 @@ async def auto_attach_assets(project_id: str, body: AutoAttachRequest, user=Depe
     if user["role"] == "viewer":
         raise HTTPException(status_code=403, detail="Viewer cannot attach assets")
 
-    scenes = await db.scenes.find({"project_id": project_id}).sort("scene_number", 1).to_list(500)
+    scenes = await db.scenes.find({"project_id": project_id}, {"_id": 0}).sort("scene_number", 1).to_list(500)
     if not scenes:
         raise HTTPException(status_code=400, detail="Generate scenes before auto-attach.")
+
+    # ---- Derive (or load cached) project-wide visual tone ----
+    visual_tone = project.get("visual_tone") or ""
+    if not visual_tone:
+        from .visual_query import derive_visual_tone
+        script_doc = await db.scripts.find_one({"project_id": project_id}, {"_id": 0})
+        full_text = (script_doc or {}).get("full_script") or project.get("topic") or ""
+        if full_text:
+            visual_tone = await derive_visual_tone(full_text)
+            if visual_tone:
+                await db.projects.update_one(
+                    {"id": project_id}, {"$set": {"visual_tone": visual_tone}}
+                )
 
     total = len(scenes)
     attached = 0
@@ -728,7 +701,7 @@ async def auto_attach_assets(project_id: str, body: AutoAttachRequest, user=Depe
     details: list[dict] = []
 
     for scene in scenes:
-        scene_id = str(scene.get("id") or scene.get("_id"))
+        scene_id = scene["id"]
         existing = await db.assets.find_one({
             "project_id": project_id,
             "scene_id": scene_id,
@@ -740,27 +713,19 @@ async def auto_attach_assets(project_id: str, body: AutoAttachRequest, user=Depe
             details.append({"scene_id": scene_id, "scene_number": scene["scene_number"], "status": "skipped", "reason": "already_has_stock"})
             continue
 
-        query = _build_scene_stock_query(scene, project)
+        # Build query using shared helper (LLM search_terms → deterministic keywords → fallback)
+        from .visual_query import build_scene_query
+        query = build_scene_query(scene)
 
         try:
-            # Retry with progressively broader keywords; never attach a filler asset.
-            from .render import _broader_scene_queries
-            import logging
-            logger = logging.getLogger("facelessforge.routes")
-            top = None
-            for q in [query] + [b for b in _broader_scene_queries(scene, project) if b != query]:
-                result = await stock_service.search_stock(q, body.media_type, per_page=4)
-                results = result.get("results") or []
-                logger.info("auto-attach scene %s: stock search '%s' -> %d results",
-                            scene["scene_number"], q, len(results))
-                if results:
-                    top = results[0]
-                    query = q
-                    break
+            result = await stock_service.search_stock(
+                query, body.media_type, per_page=8,
+                visual_tone=visual_tone or None,
+            )
+            top = (result.get("results") or [None])[0]
             if not top:
                 failed += 1
-                details.append({"scene_id": scene_id, "scene_number": scene["scene_number"],
-                                "status": "failed", "reason": "no_stock_results"})
+                details.append({"scene_id": scene_id, "scene_number": scene["scene_number"], "status": "failed", "reason": "no_results"})
                 continue
 
             # If replacing, remove prior stock assets for this scene first
@@ -798,7 +763,7 @@ async def auto_attach_assets(project_id: str, body: AutoAttachRequest, user=Depe
                 await db.assets.insert_one(doc)
                 attached += 1
                 details.append({"scene_id": scene_id, "scene_number": scene["scene_number"], "status": "attached", "asset_id": doc["id"]})
-            except Exception as insert_err:  # DuplicateKeyError from compound unique index
+            except Exception:  # DuplicateKeyError from compound unique index
                 # Treat as skipped — another actor already attached the same item
                 skipped += 1
                 details.append({"scene_id": scene_id, "scene_number": scene["scene_number"], "status": "skipped", "reason": "duplicate"})
@@ -1164,7 +1129,7 @@ async def render_preflight(project_id: str, user=Depends(get_current_user)):
     project = await db.projects.find_one({"id": project_id}, {"_id": 0})
     _ensure_project_access(project, user)
     script = await db.scripts.find_one({"project_id": project_id}, {"_id": 0})
-    scenes = await db.scenes.find({"project_id": project_id}).sort("scene_number", 1).to_list(500)
+    scenes = await db.scenes.find({"project_id": project_id}, {"_id": 0}).sort("scene_number", 1).to_list(500)
     metadata = await db.metadata_packages.find_one({"project_id": project_id}, {"_id": 0})
     assets = await db.assets.find({"project_id": project_id}, {"_id": 0}).to_list(500)
     return render_service.validate_prerequisites(project, script, scenes, metadata, assets)
@@ -1181,7 +1146,7 @@ async def render_start(project_id: str,
         raise HTTPException(status_code=403, detail="Viewer cannot start renders")
     # Validate prereqs first so caller gets a clean 400 before queuing
     script = await db.scripts.find_one({"project_id": project_id}, {"_id": 0})
-    scenes = await db.scenes.find({"project_id": project_id}).sort("scene_number", 1).to_list(500)
+    scenes = await db.scenes.find({"project_id": project_id}, {"_id": 0}).sort("scene_number", 1).to_list(500)
     metadata = await db.metadata_packages.find_one({"project_id": project_id}, {"_id": 0})
     assets = await db.assets.find({"project_id": project_id}, {"_id": 0}).to_list(500)
     check = render_service.validate_prerequisites(project, script, scenes, metadata, assets)
@@ -1239,15 +1204,11 @@ from .storage import storage_status as storage_status_fn
 
 
 def _provider_modes() -> dict:
-    ollama_ready = bool(os.environ.get("OLLAMA_MODEL", "").strip())
-    claude_ready = bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
     return {
         "llm_text": {
-            "mode": "live" if (ollama_ready or claude_ready) else "fallback",
-            "provider": "ollama" if ollama_ready else ("anthropic" if claude_ready else "none"),
-            "model": os.environ.get("OLLAMA_MODEL") or os.environ.get("LLM_MODEL", "claude-3-5-sonnet-20241022"),
-            "ollama_ready": ollama_ready,
-            "claude_ready": claude_ready,
+            "mode": "live" if os.environ.get("EMERGENT_LLM_KEY") else "fallback",
+            "model": os.environ.get("LLM_MODEL", "gpt-5.2"),
+            "provider": os.environ.get("LLM_PROVIDER", "openai"),
         },
         "thumbnail_image": {
             "mode": "mock" if thumb_images.is_mock_mode() else "live",
@@ -1352,7 +1313,7 @@ async def export_scenes_csv(project_id: str, user=Depends(get_current_user)):
     db = get_db()
     project = await db.projects.find_one({"id": project_id}, {"_id": 0})
     _ensure_project_access(project, user)
-    scenes = await db.scenes.find({"project_id": project_id}).sort("scene_number", 1).to_list(500)
+    scenes = await db.scenes.find({"project_id": project_id}, {"_id": 0}).sort("scene_number", 1).to_list(500)
     csv = scenes_to_csv(scenes)
     return PlainTextResponse(csv, media_type="text/csv", headers={"Content-Disposition": f'attachment; filename="{project_id}-scenes.csv"'})
 
@@ -1374,7 +1335,7 @@ async def export_package_zip(project_id: str, user=Depends(get_current_user)):
     project = await db.projects.find_one({"id": project_id}, {"_id": 0})
     _ensure_project_access(project, user)
     script = await db.scripts.find_one({"project_id": project_id}, {"_id": 0})
-    scenes = await db.scenes.find({"project_id": project_id}).sort("scene_number", 1).to_list(500)
+    scenes = await db.scenes.find({"project_id": project_id}, {"_id": 0}).sort("scene_number", 1).to_list(500)
     metadata = await db.metadata_packages.find_one({"project_id": project_id}, {"_id": 0})
     assets = await db.assets.find({"project_id": project_id}, {"_id": 0}).to_list(500)
 

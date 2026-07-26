@@ -216,8 +216,8 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
                     </div>
                     {s.search_terms?.length > 0 && (
                       <div className="mt-2 flex flex-wrap gap-1">
-                        {s.search_terms.map((t, i) => (
-                          <span key={i} className="font-mono text-[10px] px-1.5 py-0.5 border border-zinc-800 text-zinc-400 rounded-sm">
+                        {s.search_terms.map((t) => (
+                          <span key={`term-${s.id}-${t}`} className="font-mono text-[10px] px-1.5 py-0.5 border border-zinc-800 text-zinc-400 rounded-sm">
                             {t}
                           </span>
                         ))}

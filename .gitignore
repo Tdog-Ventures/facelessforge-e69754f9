@@ -35,6 +35,10 @@ dist
 *token.json*
 *credentials.json*
 
+# Local secrets folder (user-managed API keys)
+/secrets/
+secrets/
+
 # Logs and debug files
 npm-debug.log*
 yarn-debug.log*
@@ -106,3 +110,15 @@ credentials.json
 *.pem
 *.key
 .credentials
+
+
+# Yarn lockfiles (yarn build regenerates these; not tracked in this repo)
+yarn.lock
+frontend/yarn.lock
+
+# Generated render/voiceover/thumbnail artifacts — local disk only; object
+# storage handles persistence in production. Retention sweep purges these.
+backend/static/audio/
+backend/static/renders/
+backend/static/thumbs/
+frontend/node_modules/.cache/default-development/15.pack
