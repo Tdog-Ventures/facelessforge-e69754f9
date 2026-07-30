@@ -183,10 +183,66 @@ def write_srt_from_words(
     out_path: Path,
     *,
     intro_offset_seconds: float = 0.0,
+    words_per_cue: int = DEFAULT_WORDS_PER_CUE,
+    max_cue_seconds: float = DEFAULT_MAX_CUE_SECONDS,
+    min_cue_seconds: float = DEFAULT_MIN_CUE_SECONDS,
 ) -> Path:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(
-        build_srt_from_words(words, intro_offset_seconds=intro_offset_seconds),
+        build_srt_from_words(
+            words,
+            intro_offset_seconds=intro_offset_seconds,
+            words_per_cue=words_per_cue,
+            max_cue_seconds=max_cue_seconds,
+            min_cue_seconds=min_cue_seconds,
+        ),
+        encoding="utf-8",
+    )
+    return out_path
+
+
+def build_srt_from_text(
+    text: str,
+    *,
+    total_seconds: float,
+    intro_offset_seconds: float = 0.0,
+    words_per_cue: int = DEFAULT_WORDS_PER_CUE,
+) -> str:
+    """Fallback SRT when no STT word timings exist.
+
+    Spreads the narration words uniformly across ``total_seconds`` and
+    reuses the word-cue grouping of :func:`build_srt_from_words`, so the
+    output still honours the 6-8 word chunk spec (CONSTITUTION §5).
+    """
+    words = (text or "").split()
+    if not words or total_seconds <= 0:
+        return ""
+    per = total_seconds / len(words)
+    recs = [{"word": w, "start": i * per, "end": (i + 1) * per}
+            for i, w in enumerate(words)]
+    return build_srt_from_words(
+        recs,
+        intro_offset_seconds=intro_offset_seconds,
+        words_per_cue=words_per_cue,
+    )
+
+
+def write_srt_from_text(
+    text: str,
+    out_path: Path,
+    *,
+    total_seconds: float,
+    intro_offset_seconds: float = 0.0,
+    words_per_cue: int = DEFAULT_WORDS_PER_CUE,
+) -> Path:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
+        build_srt_from_text(
+            text,
+            total_seconds=total_seconds,
+            intro_offset_seconds=intro_offset_seconds,
+            words_per_cue=words_per_cue,
+        ),
         encoding="utf-8",
     )
     return out_path

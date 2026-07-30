@@ -36,6 +36,7 @@ Security:
   • One concurrent render per project; explicit cancellation supported.
 """
 import asyncio
+import json
 import logging
 import os
 import re
@@ -50,9 +51,19 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .db import get_db
 from .storage import get_storage
-from .subtitles import write_srt, write_srt_from_words
+from .subtitles import write_srt, write_srt_from_text, write_srt_from_words
 from .transcribe import transcribe_words
 from . import stock as stock_service
+try:
+    from .verify import verify_render as _verify_render_constitution
+    VERIFY_AVAILABLE = True
+except ImportError:
+    try:
+        from verify import verify_render as _verify_render_constitution
+        VERIFY_AVAILABLE = True
+    except ImportError:
+        _verify_render_constitution = None
+        VERIFY_AVAILABLE = False
 
 logger = logging.getLogger("facelessforge.render")
 
@@ -532,7 +543,7 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
         is_video = a.get("asset_type") == "stock_video" or any(url.lower().endswith(ext)
             for ext in (".mp4", ".mov", ".webm"))
         suffix = ".mp4" if is_video else ".jpg"
-        target = out_dir / f"scene_{idx:03d}_src{suffix}"
+        target = out_dir / f"scene_{idx:03d}_src_{ext_id}{suffix}"
         ok = await _download_to(url, target, max_bytes=MAX_VIDEO_DOWNLOAD_BYTES)
         if not ok:
             logger.warning("scene=%02d FOOTAGE_REJECT reason=download_failed ext_id=%s url=%s",
@@ -629,6 +640,35 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
     return (fallback_path, "image")
 
 
+async def _resolve_scene_visuals(scene: dict, attached_assets: list[dict],
+                                 project: dict, work_dir: Path, idx: int,
+                                 max_visuals: int = 4) -> list[tuple[Path, str]]:
+    """Resolve up to ``max_visuals`` distinct visuals for one scene.
+
+    Verify check d needs a hard cut every ~8s; seek-offset jump cuts within
+    a single source clip rarely reach the scene-score threshold, so
+    successive sub-clips must come from different sources. Iterates the
+    scene's attached candidates one at a time via ``_resolve_scene_visual``
+    (which still applies motion checks, Pexels retry, and caption fallback).
+    Stops when the same output path repeats (caption fallback) or when
+    ``max_visuals`` distinct sources are collected.
+    """
+    visuals: list[tuple[Path, str]] = []
+    seen: set[str] = set()
+    candidates = [a for a in attached_assets if a.get("scene_id") == scene.get("id")
+                  and a.get("asset_type") in ("stock_image", "stock_video")]
+    for a in candidates[:max_visuals]:
+        path, kind = await _resolve_scene_visual(scene, [a], project, work_dir, idx)
+        if str(path) in seen:
+            break
+        seen.add(str(path))
+        visuals.append((path, kind))
+    if not visuals:
+        path, kind = await _resolve_scene_visual(scene, attached_assets, project, work_dir, idx)
+        visuals.append((path, kind))
+    return visuals
+
+
 async def _resolve_audio(project: dict, scenes: list[dict], assets: list[dict],
                          work_dir: Path) -> Optional[Path]:
     """Return local audio path or None.
@@ -698,6 +738,55 @@ async def _run_ffmpeg(cmd: list[str], *, timeout: int = HARD_TIMEOUT_SECONDS) ->
         return False, "ffmpeg timed out"
     tail = (stderr or b"").decode("utf-8", errors="ignore")[-1500:]
     return (proc.returncode == 0), tail
+
+
+async def _loudnorm_two_pass(final: Path, work_dir: Path) -> None:
+    """Measure the muxed file and re-apply loudnorm in linear mode.
+
+    Single-pass dynamic loudnorm (used in the mux filtergraph) can land
+    several dB off the -14 LUFS target; a measured linear pass converges.
+    Best-effort: on any failure the single-pass output is kept.
+    """
+    try:
+        ok, tail = await _run_ffmpeg([
+            FFMPEG_BIN, "-hide_banner", "-i", str(final),
+            "-af", "loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json",
+            "-f", "null", "-",
+        ])
+        m = re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", tail, re.DOTALL)
+        if not m:
+            logger.warning("loudnorm measure pass produced no stats — keeping single-pass audio")
+            return
+        stats = json.loads(m.group(0))
+        input_i = float(stats["input_i"])
+        if abs(input_i - (-14.0)) <= 1.0:
+            return  # already within verify tolerance
+        normed = work_dir / f"{final.stem}_loudnorm2.mp4"
+        af = (
+            "loudnorm=I=-14:TP=-1.5:LRA=11"
+            f":measured_I={stats['input_i']}"
+            f":measured_TP={stats['input_tp']}"
+            f":measured_LRA={stats['input_lra']}"
+            f":measured_thresh={stats['input_thresh']}"
+            f":offset={stats['target_offset']}"
+            ":linear=true"
+        )
+        ok, err = await _run_ffmpeg([
+            FFMPEG_BIN, "-y", "-i", str(final),
+            "-map", "0:v", "-map", "0:a",
+            "-c:v", "copy",
+            "-af", af,
+            "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart",
+            str(normed),
+        ])
+        if ok and normed.exists() and normed.stat().st_size > 0:
+            shutil.move(str(normed), str(final))
+            logger.info("loudnorm two-pass applied (measured_I=%s)", stats["input_i"])
+        else:
+            logger.warning("loudnorm linear pass failed (%s) — keeping single-pass audio", err[-300:])
+    except Exception as e:  # noqa: BLE001
+        logger.warning("loudnorm two-pass skipped: %s", e)
 
 
 # CONSTITUTION §4: Normalization: scale=1920:1080:force_original_aspect_ratio=increase,
@@ -911,32 +1000,40 @@ async def _run_render(job_id: str, project_id: str):
         await _set_job(job_id, current_step="preparing_audio", progress=25)
         audio_path = await _resolve_audio(project, scenes, assets, work_dir)
 
+        # Probe true voiceover duration so the video matches audio length —
+        # required by the sub-clip plan below.
+        await _set_job(job_id, current_step="probing_audio", progress=30)
+        audio_duration: Optional[float] = None
+        if audio_path and audio_path.exists():
+            audio_duration = await _probe_duration_seconds(audio_path)
+
+        # Build per-scene sub-clip plan first (cuts every ≤6s, total = audio
+        # length) so each scene resolves one distinct visual per sub-clip.
+        ordered_scenes = sorted(scenes, key=lambda x: x.get("scene_number", 0))
+        plan = _build_subclip_plan(ordered_scenes, audio_duration)
+        plan_by_idx = {p["scene_index"]: p for p in plan}
+
         await _set_job(job_id, current_step="preparing_scenes", progress=35)
-        scene_visuals: list[tuple[Path, str, dict]] = []
+        scene_visuals: list[tuple[list[tuple[Path, str]], dict]] = []
         for i, scene in enumerate(scenes):
-            path, kind = await _resolve_scene_visual(scene, assets, project, work_dir, i)
-            scene_visuals.append((path, kind, scene))
+            n_clips = len(plan_by_idx.get(i, {"subclips": [4.0]})["subclips"])
+            visuals = await _resolve_scene_visuals(scene, assets, project, work_dir, i,
+                                                   max_visuals=n_clips)
+            scene_visuals.append((visuals, scene))
 
         # CONSTITUTION §5: Select hook footage — first video clip for intro background.
         hook_path: Optional[Path] = None
-        for path, kind, scene in scene_visuals:
-            if kind == "video":
-                hook_path = path
+        for visuals, scene in scene_visuals:
+            for path, kind in visuals:
+                if kind == "video":
+                    hook_path = path
+                    break
+            if hook_path:
                 break
         if hook_path:
             logger.info("HOOK_FOOTAGE_SELECTED path=%s", hook_path)
         else:
             logger.warning("HOOK_FOOTAGE_FALLBACK: No video footage found; using static image for intro.")
-
-        # Probe true voiceover duration so the video matches audio length
-        await _set_job(job_id, current_step="probing_audio", progress=40)
-        audio_duration: Optional[float] = None
-        if audio_path and audio_path.exists():
-            audio_duration = await _probe_duration_seconds(audio_path)
-        # Build per-scene sub-clip plan (cuts every ≤6s, total = audio length)
-        ordered_scenes = sorted(scenes, key=lambda x: x.get("scene_number", 0))
-        plan = _build_subclip_plan(ordered_scenes, audio_duration)
-        plan_by_idx = {p["scene_index"]: p for p in plan}
 
         # ---- rendering ----
         await _set_job(job_id, status="rendering", current_step="encoding_intro", progress=45)
@@ -944,7 +1041,11 @@ async def _run_render(job_id: str, project_id: str):
 
         # Intro clip — CONSTITUTION §5: uses hook footage + dark overlay + title
         intro_out = work_dir / "clip_000_intro.mp4"
-        intro_title = (project.get("name") or "FacelessForge").upper()
+        # Audience-facing title from metadata — never the internal project
+        # name (e.g. "TEST VIRAL INGREDIENTS - e2e 04:30 UTC" must not burn in)
+        raw_title = ((metadata or {}).get("selected_title")
+                     or project.get("topic") or project.get("name") or "FacelessForge")
+        intro_title = str(raw_title).upper()[:48]
         if hook_path:
             ok, err = await _run_ffmpeg(_ffmpeg_intro_from_video(hook_path, INTRO_DURATION_SECONDS, intro_out, intro_title, work_dir))
         else:
@@ -953,15 +1054,17 @@ async def _run_render(job_id: str, project_id: str):
             raise RuntimeError(f"intro encode failed: {err[-300:]}")
         clips.append(intro_out)
 
-        # Scene clips — multiple sub-clips per scene with varying seek offsets
+        # Scene clips — multiple sub-clips per scene, cycling through the
+        # scene's distinct sources so sub-clip boundaries are real cuts.
         total_subclips = sum(len(p["subclips"]) for p in plan)
         emitted = 0
-        for i, (path, kind, scene) in enumerate(scene_visuals):
+        for i, (visuals, scene) in enumerate(scene_visuals):
             sub_plan = plan_by_idx.get(i, {"subclips": [4.0], "target": 4.0})
             subclips = sub_plan["subclips"]
-            src_dur: Optional[float] = None
-            if kind == "video":
-                src_dur = await _probe_duration_seconds(path)
+            dur_cache: dict[str, Optional[float]] = {}
+            use_count: dict[int, int] = {}
+            last_used: dict[int, float] = {}
+            t_cursor = 0.0
             for j, dur in enumerate(subclips):
                 emitted += 1
                 await _set_job(
@@ -970,9 +1073,28 @@ async def _run_render(job_id: str, project_id: str):
                     progress=min(85, 45 + int(35 * emitted / max(1, total_subclips))),
                 )
                 out = work_dir / f"clip_{i+1:03d}_{j:02d}.mp4"
+                # No source repeats within 20s when avoidable — pick the
+                # first visual not used in the last 20s, else the least
+                # recently used one.
+                chosen = next(
+                    (vi for vi in range(len(visuals))
+                     if last_used.get(vi) is None or (t_cursor - last_used[vi]) >= 20.0),
+                    None,
+                )
+                if chosen is None:
+                    chosen = min(range(len(visuals)), key=lambda vi: last_used.get(vi, -1e9))
+                path, kind = visuals[chosen]
+                # Seek pass advances each time the same source repeats
+                pass_num = use_count.get(chosen, 0)
+                use_count[chosen] = pass_num + 1
+                last_used[chosen] = t_cursor
+                t_cursor += dur
                 if kind == "video":
+                    if str(path) not in dur_cache:
+                        dur_cache[str(path)] = await _probe_duration_seconds(path)
+                    src_dur = dur_cache[str(path)]
                     if src_dur and src_dur > dur:
-                        offset = (j * dur) % max(0.1, src_dur - dur)
+                        offset = (pass_num * dur) % max(0.1, src_dur - dur)
                     else:
                         offset = 0.0
                     cmd = _ffmpeg_normalise_video(path, dur, out, start_offset=offset)
@@ -1011,8 +1133,19 @@ async def _run_render(job_id: str, project_id: str):
                         words_per_cue=7,
                     )
                 else:
-                    write_srt(scenes, srt_path,
-                              intro_offset_seconds=INTRO_DURATION_SECONDS)
+                    # No STT — chunk the narration text itself into word cues
+                    # (never per-scene caption titles)
+                    narration_text = (script or {}).get("full_script") or ""
+                    if narration_text and audio_duration:
+                        write_srt_from_text(
+                            narration_text, srt_path,
+                            total_seconds=audio_duration,
+                            intro_offset_seconds=INTRO_DURATION_SECONDS,
+                            words_per_cue=7,
+                        )
+                    else:
+                        write_srt(scenes, srt_path,
+                                  intro_offset_seconds=INTRO_DURATION_SECONDS)
             except Exception as e:  # noqa: BLE001
                 logger.warning("SRT generation failed (%s) — skipping burn-in", e)
                 srt_path = None
@@ -1124,6 +1257,12 @@ async def _run_render(job_id: str, project_id: str):
         if not ok:
             raise RuntimeError(f"mux failed: {err[-300:]}")
 
+        # CONSTITUTION §6: single-pass dynamic loudnorm can miss the -14 LUFS
+        # target (verify check g). Measure the muxed file and re-apply a
+        # linear second pass when the result is off-target.
+        if audio_path and audio_path.exists() or use_music:
+            await _loudnorm_two_pass(final, work_dir)
+
         # Probe duration via ffprobe
         duration = None
         if FFPROBE_BIN:
@@ -1143,40 +1282,91 @@ async def _run_render(job_id: str, project_id: str):
                 est += max(2.0, float((s.get("end_time") or 0) - (s.get("start_time") or 0)) or 4.0)
             duration = round(est, 2)
 
-        # Cleanup workdir, keep final
-        try:
-            shutil.rmtree(work_dir, ignore_errors=True)
-        except Exception:
-            pass
+        # ---- PRESERVE narration for verification before workdir cleanup ----
+        narration_for_verify: Optional[Path] = None
+        if audio_path and Path(audio_path).exists():
+            narration_for_verify = out_dir / f"{job_id}_narration{Path(audio_path).suffix}"
+            try:
+                shutil.copy2(audio_path, narration_for_verify)
+            except Exception:
+                narration_for_verify = audio_path
 
-        # Persist to storage backend
+        # Persist to storage backend BEFORE cleanup — final must exist
         store = get_storage()
         key = f"renders/{project_id}/{final.name}"
         try:
             saved = store.save_file(final, key, content_type="video/mp4")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             raise RuntimeError(f"storage upload failed: {e}")
 
-        await _set_job(
-            job_id,
-            status="completed",
-            current_step="completed",
-            progress=100,
-            output_path=str(saved.file_path) if saved.file_path else None,
-            output_url=saved.url,
-            output_relative_url=saved.preview_path,
-            output_storage_mode=store.mode,
-            output_storage_key=saved.key,
+        # === CONSTITUTION VERIFICATION GATE — Critical Gap Fix ===
+        verification_passed = True
+        verification_result = None
+        
+        if VERIFY_AVAILABLE and _verify_render_constitution:
+            try:
+                await _set_job(job_id, status="verifying", current_step="verifying_constitution_a-h", progress=96)
+                logger.info(f"[VERIFY] Starting constitution verification for {saved.url}")
+                verification_result = await _verify_render_constitution(
+                    url=saved.url,
+                    narration_path=str(narration_for_verify) if narration_for_verify else None,
+                    scene_count=len(scenes),
+                    cleanup=True,
+                    local_fallback_path=str(final),
+                )
+                verification_passed = bool(verification_result.get("overall_passed"))
+                if not verification_passed:
+                    logger.error(f"[VERIFY] FAILED — {verification_result}")
+                    await _set_job(job_id, status="failed_verification", current_step="failed_verification", progress=100,
+                        output_path=str(saved.file_path) if saved.file_path else None, output_url=saved.url,
+                        output_relative_url=saved.preview_path, output_storage_mode=store.mode, output_storage_key=saved.key,
+                        file_size=(saved.file_path.stat().st_size if saved.file_path and saved.file_path.exists() else final.stat().st_size if final.exists() else None),
+                        duration=duration, completed_at=_now(),
+                        error_message=f"Constitution verification failed: {verification_result.get('report', {})}",
+                        verification=verification_result)
+                    await db.projects.update_one({"id": project_id}, {"$set": {"status": "FAILED_VERIFICATION", "updated_at": _now()}})
+                    try:
+                        shutil.rmtree(work_dir, ignore_errors=True)
+                    except Exception:
+                        pass
+                    if narration_for_verify and narration_for_verify.exists() and narration_for_verify.parent == out_dir:
+                        try:
+                            narration_for_verify.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                    return
+                else:
+                    logger.info(f"[VERIFY] PASSED all checks a-h")
+            except Exception as ve:
+                logger.exception(f"[VERIFY] Verification crashed: {ve}")
+                await _set_job(job_id, status="failed_verification", current_step="failed_verification", progress=100,
+                    output_path=str(saved.file_path) if saved.file_path else None, output_url=saved.url,
+                    output_relative_url=saved.preview_path, output_storage_mode=store.mode, output_storage_key=saved.key,
+                    file_size=(saved.file_path.stat().st_size if saved.file_path and saved.file_path.exists() else final.stat().st_size if final.exists() else None),
+                    duration=duration, completed_at=_now(),
+                    error_message=f"Verification exception: {ve}", verification={"error": str(ve)})
+                await db.projects.update_one({"id": project_id}, {"$set": {"status": "FAILED_VERIFICATION", "updated_at": _now()}})
+                try:
+                    shutil.rmtree(work_dir, ignore_errors=True)
+                except Exception:
+                    pass
+                return
+        else:
+            logger.warning("[VERIFY] verify.py not available — skipping constitution check (DEV ONLY)")
+
+        try:
+            shutil.rmtree(work_dir, ignore_errors=True)
+        except Exception:
+            pass
+        if narration_for_verify and narration_for_verify.exists() and narration_for_verify.parent == out_dir:
+            try:
+                narration_for_verify.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        await _set_job(job_id, status="completed", current_step="completed", progress=100,
+            output_path=str(saved.file_path) if saved.file_path else None, output_url=saved.url,
+            output_relative_url=saved.preview_path, output_storage_mode=store.mode, output_storage_key=saved.key,
             file_size=(saved.file_path.stat().st_size if saved.file_path and saved.file_path.exists() else final.stat().st_size if final.exists() else None),
-            duration=duration,
-            completed_at=_now(),
-            error_message=None,
-        )
-        await db.projects.update_one(
-            {"id": project_id},
-            {"$set": {
-                "status": "COMPLETED",
-                "rendered_video_asset_id": job_id,
-                "updated_at": _now(),
-            }},
-        )
+            duration=duration, completed_at=_now(), error_message=None, verification=verification_result)
+        await db.projects.update_one({"id": project_id}, {"$set": {"status": "COMPLETED", "rendered_video_asset_id": job_id, "updated_at": _now()}})
