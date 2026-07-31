@@ -38,6 +38,7 @@ If PEXELS_API_KEY missing OR USE_MOCK_PEXELS truthy, deterministic mock is used.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import os
@@ -272,18 +273,62 @@ async def _search_pexels(
             video_params["orientation"] = "landscape"
             r = await client.get(f"{base}/videos/search", params=video_params)
             if r.status_code == 429:
+                logger.warning("Pexels videos rate-limited (429) query=%r", query[:60])
                 raise RuntimeError("pexels_rate_limited")
             r.raise_for_status()
             data = r.json()
-            for v in (data.get("videos") or []):
+            raw_videos = data.get("videos") or []
+            kept = 0
+            for v in raw_videos:
                 normalised = _normalise_pexels_video(v, query)
                 if normalised is not None:
                     out.append(normalised)
+                    kept += 1
+            logger.info(
+                "pexels_videos query=%r per_page=%d response_count=%d kept=%d",
+                query[:60], per_page, len(raw_videos), kept,
+            )
 
     return out
 
 
 # ── Public ──────────────────────────────────────────────────────────────────
+
+async def search_stock_videos(query: str, per_page: int = 30) -> list[dict]:
+    """Video-only Pexels search for cinematic b-roll.
+
+    Returns ONLY ``stock_video`` items with a usable ``download_url`` —
+    never photos, and never mock results (mock "videos" are still images
+    that fail the renderer's motion probe). Logs the Pexels response count.
+    On rate-limit, backs off briefly and returns an empty list so the caller
+    can retry with the next keyword instead of poisoning the render with
+    mock stills.
+    """
+    query = (query or "").strip()
+    if not query:
+        return []
+    if _use_mock():
+        logger.info("search_stock_videos query=%r skipped (mock mode)", query[:60])
+        return []
+    try:
+        results = await _search_pexels(query, "videos", per_page)
+    except RuntimeError as e:
+        if str(e) == "pexels_rate_limited":
+            logger.warning("search_stock_videos rate-limited query=%r — backing off", query[:60])
+            await asyncio.sleep(2.0)
+            return []
+        raise
+    except httpx.HTTPError as e:
+        logger.warning("search_stock_videos HTTP error query=%r: %s", query[:60], e)
+        return []
+    videos = [r for r in results
+              if r.get("media_type") == "stock_video" and r.get("download_url")]
+    query_terms = [t.lower() for t in query.split() if len(t) > 2]
+    if query_terms:
+        videos.sort(key=lambda c: score_relevance(c, query_terms), reverse=True)
+    logger.info("search_stock_videos query=%r usable=%d", query[:60], len(videos))
+    return videos
+
 
 async def search_stock(
     query: str,

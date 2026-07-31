@@ -29,6 +29,7 @@ from . import render as render_service
 from . import thumbnail_images as thumb_images
 from . import tts as tts_service
 from .db import get_db
+from .visual_query import truncate_words
 
 logger = logging.getLogger("facelessforge.external")
 
@@ -190,7 +191,7 @@ def _normalise_scenes(payload_scenes: list[ExternalSceneInput],
                 "asset_type": "stock_video",
                 "search_terms": [t for t in search_terms if t][:6],
                 "image_prompt": visual or narration[:120],
-                "caption_text": (s.caption_text or narration[:80] or "").strip(),
+                "caption_text": truncate_words(s.caption_text or narration or "", 80),
                 "status": "PLANNED",
                 "created_at": _now(),
                 "updated_at": _now(),
@@ -220,7 +221,7 @@ def _normalise_scenes(payload_scenes: list[ExternalSceneInput],
             "asset_type": "stock_video",
             "search_terms": base_terms,
             "image_prompt": sent[:120],
-            "caption_text": sent[:80],
+            "caption_text": truncate_words(sent, 80),
             "status": "PLANNED",
             "created_at": _now(),
             "updated_at": _now(),

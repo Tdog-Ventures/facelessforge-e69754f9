@@ -376,6 +376,7 @@ async def generate_scenes_endpoint(project_id: str, user=Depends(get_current_use
         raise HTTPException(status_code=400, detail="Generate a script before scenes")
     scenes = await gen.generate_scenes(project, script["full_script"])
     for sc in scenes:
+        sc.setdefault("id", str(uuid.uuid4()))
         sc["project_id"] = project_id
         sc["created_at"] = _now()
         sc["updated_at"] = _now()

@@ -32,11 +32,44 @@ _STOP_WORDS = {
 }
 
 
+def is_garbage_token(token: str) -> bool:
+    """Reject junk tokens that must never reach a stock-video query.
+
+    Catches LLM repeat artifacts like ``STARTUPSTARTUPSTARTU`` (one unit
+    concatenated ≥2 times), non-word tokens, and absurd lengths.
+    """
+    t = (token or "").strip().lower()
+    if len(t) < 3 or len(t) > 20:
+        return True
+    if not re.fullmatch(r"[a-z0-9][a-z0-9\-]*", t):
+        return True
+    # Repeated-concatenation artifact: the whole token is one unit repeated
+    # (possibly truncated at the end), e.g. "startupstartupstartu".
+    if len(t) >= 10:
+        for k in range(3, len(t) // 2 + 1):
+            unit = t[:k]
+            if t == (unit * (len(t) // k + 1))[: len(t)]:
+                return True
+    return False
+
+
+def truncate_words(text: str, max_len: int = 80) -> str:
+    """Truncate at a word boundary so titles/captions never cut mid-word."""
+    text = " ".join(str(text or "").split())
+    if len(text) <= max_len:
+        return text
+    cut = text[: max_len + 1]
+    if " " in cut:
+        cut = cut[: cut.rfind(" ")]
+    return cut.rstrip(" .,;:!?-–—")
+
+
 def extract_visual_keywords(text: str, *, top_n: int = 3) -> list[str]:
     """Return up to ``top_n`` deduplicated high-signal visual keywords.
 
     Ported from video_engine.py — robust fallback when LLM unavailable.
-    Drops stopwords + words shorter than 4 chars, preserves insertion order.
+    Drops stopwords, words shorter than 4 chars, and garbage tokens
+    (``is_garbage_token``); preserves insertion order.
     """
     if not text:
         return []
@@ -44,7 +77,7 @@ def extract_visual_keywords(text: str, *, top_n: int = 3) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
     for w in words:
-        if len(w) < 4 or w in _STOP_WORDS:
+        if len(w) < 4 or w in _STOP_WORDS or is_garbage_token(w):
             continue
         if w in seen:
             continue
@@ -73,9 +106,18 @@ def build_scene_query(
     base = ""
     search_terms = scene.get("search_terms")
     if isinstance(search_terms, list):
-        base = " ".join(str(x) for x in search_terms if x).strip()
+        raw = " ".join(str(x) for x in search_terms if x)
     elif isinstance(search_terms, str):
-        base = search_terms.strip()
+        raw = search_terms
+    else:
+        raw = ""
+    if raw:
+        # Keep only real, query-safe words — LLM output can contain garbage
+        # like "STARTUPSTARTUPSTARTU" which returns zero Pexels results.
+        words = [w for w in re.sub(r"[^\w\s\-]", " ", raw.lower()).split()
+                 if w not in _STOP_WORDS and not is_garbage_token(w)]
+        deduped = list(dict.fromkeys(words))
+        base = " ".join(deduped[:6]).strip()
     if not base:
         for field in fallback_text_fields:
             text = scene.get(field) or ""
