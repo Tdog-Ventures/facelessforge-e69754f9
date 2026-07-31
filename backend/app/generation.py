@@ -5,6 +5,7 @@ Falls back to deterministic generation if no LLM is available.
 """
 from __future__ import annotations
 from app.scene_terms import derive_search_terms, derive_visual_query
+from app.visual_query import extract_visual_keywords, is_garbage_token, truncate_words
 
 import json
 import logging
@@ -268,18 +269,41 @@ SCENE_SYSTEM = (
 )
 
 
+def _clean_search_terms(terms: list, narration: str, *, min_terms: int = 4) -> list[str]:
+    """Filter LLM search_terms down to real stock-video query terms and
+    top up from the narration until we hold at least ``min_terms``.
+
+    Drops garbage tokens like "STARTUPSTARTUPSTARTU" (repeat artifacts) via
+    ``is_garbage_token`` — a term is kept only if every word in it is clean.
+    """
+    out: list[str] = []
+    for t in terms:
+        t = " ".join(str(t or "").split()).strip()
+        if not t:
+            continue
+        words = t.lower().split()
+        if any(is_garbage_token(w) for w in words):
+            continue
+        if t.lower() in (x.lower() for x in out):
+            continue
+        out.append(t)
+    if len(out) < min_terms:
+        for kw in extract_visual_keywords(narration, top_n=min_terms):
+            if len(out) >= min_terms:
+                break
+            if not any(kw in x.lower() for x in out):
+                out.append(kw)
+    return out[:6]
+
+
 def _coerce_scenes(scenes: list) -> list[dict]:
     """Normalize scene objects to the expected schema."""
-    from .visual_query import extract_visual_keywords
     out = []
     for s in scenes:
         if not isinstance(s, dict):
             continue
         narration = str(s.get("narration_text") or s.get("caption_text") or "")
-        search_terms = [str(t) for t in (s.get("search_terms") or []) if t]
-        if not search_terms:
-            # Derive from narration: first 4 non-stopword keywords
-            search_terms = extract_visual_keywords(narration, top_n=4)
+        search_terms = _clean_search_terms(s.get("search_terms") or [], narration)
         out.append({
             "scene_number": int(s.get("scene_number") or 0) or len(out) + 1,
             "start_time": float(s.get("start_time") or 0),
@@ -287,10 +311,19 @@ def _coerce_scenes(scenes: list) -> list[dict]:
             "duration": float(s.get("duration") or 0),
             "narration_text": narration,
             "visual_direction": str(s.get("visual_direction") or ""),
-            "caption_text": str(s.get("caption_text") or s.get("narration_text") or "")[:120],
+            # Word-boundary cut at 80 chars — never mid-word, never a
+            # hard [:120] slice that mangles the phrase.
+            "caption_text": truncate_words(s.get("caption_text") or s.get("narration_text") or "", 80),
             "search_terms": search_terms,
         })
     return out
+
+
+async def generate_scenes(project: dict, full_script: str) -> list[dict]:
+    """Back-compat wrapper used by routes.generate_scenes_endpoint — adapts
+    the (project, full_script: str) call signature to ``generate_scene_plan``.
+    """
+    return await generate_scene_plan(project, {"full_script": full_script or ""})
 
 
 async def generate_scene_plan(project: dict, script: dict) -> list[dict]:
@@ -358,6 +391,8 @@ META_SYSTEM = (
 
 
 async def generate_metadata(project: dict, script: dict, scenes: list = None) -> dict:
+    if isinstance(script, str):
+        script = {"full_script": script}
     topic = project.get("topic", project.get("title", "business story"))
     hook = script.get("selected_hook", topic)
 
@@ -381,7 +416,7 @@ Write specifically about this Topic. Do NOT use a generic entrepreneur/startup o
     if result:
         return result
 
-    short_topic = topic[:60].strip()
+    short_topic = truncate_words(topic, 60)
     return {
         "title_options": [
             f"{short_topic} — Explained",
@@ -459,11 +494,12 @@ Niche: {niche}"""
         if coerced:
             return coerced
 
-    # Topic-aware deterministic fallback
-    short_topic = topic[:40]
+    # Topic-aware deterministic fallback — word-boundary cut, no clickbait
+    # auto-suffix (the old "… EXPOSED" append truncated titles mid-word).
+    short_topic = truncate_words(topic, 40)
     return [
         {
-            "thumbnail_title_text": f"{short_topic.upper()} EXPOSED",
+            "thumbnail_title_text": short_topic.upper(),
             "visual_composition": "Dark background with bold centered text and single focal graphic",
             "emotion_angle": "curiosity",
             "background_idea": "Textured black background with subtle gradient",
