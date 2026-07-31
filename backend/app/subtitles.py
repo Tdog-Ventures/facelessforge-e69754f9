@@ -201,6 +201,29 @@ def write_srt_from_words(
     return out_path
 
 
+def write_srt_from_cues(cues: list[dict], out_path: Path) -> Path:
+    """Write an SRT from pre-timed cues: [{"start": s, "end": e, "text": t}].
+
+    Times are absolute seconds (caller applies any intro offset). Empty
+    texts are dropped; non-positive durations are clamped to the minimum
+    cue length.
+    """
+    out: list[str] = []
+    for c in cues:
+        text = _clean_caption(str(c.get("text") or ""),
+                              max_chars_per_line=DEFAULT_MAX_CHARS_PER_LINE)
+        if not text:
+            continue
+        start = float(c.get("start") or 0.0)
+        end = float(c.get("end") or 0.0)
+        if end <= start:
+            end = start + DEFAULT_MIN_CUE_SECONDS
+        out.append(f"{len(out) + 1}\n{_format_ts(start)} --> {_format_ts(end)}\n{text}\n")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
+    return out_path
+
+
 def build_srt_from_text(
     text: str,
     *,

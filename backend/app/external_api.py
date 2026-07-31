@@ -310,7 +310,7 @@ async def external_render_video(
 
     # Generate metadata via existing service (deterministic fallback works without LLM)
     try:
-        meta = await gen.generate_metadata(project_doc, body.script, scenes)
+        meta = await gen.generate_metadata(project_doc, script_doc, scenes)
     except Exception as e:  # noqa: BLE001
         logger.warning("metadata generation failed: %s", e)
         meta = {
