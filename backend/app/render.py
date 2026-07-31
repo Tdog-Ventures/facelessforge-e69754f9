@@ -36,6 +36,7 @@ Security:
   • One concurrent render per project; explicit cancellation supported.
 """
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -53,6 +54,7 @@ from .db import get_db
 from .storage import get_storage
 from .subtitles import write_srt, write_srt_from_cues, write_srt_from_words
 from .transcribe import transcribe_words
+from .visual_query import truncate_words
 from . import stock as stock_service
 try:
     from .verify import verify_render as _verify_render_constitution
@@ -502,6 +504,23 @@ async def _video_has_motion(path: Path) -> bool:
         return True
 
 
+def _asset_dedupe_id(asset: dict, url: Optional[str] = None,
+                     local: Optional[Path] = None) -> str:
+    """Stable project-wide dedupe key for a stock asset.
+
+    Prefers the provider ``external_id``; when that is None (common for
+    attached images) falls back to a hash of the download/local URL so the
+    asset still dedupes project-wide instead of silently repeating.
+    """
+    ext = str(asset.get("external_id") or "").strip()
+    if ext:
+        return ext
+    basis = url or (str(local) if local else "") or str(asset.get("id") or "")
+    if not basis:
+        return ""
+    return "url-" + hashlib.sha1(basis.encode("utf-8")).hexdigest()[:12]
+
+
 async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
                                  project: dict, work_dir: Path, idx: int,
                                  used_ext_ids: Optional[set] = None) -> tuple[Path, str, Optional[str]]:
@@ -509,7 +528,9 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
     and external_id is the stock provider id (None for fallback frames).
     Always succeeds — falls back to caption frame on any error.
 
-    For ``stock_video`` candidates, downloads are probed with ffprobe; any
+    CINEMATIC B-ROLL RULE: still images (jpg/png, local or remote) are NEVER
+    returned as scene visuals — only real motion video files. For
+    ``stock_video`` candidates, downloads are probed with ffprobe; any
     single-frame / sub-1s clip is rejected and the next candidate is tried.
     When all attached candidates fail the motion check, Pexels is re-queried
     with the project's visual_tone modifier appended for a coherent fallback.
@@ -530,11 +551,11 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
         url = a.get("download_url") or a.get("preview_url") or a.get("source_url")
         local = _local_path_for_asset(a)
         ext = (Path(local).suffix.lower() if local else "")
-        ext_id = a.get("external_id") or a.get("id", "")[:8]
+        ext_id = _asset_dedupe_id(a, url, local)
         if local and ext in (".png", ".jpg", ".jpeg"):
-            logger.info("scene=%02d FOOTAGE_SELECT type=local_image ext_id=%s path=%s",
+            logger.info("scene=%02d FOOTAGE_SKIP reason=image_not_allowed ext_id=%s path=%s",
                         idx + 1, ext_id, local)
-            return (local, "image", ext_id)
+            continue
         if local and ext in (".mp4", ".mov", ".webm"):
             if await _video_has_motion(local):
                 logger.info("scene=%02d FOOTAGE_SELECT type=local_video ext_id=%s path=%s",
@@ -548,31 +569,30 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
             continue
         is_video = a.get("asset_type") == "stock_video" or any(url.lower().endswith(ext)
             for ext in (".mp4", ".mov", ".webm"))
-        suffix = ".mp4" if is_video else ".jpg"
-        target = out_dir / f"scene_{idx:03d}_src_{ext_id}{suffix}"
+        if not is_video:
+            logger.info("scene=%02d FOOTAGE_SKIP reason=image_not_allowed ext_id=%s url=%s",
+                        idx + 1, ext_id, url[:100])
+            continue
+        target = out_dir / f"scene_{idx:03d}_src_{ext_id}.mp4"
         ok = await _download_to(url, target, max_bytes=MAX_VIDEO_DOWNLOAD_BYTES)
         if not ok:
             logger.warning("scene=%02d FOOTAGE_REJECT reason=download_failed ext_id=%s url=%s",
                            idx + 1, ext_id, url[:100])
             continue
         size = target.stat().st_size if target.exists() else 0
-        if is_video:
-            motion = await _video_has_motion(target)
-            probe = await _probe_duration_seconds(target)
-            if not motion:
-                logger.warning("scene=%02d FOOTAGE_REJECT reason=no_motion ext_id=%s size=%d duration=%ss url=%s",
-                               idx + 1, ext_id, size, probe, url[:100])
-                try:
-                    target.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                continue
-            logger.info("scene=%02d FOOTAGE_SELECT type=pexels_video ext_id=%s size=%d duration=%ss url=%s",
-                        idx + 1, ext_id, size, probe, url[:100])
-            return (target, "video", ext_id)
-        logger.info("scene=%02d FOOTAGE_SELECT type=pexels_image ext_id=%s size=%d url=%s",
-                    idx + 1, ext_id, size, url[:100])
-        return (target, "image", ext_id)
+        motion = await _video_has_motion(target)
+        probe = await _probe_duration_seconds(target)
+        if not motion:
+            logger.warning("scene=%02d FOOTAGE_REJECT reason=no_motion ext_id=%s size=%d duration=%ss url=%s",
+                           idx + 1, ext_id, size, probe, url[:100])
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                pass
+            continue
+        logger.info("scene=%02d FOOTAGE_SELECT type=pexels_video ext_id=%s size=%d duration=%ss url=%s",
+                    idx + 1, ext_id, size, probe, url[:100])
+        return (target, "video", ext_id)
 
     # ---- Pexels retry: query for fresh results when attached candidates fail ----
     queries: list[str] = []
@@ -660,13 +680,15 @@ async def _resolve_scene_visuals(scene: dict, attached_assets: list[dict],
     (which still applies motion checks, Pexels retry, and caption fallback).
 
     Uniqueness is enforced project-wide: ``used_ext_ids`` is shared across
-    scenes and any external_id already used by an earlier scene is skipped.
-    When the attached candidates yield fewer than ``max_visuals`` distinct
-    sources, Pexels is re-queried (narration-driven via ``build_scene_query``,
-    per_page=20) and fresh results are downloaded until the quota is met or
-    results run out.
+    scenes and any external_id already used by an earlier scene is skipped
+    (assets without a provider id dedupe by URL hash — see
+    ``_asset_dedupe_id``). When the attached candidates yield fewer than
+    ``max_visuals`` distinct sources, Pexels is re-queried (narration-driven
+    via ``build_scene_query``, per_page=30) across several query variants
+    until the quota is met or every variant runs out. Only real motion
+    videos are ever appended — still images are skipped, not ken-burnsed.
     """
-    from .visual_query import build_scene_query
+    from .visual_query import build_scene_query, extract_visual_keywords
     if used_ext_ids is None:
         used_ext_ids = set()
     visuals: list[tuple[Path, str]] = []
@@ -678,46 +700,72 @@ async def _resolve_scene_visuals(scene: dict, attached_assets: list[dict],
     for a in candidates:
         if len(visuals) >= max_visuals:
             break
-        ext = str(a.get("external_id") or "")
+        url = a.get("download_url") or a.get("preview_url") or a.get("source_url")
+        ext = _asset_dedupe_id(a, url, _local_path_for_asset(a))
         if ext and ext in used_ext_ids:
             logger.info("scene=%02d FOOTAGE_SKIP reason=ext_id_used_project_wide ext_id=%s",
                         idx + 1, ext)
             continue
         path, kind, ext_id = await _resolve_scene_visual(
             scene, [a], project, work_dir, idx, used_ext_ids=used_ext_ids)
-        if str(path) in seen:
-            break
+        if kind != "video" or str(path) in seen:
+            continue  # image rejected / fallback frame — try the next candidate
         seen.add(str(path))
         visuals.append((path, kind))
-        if ext_id:
-            used_ext_ids.add(str(ext_id))
+        used_ext_ids.add(str(ext_id or ext))
 
-    # 2) Top up from Pexels when attached < required — narration-driven query
+    # 2) Top up from Pexels until we hold >= max_visuals DISTINCT videos.
+    #    Iterates query variants (narration-driven) so a 0-result keyword
+    #    falls through to the next one instead of giving up.
     if len(visuals) < max_visuals:
-        query = build_scene_query(scene)
-        try:
-            res = await stock_service.search_stock(query, media_type="videos", per_page=20)
-            fresh = [r for r in (res.get("results") or [])
-                     if r.get("media_type") == "stock_video"
-                     and str(r.get("external_id") or "") not in used_ext_ids]
-        except Exception as e:  # noqa: BLE001
-            logger.warning("scene=%02d FOOTAGE_TOPUP_ERROR query=%r err=%s",
-                           idx + 1, query[:60], e)
-            fresh = []
-        if fresh and len(visuals) < max_visuals:
-            logger.info("scene=%02d FOOTAGE_TOPUP query=%r have=%d need=%d fresh=%d",
-                        idx + 1, query[:60], len(visuals), max_visuals, len(fresh))
-        for r in fresh:
+        visual_tone = (project or {}).get("visual_tone") or ""
+        queries: list[str] = []
+        for q in (
+            build_scene_query(scene, visual_tone=visual_tone or None),
+            build_scene_query(scene),
+        ):
+            if q and q not in queries:
+                queries.append(q)
+        kws = extract_visual_keywords(str(scene.get("narration_text") or ""), top_n=6)
+        for n in (3, 2, 1):
+            q = " ".join(kws[:n]).strip()
+            if q and q not in queries:
+                queries.append(q)
+
+        for q in queries:
             if len(visuals) >= max_visuals:
                 break
-            path, kind, ext_id = await _resolve_scene_visual(
-                scene, [r], project, work_dir, idx, used_ext_ids=used_ext_ids)
-            if str(path) in seen:
-                continue  # rejected/fell back — try the next fresh result
-            seen.add(str(path))
-            visuals.append((path, kind))
-            if ext_id:
-                used_ext_ids.add(str(ext_id))
+            logger.info("scene=%02d FOOTAGE_TOPUP query=%r have=%d need=%d",
+                        idx + 1, q[:60], len(visuals), max_visuals)
+            try:
+                results = await stock_service.search_stock_videos(q, per_page=30)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("scene=%02d FOOTAGE_TOPUP_ERROR query=%r err=%s",
+                               idx + 1, q[:60], e)
+                continue
+            if not results:
+                logger.info("scene=%02d FOOTAGE_TOPUP_EMPTY query=%r — trying next keyword",
+                            idx + 1, q[:60])
+                continue
+            for r in results:
+                if len(visuals) >= max_visuals:
+                    break
+                r_id = _asset_dedupe_id(r, r.get("download_url"))
+                if r_id and r_id in used_ext_ids:
+                    logger.info("scene=%02d FOOTAGE_SKIP reason=duplicate_ext_id ext_id=%s",
+                                idx + 1, r_id)
+                    continue
+                path, kind, ext_id = await _resolve_scene_visual(
+                    scene, [r], project, work_dir, idx, used_ext_ids=used_ext_ids)
+                if kind != "video" or str(path) in seen:
+                    continue  # rejected/fell back — try the next fresh result
+                seen.add(str(path))
+                visuals.append((path, kind))
+                used_ext_ids.add(str(ext_id or r_id))
+
+    if len(visuals) < max_visuals:
+        logger.warning("scene=%02d FOOTAGE_TOPUP_SHORTFALL have=%d need=%d",
+                       idx + 1, len(visuals), max_visuals)
 
     if not visuals:
         path, kind, _ext_id = await _resolve_scene_visual(
@@ -798,50 +846,66 @@ async def _run_ffmpeg(cmd: list[str], *, timeout: int = HARD_TIMEOUT_SECONDS) ->
 
 
 async def _loudnorm_two_pass(final: Path, work_dir: Path) -> None:
-    """Measure the muxed file and re-apply loudnorm in linear mode.
+    """Measure the muxed file and re-normalise until within ±1 LU of -14 LUFS.
 
     Single-pass dynamic loudnorm (used in the mux filtergraph) can land
     several dB off the -14 LUFS target; a measured linear pass converges.
-    Best-effort: on any failure the single-pass output is kept.
+    When the linear pass is true-peak-capped (input TP leaves no headroom
+    for the required gain), subsequent iterations apply a plain ``volume``
+    correction followed by a true-peak limiter, which converges where
+    linear loudnorm alone cannot. Best-effort: on any failure the last
+    good output is kept.
     """
     try:
-        ok, tail = await _run_ffmpeg([
-            FFMPEG_BIN, "-hide_banner", "-i", str(final),
-            "-af", "loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json",
-            "-f", "null", "-",
-        ])
-        m = re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", tail, re.DOTALL)
-        if not m:
-            logger.warning("loudnorm measure pass produced no stats — keeping single-pass audio")
-            return
-        stats = json.loads(m.group(0))
-        input_i = float(stats["input_i"])
-        if abs(input_i - (-14.0)) <= 1.0:
-            return  # already within verify tolerance
-        normed = work_dir / f"{final.stem}_loudnorm2.mp4"
-        af = (
-            "loudnorm=I=-14:TP=-1.5:LRA=11"
-            f":measured_I={stats['input_i']}"
-            f":measured_TP={stats['input_tp']}"
-            f":measured_LRA={stats['input_lra']}"
-            f":measured_thresh={stats['input_thresh']}"
-            f":offset={stats['target_offset']}"
-            ":linear=true"
-        )
-        ok, err = await _run_ffmpeg([
-            FFMPEG_BIN, "-y", "-i", str(final),
-            "-map", "0:v", "-map", "0:a",
-            "-c:v", "copy",
-            "-af", af,
-            "-c:a", "aac", "-b:a", "192k",
-            "-movflags", "+faststart",
-            str(normed),
-        ])
-        if ok and normed.exists() and normed.stat().st_size > 0:
-            shutil.move(str(normed), str(final))
-            logger.info("loudnorm two-pass applied (measured_I=%s)", stats["input_i"])
-        else:
-            logger.warning("loudnorm linear pass failed (%s) — keeping single-pass audio", err[-300:])
+        for attempt in range(3):
+            ok, tail = await _run_ffmpeg([
+                FFMPEG_BIN, "-hide_banner", "-i", str(final),
+                "-af", "loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json",
+                "-f", "null", "-",
+            ])
+            m = re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", tail, re.DOTALL)
+            if not m:
+                logger.warning("loudnorm measure pass produced no stats — keeping single-pass audio")
+                return
+            stats = json.loads(m.group(0))
+            input_i = float(stats["input_i"])
+            if abs(input_i - (-14.0)) <= 1.0:
+                if attempt:
+                    logger.info("loudnorm converged after %d extra pass(es) (I=%s)", attempt, input_i)
+                return  # already within verify tolerance
+            if attempt == 0:
+                af = (
+                    "loudnorm=I=-14:TP=-1.5:LRA=11"
+                    f":measured_I={stats['input_i']}"
+                    f":measured_TP={stats['input_tp']}"
+                    f":measured_LRA={stats['input_lra']}"
+                    f":measured_thresh={stats['input_thresh']}"
+                    f":offset={stats['target_offset']}"
+                    ":linear=true"
+                )
+            else:
+                # TP-capped: exact dB gain + true-peak limiter at -1.5 dBTP
+                delta = -14.0 - input_i
+                af = f"volume={delta:+.2f}dB,alimiter=limit=0.841:level=false"
+            normed = work_dir / f"{final.stem}_loudnorm{attempt + 2}.mp4"
+            ok, err = await _run_ffmpeg([
+                FFMPEG_BIN, "-y", "-i", str(final),
+                "-map", "0:v", "-map", "0:a",
+                "-c:v", "copy",
+                "-af", af,
+                "-c:a", "aac", "-b:a", "192k",
+                "-movflags", "+faststart",
+                str(normed),
+            ])
+            if ok and normed.exists() and normed.stat().st_size > 0:
+                shutil.move(str(normed), str(final))
+                logger.info("loudnorm pass %d applied (measured_I=%s)", attempt + 2, stats["input_i"])
+            else:
+                logger.warning("loudnorm pass %d failed (%s) — keeping previous audio",
+                               attempt + 2, err[-300:])
+                return
+        logger.warning("loudnorm did not converge to -14±1 LUFS after 3 passes (last I=%s)",
+                       stats.get("input_i"))
     except Exception as e:  # noqa: BLE001
         logger.warning("loudnorm two-pass skipped: %s", e)
 
@@ -1105,7 +1169,7 @@ async def _run_render(job_id: str, project_id: str):
         # name (e.g. "TEST VIRAL INGREDIENTS - e2e 04:30 UTC" must not burn in)
         raw_title = ((metadata or {}).get("selected_title")
                      or project.get("topic") or project.get("name") or "FacelessForge")
-        intro_title = str(raw_title).upper()[:48]
+        intro_title = truncate_words(str(raw_title).upper(), 48)
         if hook_path:
             ok, err = await _run_ffmpeg(_ffmpeg_intro_from_video(hook_path, INTRO_DURATION_SECONDS, intro_out, intro_title, work_dir))
         else:
