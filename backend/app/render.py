@@ -51,7 +51,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .db import get_db
 from .storage import get_storage
-from .subtitles import write_srt, write_srt_from_text, write_srt_from_words
+from .subtitles import write_srt, write_srt_from_cues, write_srt_from_words
 from .transcribe import transcribe_words
 from . import stock as stock_service
 try:
@@ -503,16 +503,22 @@ async def _video_has_motion(path: Path) -> bool:
 
 
 async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
-                                 project: dict, work_dir: Path, idx: int) -> tuple[Path, str]:
-    """Return (local_path, kind) where kind is 'image' or 'video'.
+                                 project: dict, work_dir: Path, idx: int,
+                                 used_ext_ids: Optional[set] = None) -> tuple[Path, str, Optional[str]]:
+    """Return (local_path, kind, external_id) where kind is 'image' or 'video'
+    and external_id is the stock provider id (None for fallback frames).
     Always succeeds — falls back to caption frame on any error.
 
     For ``stock_video`` candidates, downloads are probed with ffprobe; any
     single-frame / sub-1s clip is rejected and the next candidate is tried.
     When all attached candidates fail the motion check, Pexels is re-queried
     with the project's visual_tone modifier appended for a coherent fallback.
+    ``used_ext_ids`` (project-wide) is honoured so no external_id repeats
+    across scenes.
     """
     from .visual_query import build_scene_query
+    if used_ext_ids is None:
+        used_ext_ids = set()
     visual_tone = (project or {}).get("visual_tone") or ""
     candidates = [a for a in attached_assets if a.get("scene_id") == scene.get("id")
                   and a.get("asset_type") in ("stock_image", "stock_video")]
@@ -528,12 +534,12 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
         if local and ext in (".png", ".jpg", ".jpeg"):
             logger.info("scene=%02d FOOTAGE_SELECT type=local_image ext_id=%s path=%s",
                         idx + 1, ext_id, local)
-            return (local, "image")
+            return (local, "image", ext_id)
         if local and ext in (".mp4", ".mov", ".webm"):
             if await _video_has_motion(local):
                 logger.info("scene=%02d FOOTAGE_SELECT type=local_video ext_id=%s path=%s",
                             idx + 1, ext_id, local)
-                return (local, "video")
+                return (local, "video", ext_id)
             logger.warning("scene=%02d FOOTAGE_REJECT reason=local_static_video ext_id=%s path=%s",
                            idx + 1, ext_id, local)
             continue
@@ -563,10 +569,10 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
                 continue
             logger.info("scene=%02d FOOTAGE_SELECT type=pexels_video ext_id=%s size=%d duration=%ss url=%s",
                         idx + 1, ext_id, size, probe, url[:100])
-            return (target, "video")
+            return (target, "video", ext_id)
         logger.info("scene=%02d FOOTAGE_SELECT type=pexels_image ext_id=%s size=%d url=%s",
                     idx + 1, ext_id, size, url[:100])
-        return (target, "image")
+        return (target, "image", ext_id)
 
     # ---- Pexels retry: query for fresh results when attached candidates fail ----
     queries: list[str] = []
@@ -577,11 +583,12 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
     if narration_only and narration_only not in queries:
         queries.append(narration_only)
     tried_ext_ids = {str(a.get("external_id")) for a in candidates if a.get("external_id")}
+    tried_ext_ids |= {str(x) for x in used_ext_ids}  # project-wide uniqueness
     retry_results: list[dict] = []
     for q in queries[:2]:
         try:
             res = await stock_service.search_stock(
-                q, media_type="videos", per_page=15,
+                q, media_type="videos", per_page=20,
             )
         except Exception as e:  # noqa: BLE001
             logger.warning("scene=%02d FOOTAGE_RETRY_ERROR query=%r err=%s",
@@ -624,7 +631,7 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
         probe = await _probe_duration_seconds(target)
         logger.info("scene=%02d FOOTAGE_SELECT type=pexels_retry ext_id=%s size=%d duration=%ss url=%s",
                     idx + 1, ext_id, size, probe, url[:100])
-        return (target, "video")
+        return (target, "video", ext_id)
 
     # Fallback caption — CONSTITUTION §5: no giant per-scene title labels.
     logger.warning("scene=%02d FOOTAGE_FALLBACK reason=all_candidates_rejected candidates=%d",
@@ -637,12 +644,13 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
         footer="",
         palette=("#0F0F12", "#7B61FF"),
     )
-    return (fallback_path, "image")
+    return (fallback_path, "image", None)
 
 
 async def _resolve_scene_visuals(scene: dict, attached_assets: list[dict],
                                  project: dict, work_dir: Path, idx: int,
-                                 max_visuals: int = 4) -> list[tuple[Path, str]]:
+                                 max_visuals: int = 4,
+                                 used_ext_ids: Optional[set] = None) -> list[tuple[Path, str]]:
     """Resolve up to ``max_visuals`` distinct visuals for one scene.
 
     Verify check d needs a hard cut every ~8s; seek-offset jump cuts within
@@ -650,21 +658,70 @@ async def _resolve_scene_visuals(scene: dict, attached_assets: list[dict],
     successive sub-clips must come from different sources. Iterates the
     scene's attached candidates one at a time via ``_resolve_scene_visual``
     (which still applies motion checks, Pexels retry, and caption fallback).
-    Stops when the same output path repeats (caption fallback) or when
-    ``max_visuals`` distinct sources are collected.
+
+    Uniqueness is enforced project-wide: ``used_ext_ids`` is shared across
+    scenes and any external_id already used by an earlier scene is skipped.
+    When the attached candidates yield fewer than ``max_visuals`` distinct
+    sources, Pexels is re-queried (narration-driven via ``build_scene_query``,
+    per_page=20) and fresh results are downloaded until the quota is met or
+    results run out.
     """
+    from .visual_query import build_scene_query
+    if used_ext_ids is None:
+        used_ext_ids = set()
     visuals: list[tuple[Path, str]] = []
     seen: set[str] = set()
     candidates = [a for a in attached_assets if a.get("scene_id") == scene.get("id")
                   and a.get("asset_type") in ("stock_image", "stock_video")]
-    for a in candidates[:max_visuals]:
-        path, kind = await _resolve_scene_visual(scene, [a], project, work_dir, idx)
+
+    # 1) Attached assets — skip ext_ids already claimed by earlier scenes
+    for a in candidates:
+        if len(visuals) >= max_visuals:
+            break
+        ext = str(a.get("external_id") or "")
+        if ext and ext in used_ext_ids:
+            logger.info("scene=%02d FOOTAGE_SKIP reason=ext_id_used_project_wide ext_id=%s",
+                        idx + 1, ext)
+            continue
+        path, kind, ext_id = await _resolve_scene_visual(
+            scene, [a], project, work_dir, idx, used_ext_ids=used_ext_ids)
         if str(path) in seen:
             break
         seen.add(str(path))
         visuals.append((path, kind))
+        if ext_id:
+            used_ext_ids.add(str(ext_id))
+
+    # 2) Top up from Pexels when attached < required — narration-driven query
+    if len(visuals) < max_visuals:
+        query = build_scene_query(scene)
+        try:
+            res = await stock_service.search_stock(query, media_type="videos", per_page=20)
+            fresh = [r for r in (res.get("results") or [])
+                     if r.get("media_type") == "stock_video"
+                     and str(r.get("external_id") or "") not in used_ext_ids]
+        except Exception as e:  # noqa: BLE001
+            logger.warning("scene=%02d FOOTAGE_TOPUP_ERROR query=%r err=%s",
+                           idx + 1, query[:60], e)
+            fresh = []
+        if fresh and len(visuals) < max_visuals:
+            logger.info("scene=%02d FOOTAGE_TOPUP query=%r have=%d need=%d fresh=%d",
+                        idx + 1, query[:60], len(visuals), max_visuals, len(fresh))
+        for r in fresh:
+            if len(visuals) >= max_visuals:
+                break
+            path, kind, ext_id = await _resolve_scene_visual(
+                scene, [r], project, work_dir, idx, used_ext_ids=used_ext_ids)
+            if str(path) in seen:
+                continue  # rejected/fell back — try the next fresh result
+            seen.add(str(path))
+            visuals.append((path, kind))
+            if ext_id:
+                used_ext_ids.add(str(ext_id))
+
     if not visuals:
-        path, kind = await _resolve_scene_visual(scene, attached_assets, project, work_dir, idx)
+        path, kind, _ext_id = await _resolve_scene_visual(
+            scene, attached_assets, project, work_dir, idx, used_ext_ids=used_ext_ids)
         visuals.append((path, kind))
     return visuals
 
@@ -1015,10 +1072,13 @@ async def _run_render(job_id: str, project_id: str):
 
         await _set_job(job_id, current_step="preparing_scenes", progress=35)
         scene_visuals: list[tuple[list[tuple[Path, str]], dict]] = []
+        used_ext_ids: set[str] = set()  # project-wide external_id uniqueness
         for i, scene in enumerate(scenes):
             n_clips = len(plan_by_idx.get(i, {"subclips": [4.0]})["subclips"])
+            required_visuals = max(n_clips, 3)
             visuals = await _resolve_scene_visuals(scene, assets, project, work_dir, i,
-                                                   max_visuals=n_clips)
+                                                   max_visuals=required_visuals,
+                                                   used_ext_ids=used_ext_ids)
             scene_visuals.append((visuals, scene))
 
         # CONSTITUTION §5: Select hook footage — first video clip for intro background.
@@ -1133,16 +1193,28 @@ async def _run_render(job_id: str, project_id: str):
                         words_per_cue=7,
                     )
                 else:
-                    # No STT — chunk the narration text itself into word cues
-                    # (never per-scene caption titles)
-                    narration_text = (script or {}).get("full_script") or ""
-                    if narration_text and audio_duration:
-                        write_srt_from_text(
-                            narration_text, srt_path,
-                            total_seconds=audio_duration,
-                            intro_offset_seconds=INTRO_DURATION_SECONDS,
-                            words_per_cue=7,
-                        )
+                    # No STT — slice per-scene narration across the sub-clip
+                    # plan into 7-word cues (never per-scene caption titles)
+                    cues: list[dict] = []
+                    t = float(INTRO_DURATION_SECONDS)
+                    for i, scene in enumerate(ordered_scenes):
+                        sub_plan = plan_by_idx.get(i, {"subclips": [4.0]})
+                        scene_dur = sum(float(d) for d in sub_plan["subclips"])
+                        scene_words = (scene.get("narration_text") or "").split()
+                        if scene_words and scene_dur > 0:
+                            per = scene_dur / len(scene_words)
+                            for j in range(0, len(scene_words), 7):
+                                chunk = scene_words[j:j + 7]
+                                start = t + j * per
+                                end = min(t + (j + len(chunk)) * per, t + scene_dur)
+                                cues.append({
+                                    "start": start,
+                                    "end": max(end, start + 0.5),
+                                    "text": " ".join(chunk),
+                                })
+                        t += scene_dur
+                    if cues:
+                        write_srt_from_cues(cues, srt_path)
                     else:
                         write_srt(scenes, srt_path,
                                   intro_offset_seconds=INTRO_DURATION_SECONDS)

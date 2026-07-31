@@ -4,6 +4,7 @@ Produces structured JSON for: Script, Scene plan, Metadata, Thumbnail concepts.
 Falls back to deterministic generation if no LLM is available.
 """
 from __future__ import annotations
+from app.scene_terms import derive_search_terms, derive_visual_query
 
 import json
 import logging
@@ -190,6 +191,14 @@ def _coerce_script(result: dict) -> dict:
     return out
 
 
+def _finalize_script(out: dict) -> dict:
+    """Attach derived stats so API consumers never see missing fields."""
+    words = len(re.findall(r"\b\w+\b", out.get("full_script") or ""))
+    out["word_count"] = words
+    out["estimated_duration"] = int(words / 2.5)
+    return out
+
+
 async def generate_script(project: dict) -> dict:
     target_dur = int(project.get("target_duration", 300))
     target_words = max(120, int(target_dur / 60 * 150))
@@ -210,44 +219,45 @@ Niche: {project.get('niche', 'business')}
 Target duration: {target_dur}s (~{target_words} words)
 Tone: {project.get('tone', 'documentary')}
 
-CRITICAL: full_script must be ONE continuous string of ~{target_words} words, not a list or object."""
+CRITICAL: full_script must be ONE continuous string of ~{target_words} words, not a list or object.
+Write specifically about the Topic above. Do NOT fall back to a generic entrepreneur/startup origin story (instant noodles, sleeping in the office, investors saying no, first 100 customers) unless the Topic explicitly asks for one."""
 
     result = await _llm_json(SCRIPT_SYSTEM, user, f"script-{project.get('id', uuid.uuid4())}")
     if result:
         coerced = _coerce_script(result)
         if coerced and coerced.get("full_script", "").strip():
-            return coerced
+            return _finalize_script(coerced)
 
-    # Deterministic fallback
-    topic = project.get("topic", project.get("title", "an entrepreneur"))
-    return {
-        "hook_option_one": f"How {topic} built a billion dollar empire from nothing",
-        "hook_option_two": f"Nobody believed in {topic}. Then this happened.",
-        "hook_option_three": f"The untold story of how {topic} changed everything",
-        "selected_hook": f"How {topic} built a billion dollar empire from nothing",
+    # Deterministic fallback — on-topic skeleton, never a canned unrelated story
+    topic = (project.get("topic") or project.get("title") or "this subject").strip().rstrip("?")
+    return _finalize_script({
+        "hook_option_one": f"What nobody tells you about {topic}",
+        "hook_option_two": f"The truth about {topic} most people miss",
+        "hook_option_three": f"Why {topic} matters more than you think",
+        "selected_hook": f"What nobody tells you about {topic}",
         "full_script": (
-            f"What you're about to hear is the story of {topic}. "
-            "It started with nothing. No money, no connections, no blueprint. "
-            "Just an idea and an obsession with making it work. "
-            "In the beginning, every door was closed. Every investor said no. "
-            "Every mentor said the market was too competitive. "
-            "But that rejection became fuel. "
-            "The first year was brutal. Eighteen hour days. "
-            "Eating instant noodles. Sleeping in the office. "
-            "But something was being built — slowly, brick by brick. "
-            "The turning point came when the product found its first hundred customers. "
-            "Word spread. Revenue grew. The vision became real. "
-            "Today, the empire stands as proof that timing matters less than obsession. "
-            "The lesson? Start before you're ready. Build before they believe. "
-            "Because the people who change industries are never the ones who waited for permission."
+            f"This video is about {topic}. "
+            "In the next few minutes, you will learn what really drives it, "
+            "why most people misunderstand it, and what you can do differently starting today. "
+            f"Let's begin with the fundamentals. When people first encounter {topic}, "
+            "they usually focus on the surface and miss the mechanisms underneath. "
+            "That is exactly where the advantage hides. "
+            "The first key insight is that small, consistent decisions compound. "
+            "What looks like overnight success is almost always the visible tip of a long, deliberate process. "
+            "The second insight is that data beats guesswork. "
+            "The people who win in this space measure what works, cut what does not, and iterate fast. "
+            "The third insight is that distribution matters as much as quality. "
+            "Even the best work fails in silence if nobody sees it. "
+            "So here is the takeaway: understand the fundamentals, measure everything, and ship consistently. "
+            "Do that, and the results stop being luck and start being math."
         ),
         "retention_beats": [
-            "The moment everything almost collapsed",
-            "The decision that changed everything",
-            "What nobody tells you about building from zero",
+            "The fundamentals most people skip",
+            "Why data beats guesswork",
+            "The distribution mistake that kills good work",
         ],
-        "cta_block": "If this story inspired you, subscribe. More stories like this every week.",
-    }
+        "cta_block": "If this was useful, subscribe. New videos like this every week.",
+    })
 
 
 # ------------------------------ SCENE PLAN ------------------------------
@@ -260,19 +270,25 @@ SCENE_SYSTEM = (
 
 def _coerce_scenes(scenes: list) -> list[dict]:
     """Normalize scene objects to the expected schema."""
+    from .visual_query import extract_visual_keywords
     out = []
     for s in scenes:
         if not isinstance(s, dict):
             continue
+        narration = str(s.get("narration_text") or s.get("caption_text") or "")
+        search_terms = [str(t) for t in (s.get("search_terms") or []) if t]
+        if not search_terms:
+            # Derive from narration: first 4 non-stopword keywords
+            search_terms = extract_visual_keywords(narration, top_n=4)
         out.append({
             "scene_number": int(s.get("scene_number") or 0) or len(out) + 1,
             "start_time": float(s.get("start_time") or 0),
             "end_time": float(s.get("end_time") or 0),
             "duration": float(s.get("duration") or 0),
-            "narration_text": str(s.get("narration_text") or s.get("caption_text") or ""),
+            "narration_text": narration,
             "visual_direction": str(s.get("visual_direction") or ""),
             "caption_text": str(s.get("caption_text") or s.get("narration_text") or "")[:120],
-            "search_terms": [str(t) for t in (s.get("search_terms") or []) if t],
+            "search_terms": search_terms,
         })
     return out
 
@@ -310,36 +326,26 @@ Niche: {project.get('niche', 'business')}"""
         if coerced:
             return coerced
 
-    # Deterministic fallback — topic-specific visuals derived from the project
+    # Deterministic fallback — visuals derived from each scene's narration,
+    # never from the raw project topic/description text
     scene_count = 5
     scene_dur = target_dur / scene_count
     sentences = re.split(r'(?<=[.!?])\s+', full_script) if full_script else ["Scene content."] * scene_count
     chunk = max(1, len(sentences) // scene_count)
-    topic = project.get("topic", project.get("title", "the topic"))
-    niche = project.get("niche", "documentary")
-    # Build visuals from topic keywords instead of hard-coded business footage
-    topic_words = " ".join(topic.split()[:6])
-    visuals = [
-        f"wide establishing shot of {topic_words}, cinematic",
-        f"close-up detail shot related to {topic_words}",
-        f"dynamic action shot illustrating {topic_words}",
-        f"contextual environment shot for {topic_words}",
-        f"iconic or symbolic image representing {topic_words}",
-    ]
     scenes = []
     for i in range(scene_count):
         start = i * scene_dur
-        narration = " ".join(sentences[i * chunk:(i + 1) * chunk]) or f"Part {i + 1} of the story."
-        visual = visuals[i]
+        narration = " ".join(sentences[i * chunk:(i + 1) * chunk]) or f"Part {i + 1} of the video."
+        terms = derive_search_terms(narration, i, scene_count)
         scenes.append({
             "scene_number": i + 1,
             "start_time": round(start, 1),
             "end_time": round(start + scene_dur, 1),
             "duration": round(scene_dur, 1),
             "narration_text": narration,
-            "visual_direction": visual,
+            "visual_direction": f"stock b-roll illustrating: {terms[0]}",
             "caption_text": f"Part {i + 1}",
-            "search_terms": [topic, niche, visual.split(",")[0]],
+            "search_terms": terms,
         })
     return scenes
 
@@ -367,36 +373,38 @@ async def generate_metadata(project: dict, script: dict, scenes: list = None) ->
 }}
 
 Topic: {topic}
-Hook: {hook}"""
+Hook: {hook}
+
+Write specifically about this Topic. Do NOT use a generic entrepreneur/startup origin-story framing (billion dollar empire, instant noodles, investors said no) unless the Topic explicitly asks for it."""
 
     result = await _llm_json(META_SYSTEM, user, f"meta-{project.get('id', uuid.uuid4())}")
     if result:
         return result
 
+    short_topic = topic[:60].strip()
     return {
         "title_options": [
-            f"How {topic} Built an Empire From Nothing",
-            f"The Untold Story of {topic}",
-            f"{topic}: From Zero to Billions",
+            f"{short_topic} — Explained",
+            f"The Truth About {short_topic}",
+            f"{short_topic}: What You Need to Know",
         ],
-        "selected_title": f"How {topic} Built an Empire From Nothing",
+        "selected_title": f"{short_topic} — Explained",
         "description": (
-            f"The inspiring story of {topic} and the lessons every entrepreneur needs to hear. "
-            "This video breaks down the exact decisions, mindset shifts, and turning points "
-            "that separated success from failure. Whether you're building a business or just "
-            "getting started, these lessons apply. Subscribe for weekly business empire stories."
+            f"This video breaks down {short_topic}. "
+            "We cover what really drives it, the mistakes most people make, "
+            "and the practical takeaways you can apply right away. "
+            "Subscribe for new videos every week."
         ),
-        "tags": [topic, "entrepreneur", "business", "success story", "startup", "motivation",
-                 "how to build a business", "business empire", "millionaire mindset"],
-        "hashtags": ["#entrepreneur", "#business", "#success", "#motivation", "#startup"],
+        "tags": [short_topic, project.get("niche", "education"), "explained", "guide", "how it works"],
+        "hashtags": ["#explained", "#education", "#howto"],
         "chapters": [
-            {"time": "0:00", "label": "The Beginning"},
-            {"time": "1:00", "label": "The Struggle"},
-            {"time": "2:30", "label": "The Turning Point"},
-            {"time": "4:00", "label": "The Breakthrough"},
-            {"time": "5:00", "label": "The Lesson"},
+            {"time": "0:00", "label": "Introduction"},
+            {"time": "1:00", "label": "The Fundamentals"},
+            {"time": "2:30", "label": "Key Insights"},
+            {"time": "4:00", "label": "Practical Takeaways"},
+            {"time": "5:00", "label": "Wrap-Up"},
         ],
-        "pinned_comment": f"What part of {topic}'s story resonated most with you? Comment below 👇",
+        "pinned_comment": f"What surprised you most about {short_topic}? Comment below 👇",
     }
 
 
@@ -495,3 +503,11 @@ Niche: {niche}"""
             ),
         },
     ]
+
+# Alias for backwards compat - routes.py expects generate_thumbnails
+async def generate_thumbnails(project: dict, script: dict = None):
+    if script is None:
+        script = project.get("full_script", {}) if isinstance(project, dict) else {}
+        if isinstance(script, str):
+            script = {"full_script": script}
+    return await generate_thumbnail_concepts(project, script)
