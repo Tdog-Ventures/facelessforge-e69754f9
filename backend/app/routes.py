@@ -5,7 +5,9 @@ import io
 import json
 import os
 import uuid
+import asyncio
 import zipfile
+import logging
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 
@@ -32,6 +34,8 @@ from . import thumbnail_images as thumb_images
 
 
 router = APIRouter(prefix="/api")
+
+logger = logging.getLogger("facelessforge.routes")
 
 
 def _now():
@@ -347,6 +351,108 @@ def _log_cost(db, project_id: str, operation: str, tokens: int, cost: float):
     })
 
 
+
+
+async def _run_auto_attach(project_id: str, user: dict, replace_existing: bool = False, media_type: str = "both"):
+    """Background auto-attach — same logic as the endpoint but without HTTP deps."""
+    db = get_db()
+    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    if not project:
+        logger.warning("[AUTO_ATTACH] Project %s not found", project_id)
+        return
+    if user.get("role") == "viewer":
+        logger.warning("[AUTO_ATTACH] Viewer cannot attach assets for %s", project_id)
+        return
+
+    scenes = await db.scenes.find({"project_id": project_id}, {"_id": 0}).sort("scene_number", 1).to_list(500)
+    if not scenes:
+        logger.info("[AUTO_ATTACH] No scenes for %s — skipping", project_id)
+        return
+
+    visual_tone = project.get("visual_tone") or ""
+    if not visual_tone:
+        from .visual_query import derive_visual_tone
+        script_doc = await db.scripts.find_one({"project_id": project_id}, {"_id": 0})
+        full_text = (script_doc or {}).get("full_script") or project.get("topic") or ""
+        if full_text:
+            visual_tone = await derive_visual_tone(full_text)
+            if visual_tone:
+                await db.projects.update_one(
+                    {"id": project_id}, {"$set": {"visual_tone": visual_tone}}
+                )
+
+    attached = 0
+    skipped = 0
+    failed = 0
+
+    for scene in scenes:
+        scene_id = scene["id"]
+        existing = await db.assets.find_one({
+            "project_id": project_id,
+            "scene_id": scene_id,
+            "asset_type": {"$in": ["stock_video", "stock_image"]},
+        }, {"_id": 0})
+
+        if existing and not replace_existing:
+            skipped += 1
+            continue
+
+        from .visual_query import build_scene_query
+        query = build_scene_query(scene)
+
+        try:
+            result = await stock_service.search_stock(
+                query, media_type, per_page=8,
+                visual_tone=visual_tone or None,
+            )
+            top = (result.get("results") or [None])[0]
+            if not top:
+                failed += 1
+                continue
+
+            if existing and replace_existing:
+                await db.assets.delete_many({
+                    "project_id": project_id,
+                    "scene_id": scene_id,
+                    "asset_type": {"$in": ["stock_video", "stock_image"]},
+                })
+
+            doc = {
+                "id": str(uuid.uuid4()),
+                "project_id": project_id,
+                "scene_id": scene_id,
+                "name": top["title"],
+                "asset_type": top["media_type"],
+                "file_path": None,
+                "source": top["source"],
+                "external_id": top["external_id"],
+                "preview_url": top.get("preview_url"),
+                "source_url": top.get("source_url"),
+                "download_url": top.get("download_url"),
+                "attribution_name": top.get("attribution_name"),
+                "attribution_url": top.get("attribution_url"),
+                "width": top.get("width"),
+                "height": top.get("height"),
+                "duration": top.get("duration"),
+                "tags": top.get("tags") or [],
+                "query": query,
+                "status": "attached",
+                "created_at": _now(),
+                "updated_at": _now(),
+            }
+            try:
+                await db.assets.insert_one(doc)
+                attached += 1
+            except Exception:
+                skipped += 1
+        except Exception as e:
+            logger.warning("[AUTO_ATTACH] scene %s failed: %s", scene_id, e)
+            failed += 1
+
+    logger.info(
+        "[AUTO_ATTACH] project=%s attached=%d skipped=%d failed=%d",
+        project_id, attached, skipped, failed,
+    )
 @router.post("/projects/{project_id}/generate-script")
 async def generate_script_endpoint(project_id: str, user=Depends(get_current_user)):
     db = get_db()
@@ -385,6 +491,14 @@ async def generate_scenes_endpoint(project_id: str, user=Depends(get_current_use
         await db.scenes.insert_many([dict(sc) for sc in scenes])
     await _log_cost(db, project_id, "scenes", tokens=len(scenes) * 200, cost=0.06)
     await db.projects.update_one({"id": project_id}, {"$set": {"estimated_cost": float(project.get("estimated_cost", 0)) + 0.06, "updated_at": _now()}})
+
+    # ---- AUTO-TRIGGER asset attachment in background ----
+    try:
+        asyncio.create_task(_run_auto_attach(project_id, dict(user), replace_existing=False, media_type="both"))
+        logger.info("[SCENES] Auto-attach triggered for project=%s", project_id)
+    except Exception as e:
+        logger.warning("[SCENES] Auto-attach trigger failed for project=%s: %s", project_id, e)
+
     return await _attach_project_view(db, await db.projects.find_one({"id": project_id}, {"_id": 0}))
 
 
