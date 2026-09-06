@@ -1373,7 +1373,7 @@ async def _run_render(job_id: str, project_id: str):
         used_ext_ids: set[str] = set()  # project-wide external_id uniqueness
         for i, scene in enumerate(scenes):
             n_clips = len(plan_by_idx.get(i, {"subclips": [4.0]})["subclips"])
-            required_visuals = max(n_clips, 3)
+            required_visuals = max(n_clips, 20)
             visuals = await _resolve_scene_visuals(scene, assets, project, work_dir, i,
                                                    max_visuals=required_visuals,
                                                    used_ext_ids=used_ext_ids)
@@ -1440,12 +1440,10 @@ async def _run_render(job_id: str, project_id: str):
                     progress=min(85, 45 + int(35 * emitted / max(1, total_subclips))),
                 )
                 out = work_dir / f"clip_{i+1:03d}_{j:02d}.mp4"
-                # No source repeats within 20s when avoidable — pick the
-                # first visual not used in the last 20s, else the least
-                # recently used one.
+                # FIX 4: No source repeats within 60s — raises dedup window from 20s to 60s
                 chosen = next(
                     (vi for vi in range(len(visuals))
-                     if last_used.get(vi) is None or (t_cursor - last_used[vi]) >= 20.0),
+                     if last_used.get(vi) is None or (t_cursor - last_used[vi]) >= 60.0),
                     None,
                 )
                 if chosen is None:
