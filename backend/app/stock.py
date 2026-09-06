@@ -51,6 +51,13 @@ import requests  # requests-compatible via httpx; key used via params={'key': ke
 logger = logging.getLogger("facelessforge.stock")
 
 # ── FIX: Visual mismatch blocklist + text-date filter ───────────────────
+# ── FIX 3: semantic Pexels queries — block abstract/legal/literal leaks
+PEXELS_ABSTRACT_BLOCKLIST = {
+    "judgment","judgement","gap","abstract","legal","literal","gavel","boxes",
+    "moving","concept","idea","notion","theory","mindset","paradigm",
+    "verdict","court","lawyer","lawsuit","contract","agreement",
+    "shall","should","could","would","might","may","generic",
+}
 BLOCKLIST = ["split", "saldi", "slack", "2026", "sale", "umbrella", "tourist"]
 # matches 4-9.9.2026 variants like "4.9.2026", "5.9.2026", "4-9.9.2026"
 DATE_TEXT_RE = re.compile(r"(?:^|[^0-9])(?:[4-9]\.9\.2026|4-9\.9\.2026)(?:[^0-9]|$)")
@@ -323,30 +330,74 @@ def _normalise_pexels_video(v: dict, query: str) -> Optional[dict]:
     }
 
 
+def _strip_pexels_abstract(query: str) -> str:
+    words=[w for w in re.split(r"\W+", (query or "").lower()) if w]
+    kept=[w for w in words if w not in PEXELS_ABSTRACT_BLOCKLIST and len(w)>=3]
+    return " ".join(kept[:4]).strip() or "business team office"
+
+async def _llm_visual_query(sentence: str) -> str:
+    prompt=('Generate a 3-word Pexels search query for B-roll that visually represents: '
+            f'"{sentence[:400]}" in the context of software engineering / business productivity. '
+            'Return only visual nouns, no abstract words.')
+    for provider in ("DEEPSEEK_API_KEY","KIMI_API_KEY","MOONSHOT_API_KEY","ANTHROPIC_API_KEY"):
+        key=os.environ.get(provider,"").strip()
+        if not key: continue
+        try:
+            if provider=="DEEPSEEK_API_KEY":
+                async with httpx.AsyncClient(timeout=20) as c:
+                    r=await c.post("https://api.deepseek.com/chat/completions", headers={"Authorization":f"Bearer {key}","Content-Type":"application/json"}, json={"model":"deepseek-chat","messages":[{"role":"user","content":prompt}],"temperature":0.3,"max_tokens":30})
+                    if r.status_code==200:
+                        txt=re.sub(r"[^a-z0-9 ]"," ",r.json()["choices"][0]["message"]["content"].strip().lower())
+                        return _strip_pexels_abstract(txt) or _strip_pexels_abstract(sentence)
+            elif provider in ("KIMI_API_KEY","MOONSHOT_API_KEY"):
+                async with httpx.AsyncClient(timeout=20) as c:
+                    r=await c.post("https://api.moonshot.cn/v1/chat/completions", headers={"Authorization":f"Bearer {key}","Content-Type":"application/json"}, json={"model":os.environ.get("KIMI_MODEL","kimi-k2-0711-preview"),"messages":[{"role":"user","content":prompt}],"temperature":0.3,"max_tokens":30})
+                    if r.status_code==200:
+                        return _strip_pexels_abstract(re.sub(r"[^a-z0-9 ]"," ",r.json()["choices"][0]["message"]["content"].strip().lower()))
+            else:
+                async with httpx.AsyncClient(timeout=20) as c:
+                    r=await c.post("https://api.anthropic.com/v1/messages", headers={"x-api-key":key,"anthropic-version":"2023-06-01","Content-Type":"application/json"}, json={"model":os.environ.get("LLM_MODEL","claude-3-5-sonnet-latest"),"max_tokens":30,"messages":[{"role":"user","content":prompt}]})
+                    if r.status_code==200:
+                        txt="".join(b.get("text","") for b in r.json().get("content",[])).strip().lower()
+                        return _strip_pexels_abstract(re.sub(r"[^a-z0-9 ]"," ",txt))
+        except Exception:
+            continue
+    return _strip_pexels_abstract(sentence)
+
+async def semantic_pexels_query(sentence: str) -> str:
+    q=await _llm_visual_query(sentence)
+    return q or _strip_pexels_abstract(sentence)
+
 async def _search_pexels(
     query: str,
     media_type: MediaType,
     per_page: int,
     *,
     orientation: Optional[str] = None,
+    page: int = 1,
 ) -> list[dict]:
     """Search Pexels API and return normalised results.
 
     Constitution §4.1 (FOOTAGE CURATION):
         - Video searches ALWAYS pass orientation="landscape" regardless of caller.
         - Photo searches honour the caller's orientation if provided.
+    FIX 3: query is pre-filtered for abstract/legal/literal words.
+    FIX 4: supports page param for pagination (per_page=40).
     """
+    # FIX 3: semantic filter — strip abstract words before API call
+    query = _strip_pexels_abstract(query)
     key = os.environ.get("PEXELS_API_KEY", "").strip()
     base = os.environ.get("PEXELS_API_BASE_URL", "https://api.pexels.com").rstrip("/")
     headers = {"Authorization": key}
     per_page = max(1, min(int(per_page), 40))
+    page = max(1, int(page))
     out: list[dict] = []
     timeout = httpx.Timeout(10.0, connect=5.0)
 
     async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
         # ── Photos ───────────────────────────────────────────────────────
         if media_type in ("both", "photos"):
-            params = {"query": query, "per_page": per_page}
+            params = {"query": query, "per_page": per_page, "page": page}
             if orientation in ("landscape", "portrait", "square"):
                 params["orientation"] = orientation
             r = await client.get(f"{base}/v1/search", params=params)
@@ -360,7 +411,7 @@ async def _search_pexels(
         # ── Videos ───────────────────────────────────────────────────────
         # Constitution §4.1: ALWAYS force landscape for video searches
         if media_type in ("both", "videos"):
-            video_params = {"query": query, "per_page": per_page}
+            video_params = {"query": query, "per_page": per_page, "page": page}
             min_dur = int(os.environ.get("PEXELS_MIN_VIDEO_DURATION", "10"))
             if min_dur > 0:
                 video_params["min_duration"] = min_dur
@@ -380,14 +431,55 @@ async def _search_pexels(
                     out.append(normalised)
                     kept += 1
             logger.info(
-                "pexels_videos query=%r per_page=%d response_count=%d kept=%d",
-                query[:60], per_page, len(raw_videos), kept,
+                "pexels_videos query=%r per_page=%d page=%d response_count=%d kept=%d",
+                query[:60], per_page, page, len(raw_videos), kept,
             )
 
     # FIX: blocklist + dedupe (last 10) filter
     out = _dedupe_and_filter_items(out)
     logger.info("BLOCKLIST post-filter query=%r remaining=%d", query[:60], len(out))
     return out
+
+async def _search_pexels_paginated(query: str, media_type: MediaType, *, min_results: int = 20, per_page: int = 40) -> list[dict]:
+    """FIX 4: Paginate Pexels (page + per_page=40) until min_results unique clips.
+    Tries page 1-3 with same query, then 2 backup semantic queries if still short."""
+    seen: dict[str, dict] = {}
+    for pg in (1, 2, 3):
+        try:
+            batch = await _search_pexels(query, media_type, per_page, page=pg)
+        except Exception as e:
+            if "rate_limited" in str(e):
+                break
+            continue
+        for it in batch:
+            eid = it.get("external_id")
+            if eid not in seen:
+                seen[eid] = it
+        if len(seen) >= min_results:
+            break
+    # If still short, try 2 backup queries with rephrased terms
+    if len(seen) < min_results:
+        # backup: drop last word / add cinematic variant
+        base_words = query.split()
+        backups = []
+        if len(base_words) >= 2:
+            backups.append(" ".join(base_words[1:]) + " office")
+            backups.append(base_words[0] + " team collaboration")
+        for bq in backups[:2]:
+            if len(seen) >= min_results:
+                break
+            bq = _strip_pexels_abstract(bq)
+            try:
+                batch = await _search_pexels(bq, media_type, per_page, page=1)
+            except Exception:
+                continue
+            for it in batch:
+                eid = it.get("external_id")
+                if eid not in seen:
+                    seen[eid] = it
+                if len(seen) >= min_results:
+                    break
+    return list(seen.values())
 
 # ── Pixabay adapters ─────────────────────────────────────────────────────
 
@@ -737,23 +829,34 @@ async def search_stock_aggregated(
 # ── Public ──────────────────────────────────────────────────────────────────
 
 async def search_stock_videos(query: str, per_page: int = 30) -> list[dict]:
-    """Video-only Pexels search for cinematic b-roll.
-
-    Returns ONLY ``stock_video`` items with a usable ``download_url`` —
-    never photos, and never mock results (mock "videos" are still images
-    that fail the renderer's motion probe). Logs the Pexels response count.
-    On rate-limit, backs off briefly and returns an empty list so the caller
-    can retry with the next keyword instead of poisoning the render with
-    mock stills.
-    """
+    """Video-only Pexels search for cinematic b-roll. FIX 4: paginated, min 20 unique.
+    FIX 3: query is LLM-semantic (strip abstract + LLM visual nouns)."""
     query = (query or "").strip()
     if not query:
         return []
     if _use_mock():
         logger.info("search_stock_videos query=%r skipped (mock mode)", query[:60])
         return []
+    # FIX 3: use LLM semantic query for B-roll when sentence-like input
+    if len(query.split()) > 2 or any(w in query.lower() for w in PEXELS_ABSTRACT_BLOCKLIST):
+        try:
+            semantic = await _llm_visual_query(query)
+            if semantic and semantic != _strip_pexels_abstract(query):
+                logger.info("semantic_pexels query=%r -> %r", query[:60], semantic)
+                query = semantic
+        except Exception:
+            query = _strip_pexels_abstract(query)
+    else:
+        query = _strip_pexels_abstract(query)
     try:
-        results = await _search_pexels(query, "videos", per_page)
+        # FIX 4: paginated fetch guarantees >=20 unique when available
+        results = await _search_pexels_paginated(query, "videos", min_results=20, per_page=40)
+        if len(results) < 20:
+            # per_page fallback kept for backward-compat path
+            fallback = await _search_pexels(query, "videos", min(per_page, 40))
+            for it in fallback:
+                if it.get("external_id") not in {r.get("external_id") for r in results}:
+                    results.append(it)
     except RuntimeError as e:
         if str(e) == "pexels_rate_limited":
             logger.warning("search_stock_videos rate-limited query=%r — backing off", query[:60])
@@ -769,8 +872,8 @@ async def search_stock_videos(query: str, per_page: int = 30) -> list[dict]:
     query_terms = [t.lower() for t in query.split() if len(t) > 2]
     if query_terms:
         videos.sort(key=lambda c: score_relevance(c, query_terms), reverse=True)
-    logger.info("search_stock_videos query=%r usable=%d", query[:60], len(videos))
-    return videos
+    logger.info("search_stock_videos query=%r usable=%d (paginated min20)", query[:60], len(videos))
+    return videos[:max(per_page,20)]
 
 
 async def search_stock(
@@ -807,10 +910,23 @@ async def search_stock(
             "query": query,
         }
 
+    # FIX 3: semantic LLM query for sentence-like inputs
+    if not _use_mock() and (len(query.split())>2 or any(w in query.lower() for w in PEXELS_ABSTRACT_BLOCKLIST)):
+        try:
+            sem=await _llm_visual_query(query)
+            if sem: query=sem
+        except Exception:
+            query=_strip_pexels_abstract(query)
+    else:
+        query=_strip_pexels_abstract(query)
     try:
-        # Constitution §4.1: orientation is forwarded to _search_pexels which
-        # will enforce landscape for videos regardless of what is passed here.
-        results = await _search_pexels(query, media_type, per_page, orientation=orientation)
+        # FIX 4: use paginated search when caller wants >=20
+        if per_page >= 20:
+            results = await _search_pexels_paginated(query, media_type, min_results=20, per_page=40)
+            # trim/pad to per_page but keep at least 20
+            results = results[:max(per_page,20)]
+        else:
+            results = await _search_pexels(query, media_type, per_page, orientation=orientation)
 
         # Constitution §4.1: Score and sort results by relevance so the most
         # semantically matching clips surface first.
