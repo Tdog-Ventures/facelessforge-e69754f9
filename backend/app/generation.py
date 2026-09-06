@@ -25,6 +25,37 @@ logger = logging.getLogger("facelessforge.generation")
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
+# FIX 1: Strip BEAT markers and other structural labels from text paths.
+# LLMs sometimes leak section labels like "BEAT 1", "Beat 2: ...", or
+# "INTRO/OUTRO/CTA" into narration/caption text — these are internal
+# scaffolding and must never reach the renderer (would burn into the video).
+_BEAT_MARKER_RE = re.compile(r"BEAT\s*\d+", re.IGNORECASE)
+_SECTION_LABEL_RE = re.compile(
+    r"^\s*(HOOK|INTRO|OUTRO|CTA|SCENE\s*\d*|BEAT\s*\d*)\s*[:\-–—]\s*",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def strip_beat_markers(text: str) -> str:
+    """Remove BEAT markers and leading section labels from script text.
+
+    Applied to every narration/caption path before it reaches the renderer.
+    Safe to call on empty/None values.
+    """
+    if not text:
+        return ""
+    cleaned = _BEAT_MARKER_RE.sub("", text or "")
+    cleaned = _SECTION_LABEL_RE.sub("", cleaned)
+    # Collapse whitespace introduced by removals
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\n{2,}", "\n", cleaned)
+    return cleaned.strip()
+
+
+# Backwards-compat: also exported as `strip_beat_artifacts` for any importer
+# that uses the old name.
+strip_beat_artifacts = strip_beat_markers
+
 
 def _load_prompt_template(name: str) -> Optional[str]:
     """Load a prompt template from app/prompts/, None if missing/unreadable."""
@@ -191,33 +222,35 @@ SCRIPT_SYSTEM = (
 
 
 def _coerce_script(result: dict) -> dict:
-    """Normalize a parsed script JSON into the expected schema."""
+    """Normalize a parsed script JSON into the expected schema.
+    All text fields are scrubbed of BEAT markers and structural labels."""
     if not isinstance(result, dict):
         return None
-    out = {
-        "hook_option_one": str(result.get("hook_option_one") or ""),
-        "hook_option_two": str(result.get("hook_option_two") or ""),
-        "hook_option_three": str(result.get("hook_option_three") or ""),
-        "selected_hook": str(result.get("selected_hook") or ""),
-        "full_script": "",
-        "retention_beats": [],
-        "cta_block": str(result.get("cta_block") or ""),
-    }
-    fs = result.get("full_script")
-    if isinstance(fs, str):
-        out["full_script"] = fs
-    elif isinstance(fs, list):
+    raw_fs = result.get("full_script")
+    fs_text = ""
+    if isinstance(raw_fs, str):
+        fs_text = strip_beat_markers(raw_fs)
+    elif isinstance(raw_fs, list):
         # Some models return a list of {time, text} objects or plain strings
         parts = []
-        for item in fs:
+        for item in raw_fs:
             if isinstance(item, dict):
-                parts.append(str(item.get("text") or ""))
+                parts.append(strip_beat_markers(str(item.get("text") or "")))
             elif isinstance(item, str):
-                parts.append(item)
-        out["full_script"] = " ".join(parts)
+                parts.append(strip_beat_markers(item))
+        fs_text = " ".join(parts)
+    out = {
+        "hook_option_one": strip_beat_markers(str(result.get("hook_option_one") or "")),
+        "hook_option_two": strip_beat_markers(str(result.get("hook_option_two") or "")),
+        "hook_option_three": strip_beat_markers(str(result.get("hook_option_three") or "")),
+        "selected_hook": strip_beat_markers(str(result.get("selected_hook") or "")),
+        "full_script": fs_text,
+        "retention_beats": [],
+        "cta_block": strip_beat_markers(str(result.get("cta_block") or "")),
+    }
     beats = result.get("retention_beats")
     if isinstance(beats, list):
-        out["retention_beats"] = [str(b) for b in beats if b]
+        out["retention_beats"] = [strip_beat_markers(str(b)) for b in beats if b]
     return out
 
 
@@ -275,7 +308,8 @@ Target duration: {target_dur}s (~{target_words} words)
 Tone: {project.get('tone', 'documentary')}
 
 CRITICAL: full_script must be ONE continuous string of ~{target_words} words, not a list or object.
-Write specifically about the Topic above. Do NOT fall back to a generic entrepreneur/startup origin story (instant noodles, sleeping in the office, investors saying no, first 100 customers) unless the Topic explicitly asks for one."""
+Write specifically about the Topic above. Do NOT fall back to a generic entrepreneur/startup origin story (instant noodles, sleeping in the office, investors saying no, first 100 customers) unless the Topic explicitly asks for one.
+Do not include BEAT markers, section headers, or structural labels (such as "BEAT 1", "INTRO:", "HOOK:", "CTA:", "SCENE 1:", etc.) in the output. All text must read as continuous voiceover."""
 
         result = await _llm_json(SCRIPT_SYSTEM, user, f"script-{project.get('id', uuid.uuid4())}")
         if result:
@@ -380,12 +414,16 @@ def _clean_search_terms(terms: list, narration: str, *, min_terms: int = 4) -> l
 
 
 def _coerce_scenes(scenes: list) -> list[dict]:
-    """Normalize scene objects to the expected schema."""
+    """Normalize scene objects to the expected schema. All text fields are
+    scrubbed of BEAT markers and structural labels before reaching the renderer."""
     out = []
     for s in scenes:
         if not isinstance(s, dict):
             continue
-        narration = str(s.get("narration_text") or s.get("caption_text") or "")
+        raw_narration = s.get("narration_text") or s.get("caption_text") or ""
+        raw_caption = s.get("caption_text") or s.get("narration_text") or ""
+        narration = strip_beat_markers(str(raw_narration))
+        caption = strip_beat_markers(str(raw_caption))
         search_terms = _clean_search_terms(s.get("search_terms") or [], narration)
         out.append({
             "scene_number": int(s.get("scene_number") or 0) or len(out) + 1,
@@ -396,7 +434,7 @@ def _coerce_scenes(scenes: list) -> list[dict]:
             "visual_direction": str(s.get("visual_direction") or ""),
             # Word-boundary cut at 80 chars — never mid-word, never a
             # hard [:120] slice that mangles the phrase.
-            "caption_text": truncate_words(s.get("caption_text") or s.get("narration_text") or "", 80),
+            "caption_text": truncate_words(caption, 80),
             "search_terms": search_terms,
         })
     return out
@@ -431,6 +469,8 @@ Return strict JSON with this exact shape:
 ]}}
 
 The visual_direction and search_terms MUST be specific to the topic, not generic business footage.
+
+Do not include BEAT markers, section headers, or structural labels (such as "BEAT 1", "INTRO:", "HOOK:", "SCENE 1:", etc.) in narration_text or caption_text. Text must read as continuous voiceover.
 
 Script: {full_script[:3000]}
 Topic: {project.get('topic', project.get('title', ''))}
@@ -493,7 +533,8 @@ async def generate_metadata(project: dict, script: dict, scenes: list = None) ->
 Topic: {topic}
 Hook: {hook}
 
-Write specifically about this Topic. Do NOT use a generic entrepreneur/startup origin-story framing (billion dollar empire, instant noodles, investors said no) unless the Topic explicitly asks for it."""
+Write specifically about this Topic. Do NOT use a generic entrepreneur/startup origin-story framing (billion dollar empire, instant noodles, investors said no) unless the Topic explicitly asks for it.
+Do not include BEAT markers, section headers, or structural labels in any output text."""
 
     result = await _llm_json(META_SYSTEM, user, f"meta-{project.get('id', uuid.uuid4())}")
     if result:
