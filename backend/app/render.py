@@ -1509,13 +1509,24 @@ async def _run_render(job_id: str, project_id: str):
         if not ok:
             raise RuntimeError(f"concat failed: {err[-300:]}")
 
+        # FIX 2: Normalize VO FIRST — lock final audio duration before any SRT is built.
+        # Previously Whisper SRT was generated before this step, so timestamps drifted after trim/pad.
+        if audio_path and audio_path.exists():
+            await _set_job(job_id, current_step="normalizing_vo", progress=89)
+            normed_vo = await _normalize_vo_track(audio_path, work_dir)
+            if normed_vo:
+                audio_path = normed_vo
+                audio_duration = await _probe_duration_seconds(audio_path) or audio_duration
+
         # ---- subtitle burn-in: word-synchronised from Whisper STT + ASS karaoke ----
+        # FIX 2: SRT is generated ONLY after final audio duration is locked (after concat + VO normalize).
+        # No trim/pad/concat or audio filter may run after this point — burn is the last video filter before mux.
         burned_out = silent_out
+        # BEAT overlay removed — FIX 1: BEAT markers must never be burned into the video.
         burn_enabled = os.environ.get("RENDER_BURN_SUBTITLES", "true").lower() in ("1", "true", "yes")
         if burn_enabled and audio_path and audio_path.exists():
-            await _set_job(job_id, current_step="transcribing_audio", progress=89)
+            await _set_job(job_id, current_step="transcribing_audio", progress=91)
             words = await transcribe_words(audio_path, language="en")
-            # faster-whisper word_timestamps=True already handled in transcribe_words
             srt_path = work_dir / "captions.srt"
             ass_path = work_dir / "captions.ass"
             try:
@@ -1556,7 +1567,6 @@ async def _run_render(job_id: str, project_id: str):
                     else:
                         write_srt(scenes, srt_path,
                                   intro_offset_seconds=INTRO_DURATION_SECONDS)
-                        # fallback ASS from scenes
                         from .subtitles import build_ass_from_cues
                         fallback_cues = [{"start": float(s.get("start_time") or 0) + INTRO_DURATION_SECONDS, "end": float(s.get("end_time") or 0) + INTRO_DURATION_SECONDS, "text": s.get("caption_text") or s.get("narration_text") or ""} for s in ordered_scenes]
                         write_ass_from_cues(fallback_cues, ass_path)
@@ -1564,7 +1574,6 @@ async def _run_render(job_id: str, project_id: str):
                 logger.warning("SRT/ASS generation failed (%s) — skipping burn-in", e)
                 srt_path = None
                 ass_path = None
-            # Prefer ASS karaoke (62px white bold black stroke) if available
             burn_src = None
             burn_is_ass = False
             if ass_path and ass_path.exists() and ass_path.stat().st_size > 0:
@@ -1573,21 +1582,24 @@ async def _run_render(job_id: str, project_id: str):
             elif srt_path and srt_path.exists() and srt_path.stat().st_size > 0:
                 burn_src = srt_path
             if burn_src:
-                await _set_job(job_id, current_step="burning_subtitles", progress=91)
+                await _set_job(job_id, current_step="burning_subtitles", progress=92)
                 burned_out = work_dir / "video_subbed.mp4"
                 escaped = burn_src.as_posix().replace(":", r"\:").replace("'", r"\'")
                 if burn_is_ass:
                     vf = f"ass='{escaped}'"
                 else:
-                    # FIX Captions: Arial-Bold 60 white black stroke 3 y=70% centered max 1000px
                     sub_style = (
                         "FontName=Arial,FontSize=60,Bold=1,Alignment=2,MarginL=460,MarginR=460,MarginV=280,"
                         "BorderStyle=1,OutlineColour=&H00000000,PrimaryColour=&H00FFFFFF,Outline=3,Shadow=0"
                     )
                     vf = f"subtitles='{escaped}':force_style='{sub_style}'"
+                # FIX 2: Burn uses source FPS exactly — no drift. Explicit -r FPS on input/output
+                # and fps filter if needed so subtitle PTS matches video PTS.
                 cmd = [
-                    FFMPEG_BIN, "-y", "-i", str(silent_out),
+                    FFMPEG_BIN, "-y",
+                    "-r", str(FPS), "-i", str(silent_out),
                     "-vf", vf,
+                    "-r", str(FPS),
                     "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
                     "-an", str(burned_out),
                 ]
@@ -1595,46 +1607,7 @@ async def _run_render(job_id: str, project_id: str):
                 if not ok:
                     logger.warning("subtitle burn-in failed (%s) — using clean video", err[-300:])
                     burned_out = silent_out
-
-        # FIX Hook+Beats: beats overlay 2s BEAT 1, BEAT 2 etc at script markers (roman_longform)
-        try:
-            beats = (script or {}).get("retention_beats") or []
-            if beats:
-                total_scene_dur = sum(sum(plan_by_idx.get(i, {"subclips": [4.0]})["subclips"]) for i in range(len(ordered_scenes)))
-                font_path = _resolve_font_path()
-                vf_parts = []
-                for idx in range(min(len(beats), 6)):
-                    beat_time = INTRO_DURATION_SECONDS + (idx + 1) * total_scene_dur / (len(beats) + 1)
-                    beat_text = f"BEAT {idx+1}"
-                    bt = beat_text.replace(":", r"\:").replace("'", r"\'")
-                    vf_parts.append(
-                        f"drawtext=fontfile='{font_path}':text='{bt}':fontcolor=white:fontsize=48:box=1:boxcolor=black@0.6:boxborderw=8:x=(w-text_w)/2:y=(h-text_h)/2:enable='between(t,{beat_time:.2f},{beat_time+2:.2f})'"
-                    )
-                if vf_parts:
-                    await _set_job(job_id, current_step="beats_overlay", progress=92)
-                    beats_out = work_dir / "video_beats.mp4"
-                    vf_beats = ",".join(vf_parts)
-                    ok_b, err_b = await _run_ffmpeg([
-                        FFMPEG_BIN, "-y", "-i", str(burned_out),
-                        "-vf", vf_beats,
-                        "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
-                        "-an", str(beats_out),
-                    ])
-                    if ok_b and beats_out.exists() and beats_out.stat().st_size > 0:
-                        burned_out = beats_out
-                        logger.info("BEATS_OVERLAY applied beats=%d", len(vf_parts))
-                    else:
-                        logger.warning("beats overlay failed %s", err_b[-300:] if 'err_b' in locals() else "unknown")
-        except Exception as e:
-            logger.warning("beats overlay skipped %s", e)
-
-        # Normalize VO track with loudnorm + dynaudnorm before mux (fixes 0:21/6:14 dips)
-        if audio_path and audio_path.exists():
-            await _set_job(job_id, current_step="normalizing_vo", progress=93)
-            normed_vo = await _normalize_vo_track(audio_path, work_dir)
-            if normed_vo:
-                audio_path = normed_vo
-                audio_duration = await _probe_duration_seconds(audio_path) or audio_duration
+            # LOCKED: no trim/pad/concat or timeline edits after SRT creation — burn is final video filter.
 
         # Mux audio (voiceover + optional music bed + loudnorm)
         await _set_job(job_id, current_step="muxing_audio", progress=94)
