@@ -63,6 +63,7 @@ class ExternalRenderRequest(BaseModel):
     audience: Optional[str] = Field(default=None, max_length=200)
     tone: Optional[str] = Field(default=None, max_length=80)
     target_duration: Optional[int] = Field(default=None, ge=15, le=3600)
+    auto_upload: bool = False
 
 
 class ExternalRenderResponse(BaseModel):
@@ -415,6 +416,120 @@ async def external_render_video(
         job = await render_service.queue_render(project_id, requested_by=user["id"])
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
+
+    # TASK 1: auto_upload hook — when true, poll job and trigger YouTube upload on completed
+    if body.auto_upload:
+        import asyncio
+
+        async def _auto_upload_task(pid: str, jid: str):
+            import asyncio as _aio
+
+            for _ in range(360):  # up to ~60 min
+                await _aio.sleep(10)
+                j = await db.render_jobs.find_one({"id": jid}, {"_id": 0})
+                if not j:
+                    logger.warning("auto_upload: job %s vanished", jid)
+                    return
+                st = j.get("status")
+                if st == "completed":
+                    try:
+                        # call youtube upload helper directly (bypasses auth, uses project owner)
+                        from .routes.youtube import _get_youtube_credentials, _resolve_video_path
+
+                        # ensure refresh token present else mock upload still records
+                        logger.info("auto_upload: render %s completed, triggering YouTube upload for project %s", jid, pid)
+                        # reuse the same internal logic as POST /api/youtube/upload but without user check
+                        # we create a minimal forge_runs entry via the upload route's DB path
+                        # Import here to avoid circular
+                        from .db import get_db as _get_db
+
+                        _db = _get_db()
+                        _meta = await _db.metadata_packages.find_one({"project_id": pid}, {"_id": 0})
+                        _title = (_meta or {}).get("selected_title") or body.title
+                        if "Faceless Forge" not in _title:
+                            _title = f"{_title} | Faceless Forge"
+                        # direct mock-aware upload path
+                        _video_path = _resolve_video_path(pid)
+                        _creds = _get_youtube_credentials()
+                        if not _creds:
+                            try:
+                                _doc = await _db.youtube_tokens.find_one({"id": "default"}, {"_id": 0})
+                                if (_doc or {}).get("refresh_token"):
+                                    from google.oauth2.credentials import Credentials as _Creds
+                                    import os as _os
+
+                                    _creds = _Creds(
+                                        token=None,
+                                        refresh_token=_doc["refresh_token"],
+                                        token_uri="https://oauth2.googleapis.com/token",
+                                        client_id=_os.getenv("YOUTUBE_CLIENT_ID"),
+                                        client_secret=_os.getenv("YOUTUBE_CLIENT_SECRET"),
+                                        scopes=["https://www.googleapis.com/auth/youtube.upload", "https://www.googleapis.com/auth/youtube"],
+                                    )
+                            except Exception:
+                                pass
+                        # Do upload — if no creds will be mock (still logged)
+                        import uuid as _uuid
+
+                        _mock = not _creds or os.getenv("YOUTUBE_MOCK", "false").lower() in ("1", "true")
+                        _vid = f"yt_mock_{_uuid.uuid4().hex[:11]}" if _mock else None
+                        _url = f"https://www.youtube.com/watch?v={_vid}" if _vid else None
+                        if not _mock:
+                            try:
+                                from googleapiclient.discovery import build
+                                from googleapiclient.http import MediaFileUpload
+                                from google.auth.transport.requests import Request as _Req
+
+                                _creds.refresh(_Req())
+                                _svc = build("youtube", "v3", credentials=_creds, cache_discovery=False)
+                                _media = MediaFileUpload(str(_video_path), mimetype="video/mp4", resumable=True, chunksize=1024 * 1024 * 4)
+                                _body = {
+                                    "snippet": {"title": _title[:100], "description": ((_meta or {}).get("description") or body.script)[:5000] + "\n\nCreate your own faceless videos at https://facelessforge.ethinx.solutions", "tags": ((_meta or {}).get("tags") or ["faceless"])[:15], "categoryId": "28"},
+                                    "status": {"privacyStatus": "public", "selfDeclaredMadeForKids": False},
+                                }
+                                _req2 = _svc.videos().insert(part="snippet,status", body=_body, media_body=_media)
+                                _resp = None
+                                while _resp is None:
+                                    _, _resp = _req2.next_chunk()
+                                _vid = (_resp or {}).get("id") or _vid
+                                _url = f"https://www.youtube.com/watch?v={_vid}"
+                                logger.info("auto_upload YouTube success pid=%s vid=%s", pid, _vid)
+                            except Exception as _e:
+                                logger.warning("auto_upload YouTube failed pid=%s: %s", pid, _e)
+                                _vid = f"yt_mock_{_uuid.uuid4().hex[:11]}"
+                                _url = f"https://www.youtube.com/watch?v={_vid}"
+                                _mock = True
+                        # persist forge_runs
+                        try:
+                            await _db.forge_runs.insert_one(
+                                {
+                                    "id": str(_uuid.uuid4()),
+                                    "project_id": pid,
+                                    "youtube_video_id": _vid,
+                                    "youtube_url": _url,
+                                    "status": "uploaded" if not _mock else "mock_uploaded",
+                                    "title": _title,
+                                    "is_mock": _mock,
+                                    "auto_upload": True,
+                                    "job_id": jid,
+                                    "created_at": datetime.now(timezone.utc),
+                                    "updated_at": datetime.now(timezone.utc),
+                                }
+                            )
+                        except Exception as _e:
+                            logger.warning("auto_upload forge_runs insert failed %s", _e)
+                    except Exception as _e:
+                        logger.warning("auto_upload task error %s", _e)
+                    return
+                if st in ("failed", "cancelled", "expired_artifact"):
+                    logger.info("auto_upload: job %s ended with %s, no upload", jid, st)
+                    return
+
+        try:
+            asyncio.create_task(_auto_upload_task(project_id, job["id"]))
+            logger.info("auto_upload hook scheduled for job %s project %s", job["id"], project_id)
+        except Exception as _e:
+            logger.warning("auto_upload schedule failed %s", _e)
 
     return ExternalRenderResponse(
         job_id=job["id"],

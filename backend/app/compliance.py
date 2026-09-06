@@ -17,8 +17,8 @@ class ComplianceGuard(BaseHTTPMiddleware):
                     tenant = str(payload.get("sub") or payload.get("tenant_id") or tenant)
                 except Exception:
                     pass
-            # For dodo provider with valid tenant, allow higher burst (20/hour) - finite credits already gated
-            limit = 20 if provider == "dodo" else 5
+            # Raised per audit: 100/hour (was 20/5) — dodo finite credits already gated, free tier no longer 1/hour
+            limit = 100
             # Admin bypass via header
             if request.headers.get("x-bypass-ratelimit") == __import__("os").getenv("RENDER_BYPASS_TOKEN",""):
                 return await call_next(request)
