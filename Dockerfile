@@ -11,7 +11,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy app
 COPY backend ./backend
+COPY frontend/build ./frontend/build
 COPY main.py .
+
+# Verify frontend build exists before proceeding
+RUN test -f /app/frontend/build/index.html || { echo "BUILD MISSING - aborting deploy"; exit 1; }
 
 # Set PYTHONPATH so imports work
 ENV PYTHONPATH=/app/backend:$PYTHONPATH
@@ -19,6 +23,5 @@ ENV PYTHONPATH=/app/backend:$PYTHONPATH
 # Expose port
 EXPOSE 8080
 
-# Run uvicorn
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
-RUN apt-get update && apt-get install -y ffmpeg && apt-get clean
+# Run uvicorn — exec form ENTRYPOINT fixes PID1 SIGTERM (user p12-13 audit)
+ENTRYPOINT ["uvicorn","main:app","--host","0.0.0.0","--port","8080","--workers","2"]

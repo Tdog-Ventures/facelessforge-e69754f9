@@ -22,6 +22,8 @@ services:
       - /opt/facelessforge/deploy/.env.facelessforge
     depends_on:
       - facelessforge-mongo
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - facelessforge_net
     volumes:
