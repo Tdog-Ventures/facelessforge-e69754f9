@@ -19,6 +19,7 @@ Stop leaking script words like "might", "obsolete", "coming", "year".
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -149,7 +150,7 @@ def build_scene_query(
     scene: dict,
     *,
     visual_tone: Optional[str] = None,
-    fallback_text_fields: tuple[str, ...] = ("visual_direction", "narration_text", "caption_text"),
+    fallback_text_fields: tuple[str, ...] = ("visual_direction", "narration_text"),
 ) -> str:
     """Compose the Pexels query for one scene.
 
@@ -187,7 +188,9 @@ def build_scene_query(
             if visual_tone and visual_tone.strip():
                 return f"{base} {CINEMATIC_SUFFIX} {visual_tone.strip()}".strip()
             return f"{base} {CINEMATIC_SUFFIX}".strip()
-    # Fallback to keywords from fields
+    # Fallback to keywords from fields — NEVER caption_text: captions like
+    # "Stay tuned for the full breakdown" are for TTS/subtitles only and must
+    # never reach a stock-video query (they produce 0 candidates + 429 loops).
     base = ""
     for field in fallback_text_fields:
         text = scene.get(field) or ""
@@ -243,6 +246,151 @@ def build_ordered_queries(scene: dict, project: dict | None = None, visual_tone:
 # Alias for scene_terms compatibility
 def build_scene_queries(scene: dict, project: dict | None = None) -> list[dict]:
     return build_ordered_queries(scene, project)
+
+
+async def generate_broll_keywords(
+    caption: str = "",
+    title: str = "",
+    narration: str = "",
+    top_n: int = 5,
+) -> list[str]:
+    """Return visual b-roll keywords for stock-footage search.
+
+    Captions and narration are NEVER used literally as a stock query — they are
+    only context for the LLM, which returns a JSON array of concrete visual
+    nouns (e.g. ``["red dvd envelope", "1990s office", "stack of dvds"]``).
+
+    Provider order mirrors the rest of the stack: local Ollama first, then
+    DeepSeek/Kimi, then Claude. On any failure it falls back to the
+    deterministic ``extract_visual_keywords`` over the visual_direction /
+    narration fields (captions excluded).
+    """
+    import httpx
+
+    kws: list[str] = []
+    if narration or title or caption:
+        context_parts = []
+        if title:
+            context_parts.append(f"Video title: {title}")
+        if narration:
+            context_parts.append(f"Narration: {narration[:1200]}")
+        if caption:
+            context_parts.append(f"Caption: {caption[:200]}")
+        prompt = (
+            "I need stock b-roll search keywords for a faceless YouTube video.\n"
+            + "\n".join(context_parts)
+            + "\n\n"
+            "Respond with ONLY a JSON array of exactly "
+            f"{top_n} concrete, visual, stock-searchable noun phrases "
+            '(no abstract words like "story", "success", "future"). '
+            "Example: [\"red dvd envelope\", \"1990s office\", \"stack of dvds\", "
+            '"mail sorting room", "streaming apps on tv"]'
+        )
+
+        # 1. Local Ollama (PRIMARY)
+        ollama_model = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b-instruct").strip() or "qwen2.5:7b-instruct"
+        ollama_url = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate").strip() or "http://localhost:11434/api/generate"
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as c:
+                resp = await c.post(
+                    ollama_url,
+                    json={"model": ollama_model, "prompt": prompt, "stream": False, "format": "json"},
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    text = data.get("response") or data.get("message", {}).get("content", "")
+                    kws = _parse_broll_json(text)
+                    if kws:
+                        logger.info("generate_broll_keywords ollama=%s -> %s", ollama_model, kws)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("generate_broll_keywords ollama failed: %s", e)
+
+        # 2. Cloud backups
+        if not kws:
+            for provider, url, model in (
+                ("DEEPSEEK_API_KEY", "https://api.deepseek.com/chat/completions", "deepseek-chat"),
+                ("KIMI_API_KEY", "https://api.moonshot.cn/v1/chat/completions", os.environ.get("KIMI_MODEL", "kimi-k2-0711-preview")),
+            ):
+                key = os.environ.get(provider, "").strip()
+                if not key:
+                    continue
+                try:
+                    async with httpx.AsyncClient(timeout=30.0) as c:
+                        resp = await c.post(
+                            url,
+                            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                            json={"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.3, "max_tokens": 200},
+                        )
+                        if resp.status_code == 200:
+                            kws = _parse_broll_json(resp.json()["choices"][0]["message"]["content"])
+                            if kws:
+                                logger.info("generate_broll_keywords %s -> %s", provider, kws)
+                                break
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("generate_broll_keywords %s failed: %s", provider, e)
+            if not kws:
+                anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+                if anthropic_key:
+                    try:
+                        model = os.environ.get("LLM_MODEL", "claude-sonnet-4-5-20250929").strip() or "claude-sonnet-4-5-20250929"
+                        async with httpx.AsyncClient(timeout=30.0) as c:
+                            resp = await c.post(
+                                "https://api.anthropic.com/v1/messages",
+                                headers={"x-api-key": anthropic_key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"},
+                                json={"model": model, "system": "You output only JSON arrays of visual stock keywords.", "messages": [{"role": "user", "content": prompt}], "max_tokens": 200, "temperature": 0.3},
+                            )
+                            if resp.status_code == 200:
+                                text = "".join(b.get("text", "") for b in resp.json().get("content", []))
+                                kws = _parse_broll_json(text)
+                                if kws:
+                                    logger.info("generate_broll_keywords anthropic -> %s", kws)
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("generate_broll_keywords anthropic failed: %s", e)
+
+    if not kws:
+        # Deterministic fallback — narration/directions only, NEVER caption-only
+        # text (no "stay tuned full breakdown" style junk reaches a stock query).
+        text_src = narration or title or ""
+        if text_src:
+            kws = extract_visual_keywords(text_src, top_n=top_n)
+    return kws[:top_n]
+
+
+def _parse_broll_json(text: str) -> list[str]:
+    """Parse a JSON array of keyword strings from an LLM reply."""
+    if not text:
+        return []
+    text = (text or "").strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        m = re.search(r"\[.*\]", text, re.DOTALL)
+        if not m:
+            return []
+        try:
+            data = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            return []
+    if isinstance(data, dict):
+        for key in ("keywords", "broll_keywords", "queries", "result"):
+            if isinstance(data.get(key), list):
+                data = data[key]
+                break
+    if not isinstance(data, list):
+        return []
+    out: list[str] = []
+    _junk = {"story", "success", "future", "idea", "concept", "business", "team"}
+    for item in data:
+        s = re.sub(r"\s+", " ", str(item or "").strip())
+        if not s and s in out:
+            continue
+        if any(w in _junk for w in s.lower().split()):
+            continue
+        if s not in out:
+            out.append(s)
+    return out
 
 
 async def derive_visual_tone(full_script: str) -> str:

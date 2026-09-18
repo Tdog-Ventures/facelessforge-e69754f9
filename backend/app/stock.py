@@ -50,6 +50,51 @@ import requests  # requests-compatible via httpx; key used via params={'key': ke
 
 logger = logging.getLogger("facelessforge.stock")
 
+
+class RateLimitError(Exception):
+    """Raised when a stock provider returns HTTP 429.
+
+    Propagates up to the render pipeline so the job fails/backs off instead
+    of silently looping or falling back to garbage footage.
+    """
+
+
+# ── Pexels 429 backoff gate (exponential, module-wide) ─────────────────────
+_PEXELS_BACKOFF_UNTIL = 0.0
+_PEXELS_BACKOFF_RETRIES = 0
+_PEXELS_BACKOFF_BASE = 2.0
+_PEXELS_BACKOFF_MAX = 60.0
+
+
+def _pexels_backoff_seconds() -> float:
+    """Exponential backoff window: 2s, 4s, 8s, ... capped at 60s."""
+    return min(_PEXELS_BACKOFF_BASE * (2 ** max(_PEXELS_BACKOFF_RETRIES - 1, 0)), _PEXELS_BACKOFF_MAX)
+
+
+async def _pexels_wait_backoff() -> None:
+    """If a 429 happened recently, sleep so concurrent render loops back off."""
+    import time
+    global _PEXELS_BACKOFF_UNTIL
+    now = time.time()
+    if _PEXELS_BACKOFF_UNTIL > now:
+        delay = _PEXELS_BACKOFF_UNTIL - now
+        logger.warning("Pexels in backoff — pausing %.1fs (retries=%d)", delay, _PEXELS_BACKOFF_RETRIES)
+        await asyncio.sleep(delay)
+
+
+def _pexels_record_429() -> None:
+    """Record a 429 and extend the shared backoff window (exponential)."""
+    import time
+    global _PEXELS_BACKOFF_UNTIL, _PEXELS_BACKOFF_RETRIES
+    _PEXELS_BACKOFF_RETRIES = min(_PEXELS_BACKOFF_RETRIES + 1, 6)
+    _PEXELS_BACKOFF_UNTIL = time.time() + _pexels_backoff_seconds()
+
+
+def _pexels_reset_backoff() -> None:
+    global _PEXELS_BACKOFF_UNTIL, _PEXELS_BACKOFF_RETRIES
+    _PEXELS_BACKOFF_UNTIL = 0.0
+    _PEXELS_BACKOFF_RETRIES = 0
+
 # ── FIX: Visual mismatch blocklist + text-date filter ───────────────────
 # ── FIX 3: semantic Pexels queries — block abstract/legal/literal leaks
 PEXELS_ABSTRACT_BLOCKLIST = {
@@ -356,7 +401,7 @@ async def _llm_visual_query(sentence: str) -> str:
                         return _strip_pexels_abstract(re.sub(r"[^a-z0-9 ]"," ",r.json()["choices"][0]["message"]["content"].strip().lower()))
             else:
                 async with httpx.AsyncClient(timeout=20) as c:
-                    r=await c.post("https://api.anthropic.com/v1/messages", headers={"x-api-key":key,"anthropic-version":"2023-06-01","Content-Type":"application/json"}, json={"model":os.environ.get("LLM_MODEL","claude-3-5-sonnet-latest"),"max_tokens":30,"messages":[{"role":"user","content":prompt}]})
+                    r=await c.post("https://api.anthropic.com/v1/messages", headers={"x-api-key":key,"anthropic-version":"2023-06-01","Content-Type":"application/json"}, json={"model":os.environ.get("LLM_MODEL","claude-sonnet-4-5-20250929"),"max_tokens":30,"messages":[{"role":"user","content":prompt}]})
                     if r.status_code==200:
                         txt="".join(b.get("text","") for b in r.json().get("content",[])).strip().lower()
                         return _strip_pexels_abstract(re.sub(r"[^a-z0-9 ]"," ",txt))
@@ -394,6 +439,8 @@ async def _search_pexels(
     out: list[dict] = []
     timeout = httpx.Timeout(10.0, connect=5.0)
 
+    await _pexels_wait_backoff()
+
     async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
         # ── Photos ───────────────────────────────────────────────────────
         if media_type in ("both", "photos"):
@@ -402,7 +449,10 @@ async def _search_pexels(
                 params["orientation"] = orientation
             r = await client.get(f"{base}/v1/search", params=params)
             if r.status_code == 429:
-                raise RuntimeError("pexels_rate_limited")
+                _pexels_record_429()
+                raise RateLimitError("pexels_rate_limited")
+            if r.status_code == 200:
+                _pexels_reset_backoff()
             r.raise_for_status()
             data = r.json()
             for p in (data.get("photos") or []):
@@ -420,7 +470,10 @@ async def _search_pexels(
             r = await client.get(f"{base}/videos/search", params=video_params)
             if r.status_code == 429:
                 logger.warning("Pexels videos rate-limited (429) query=%r", query[:60])
-                raise RuntimeError("pexels_rate_limited")
+                _pexels_record_429()
+                raise RateLimitError("pexels_rate_limited")
+            if r.status_code == 200:
+                _pexels_reset_backoff()
             r.raise_for_status()
             data = r.json()
             raw_videos = data.get("videos") or []
@@ -442,14 +495,19 @@ async def _search_pexels(
 
 async def _search_pexels_paginated(query: str, media_type: MediaType, *, min_results: int = 20, per_page: int = 40) -> list[dict]:
     """FIX 4: Paginate Pexels (page + per_page=40) until min_results unique clips.
-    Tries page 1-3 with same query, then 2 backup semantic queries if still short."""
+    Tries page 1-3 with same query, then 2 backup semantic queries if still short.
+
+    RATE LIMIT fix: a 429 raises RateLimitError immediately and stops pagination
+    AND backup queries — it must never be caught and turned into more requests.
+    """
     seen: dict[str, dict] = {}
     for pg in (1, 2, 3):
+        await _pexels_wait_backoff()
         try:
             batch = await _search_pexels(query, media_type, per_page, page=pg)
-        except Exception as e:
-            if "rate_limited" in str(e):
-                break
+        except RateLimitError:
+            raise
+        except Exception:
             continue
         for it in batch:
             eid = it.get("external_id")
@@ -469,8 +527,13 @@ async def _search_pexels_paginated(query: str, media_type: MediaType, *, min_res
             if len(seen) >= min_results:
                 break
             bq = _strip_pexels_abstract(bq)
+            if not bq or bq == _strip_pexels_abstract("office") or len(bq.split()) < 2:
+                continue
+            await _pexels_wait_backoff()
             try:
                 batch = await _search_pexels(bq, media_type, per_page, page=1)
+            except RateLimitError:
+                raise
             except Exception:
                 continue
             for it in batch:
@@ -858,10 +921,11 @@ async def search_stock_videos(query: str, per_page: int = 30) -> list[dict]:
                 if it.get("external_id") not in {r.get("external_id") for r in results}:
                     results.append(it)
     except RuntimeError as e:
-        if str(e) == "pexels_rate_limited":
-            logger.warning("search_stock_videos rate-limited query=%r — backing off", query[:60])
-            await asyncio.sleep(2.0)
-            return []
+        if "rate_limited" in str(e):
+            raise RateLimitError(str(e)) from e
+        raise
+    except RateLimitError:
+        logger.warning("search_stock_videos rate-limited query=%r — propagating backoff", query[:60])
         raise
     except httpx.HTTPError as e:
         logger.warning("search_stock_videos HTTP error query=%r: %s", query[:60], e)
@@ -938,18 +1002,14 @@ async def search_stock(
 
         return {"source": "pexels", "results": results, "mock": False, "query": query}
     except RuntimeError as e:
-        if str(e) == "pexels_rate_limited":
-            logger.warning("Pexels rate-limited, returning mock results")
-            return {
-                "source": "mock",
-                "results": _mock_results(query, media_type, per_page),
-                "mock": True,
-                "query": query,
-                "warning": "Pexels rate limit hit — showing deterministic mock results.",
-            }
+        if "rate_limited" in str(e):
+            raise RateLimitError(str(e)) from e
+        raise
+    except RateLimitError:
+        logger.warning("Pexels rate-limited — propagating backoff to render pipeline")
         raise
     except httpx.HTTPError as e:
-        logger.warning("Pexels HTTP error %s — falling back to mock", e)
+        logger.warning("Pexels HTTP error %s — returning mock results", e)
         return {
             "source": "mock",
             "results": _mock_results(query, media_type, per_page),

@@ -44,7 +44,7 @@ import random
 import re
 import shutil
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -57,6 +57,8 @@ from .subtitles import write_srt, write_srt_from_cues, write_srt_from_words
 from .transcribe import transcribe_words
 from .visual_query import truncate_words
 from . import stock as stock_service
+from .grounding import CLIENT_VISUAL_TYPES, validate_commercial_grounding
+from .scoring import commercial_scorecard
 try:
     from .verify import verify_render as _verify_render_constitution
     VERIFY_AVAILABLE = True
@@ -191,9 +193,25 @@ def _resolve_music_bed() -> Optional[Path]:
 FFMPEG_BIN = _resolve_ffmpeg_bin()
 FFPROBE_BIN = _resolve_ffprobe_bin()
 
-WIDTH = 1920
-HEIGHT = 1080
+# FacelessForge's launch product is vertical short-form commercial creative.
+# Do not silently encode a landscape YouTube export for a 9:16 client brief.
+WIDTH = 1080
+HEIGHT = 1920
 FPS = 30
+
+def get_dims(aspect_ratio: str):
+    if aspect_ratio == "16:9":
+        return 1920, 1080
+    if aspect_ratio == "1:1":
+        return 1080, 1080
+    return 1080, 1920  # 9:16 default
+
+def subtitle_style_for(w,h):
+    if w>h:  # 16:9 wide
+        return "FontName=Arial,FontSize=24,Bold=1,Alignment=2,MarginL=400,MarginR=400,MarginV=180,WrapStyle=1"
+    if w==h: # 1:1
+        return "FontName=Arial,FontSize=24,Bold=1,Alignment=2,MarginL=120,MarginR=120,MarginV=250,WrapStyle=1"
+    return "FontName=Arial,FontSize=24,Bold=1,Alignment=2,MarginL=80,MarginR=80,MarginV=350,WrapStyle=1"
 HARD_TIMEOUT_SECONDS = int(os.environ.get("RENDER_TIMEOUT_SECONDS", "600"))
 MAX_VIDEO_DOWNLOAD_BYTES = 60 * 1024 * 1024  # 60MB per asset cap
 # CONSTITUTION §1: Intro duration must be ≤2.5 seconds.
@@ -202,8 +220,8 @@ INTRO_DURATION_SECONDS = 2.5
 # Track active asyncio tasks per project for cancellation
 _ACTIVE_TASKS: dict[str, asyncio.Task] = {}
 _LOCKS: dict[str, asyncio.Lock] = {}
-# Hetzner 16GB: 4 parallel renders stable, thread-capped BullMQ + Redis style
-MAX_CONCURRENT_RENDERS = int(os.environ.get("MAX_CONCURRENT_RENDERS", "4"))
+# Hetzner 16GB: 3 parallel renders (queue limit) — rest queued, thread-capped BullMQ + Redis style
+MAX_CONCURRENT_RENDERS = int(os.environ.get("MAX_CONCURRENT_RENDERS", "3"))
 _RENDER_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_RENDERS)
 
 
@@ -229,18 +247,19 @@ def validate_prerequisites(project: dict, script: dict | None,
         if not ok:
             issues.append(label)
 
+    commercial = project.get("production_mode") == "commercial_ad"
     _add("script", "Script generated", bool(script and (script.get("full_script") or "").strip()),
          "Generate a script first.")
     _add("scenes", "Scenes generated", bool(scenes),
          "Generate the scene plan.")
-    _add("metadata", "Metadata generated", bool(metadata),
-         "Generate metadata package.")
+    if not commercial:
+        _add("metadata", "Metadata generated", bool(metadata), "Generate metadata package.")
 
     sel_thumb = next((a for a in assets
                       if a.get("asset_type") == "generated_thumbnail"
                       and a.get("id") == project.get("selected_thumbnail_asset_id")), None)
-    _add("thumbnail", "Selected thumbnail", bool(sel_thumb),
-         "Pick a thumbnail in the Thumbnails tab.")
+    if not commercial:
+        _add("thumbnail", "Selected thumbnail", bool(sel_thumb), "Pick a thumbnail in the Thumbnails tab.")
 
     full_voice = next((a for a in assets
                        if a.get("asset_type") == "voiceover_audio"
@@ -252,14 +271,42 @@ def validate_prerequisites(project: dict, script: dict | None,
     _add("voiceover", "Voiceover ready (full or per-scene)", has_voice,
          "Generate a full-script voiceover, or scene voiceovers.")
 
-    # Scene visual coverage — soft warning only (we fall back to caption frames)
+    # VO is master timeline: check VO vs scenes total duration mismatch — warn only, don't block (VO is master, video will be trimmed/padded)
+    try:
+        vo_duration = 0
+        if full_voice and full_voice.get("duration"):
+            vo_duration = float(full_voice.get("duration"))
+        elif scene_voices:
+            by_scene = {}
+            for v in scene_voices:
+                sid = v.get("scene_id")
+                if sid not in by_scene or str(v.get("created_at") or "") > str(by_scene[sid].get("created_at") or ""):
+                    by_scene[sid] = v
+            vo_duration = sum(float(v.get("duration") or 0) for v in by_scene.values())
+        scenes_total = sum(float(s.get("duration", 30) or 30) for s in scenes) if scenes else 0
+        target = int(project.get("target_duration", 0) or 0)
+        mismatch = abs(vo_duration - scenes_total) if vo_duration and scenes_total else 0
+        if vo_duration and scenes_total and mismatch > 5:
+            _add("duration_match", f"VO vs Video mismatch: VO {vo_duration:.1f}s vs Video {scenes_total:.1f}s (Δ {mismatch:.1f}s) — video will be trimmed to VO", True,
+                 f"Target {target}s, VO {vo_duration:.1f}s, Scenes {scenes_total:.1f}s — VO is master, video will match VO")
+        else:
+            _add("duration_match", "VO and video durations aligned", True)
+    except Exception:
+        pass
+
+    # Editorial projects retain their legacy stock/fallback behaviour.  A
+    # commercial project is stricter: no auto-stock or caption card can fill a
+    # missing client scene.
     scene_assets = [a for a in assets if a.get("asset_type") in ("stock_image", "stock_video") and a.get("scene_id")]
     covered_ids = {a["scene_id"] for a in scene_assets}
     coverage = (len(covered_ids) / max(1, len(scenes))) if scenes else 0
-    _add("scene_assets", "Scene visuals attached",
-         coverage >= 0.5,
-         f"{len(covered_ids)}/{len(scenes)} scenes have stock visuals. "
-         "Empty scenes will use caption fallback frames.")
+    if commercial:
+        grounding = validate_commercial_grounding(project, script, scenes, assets)
+        for item in grounding["checklist"]:
+            _add(item["key"], item["label"], item["ok"], "Resolve this commercial grounding requirement before rendering.")
+    else:
+        _add("scene_assets", "Scene visuals attached", coverage >= 0.5,
+             f"{len(covered_ids)}/{len(scenes)} scenes have stock visuals. Empty scenes will use caption fallback frames.")
 
     return {
         "ok": all(c["ok"] for c in checklist if c["key"] != "scene_assets"),
@@ -340,6 +387,8 @@ def _pil_caption_frame(out_path: Path, *, title: str, subtitle: str = "",
     sub_font = _try_load_font(40)
     foot_font = _try_load_font(28)
     margin = 100
+    TITLE_MAX_W=880
+    TITLE_FONT_SIZE=48
     y = margin + 60
     if title:
         words = (title or "").split()
@@ -437,6 +486,7 @@ async def _resolve_thumbnail(asset: dict, project: dict, work_dir: Path) -> Path
     This static image is only used as a last-resort fallback when no video
     footage is available across any scene.
     """
+    asset = asset or {}
     out = work_dir / "intro_fallback.png"
     local = _local_path_for_asset(asset)
     if local and local.suffix.lower() in (".png", ".jpg", ".jpeg"):
@@ -522,7 +572,10 @@ async def _video_has_motion(path: Path) -> bool:
             return False
         return True
     except Exception:  # noqa: BLE001
-        return True
+        # An unprobeable candidate cannot prove it is a usable motion clip.
+        # Reject it so the existing image/caption fallback path is used rather
+        # than handing a missing or invalid file to ffmpeg.
+        return False
 
 
 def _asset_dedupe_id(asset: dict, url: Optional[str] = None,
@@ -544,7 +597,8 @@ def _asset_dedupe_id(asset: dict, url: Optional[str] = None,
 
 async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
                                  project: dict, work_dir: Path, idx: int,
-                                 used_ext_ids: Optional[set] = None) -> tuple[Path, str, Optional[str]]:
+                                 used_ext_ids: Optional[set] = None,
+                                 allow_fallback: bool = True) -> tuple[Path, str, Optional[str]]:
     """Return (local_path, kind, external_id) where kind is 'image' or 'video'
     and external_id is the stock provider id (None for fallback frames).
     Always succeeds — falls back to caption frame on any error.
@@ -565,7 +619,7 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
         used_ext_ids = set()
     visual_tone = (project or {}).get("visual_tone") or ""
     candidates = [a for a in attached_assets if a.get("scene_id") == scene.get("id")
-                  and a.get("asset_type") in ("stock_image", "stock_video")]
+                  and a.get("asset_type") in ("stock_image", "stock_video", *CLIENT_VISUAL_TYPES)]
     out_dir = work_dir / "scenes"
     out_dir.mkdir(parents=True, exist_ok=True)
     fallback_path = out_dir / f"scene_{idx:03d}_fallback.png"
@@ -595,13 +649,13 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
         if not url:
             logger.warning("scene=%02d FOOTAGE_SKIP reason=no_url ext_id=%s", idx + 1, ext_id)
             continue
-        is_video = a.get("asset_type") == "stock_video" or any(url.lower().endswith(ext)
+        is_video = a.get("asset_type") in ("stock_video", "client_video") or any(url.lower().endswith(ext)
             for ext in (".mp4", ".mov", ".webm"))
         if not is_video:
             # ── Remote image (stock_image, unsplash, jpg/png) → Ken Burns path ──
             # media_type == 'image' or 'stock_image' or extension jpg/png or source=unsplash
             is_image = (
-                a.get("asset_type") == "stock_image"
+                a.get("asset_type") in ("stock_image", "client_image")
                 or a.get("media_type") in ("image", "stock_image")
                 or (a.get("source") or "").lower() == "unsplash"
                 or any(url.lower().split("?")[0].endswith(e) for e in (".jpg", ".jpeg", ".png", ".webp", ".bmp"))
@@ -643,6 +697,9 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
                     idx + 1, ext_id, size, probe, url[:100])
         return (target, "video", ext_id)
 
+    if not allow_fallback:
+        raise RuntimeError(f"Client asset for scene {idx + 1} is unavailable or invalid; no stock substitution is permitted")
+
     # ---- Pexels retry: query for fresh results when attached candidates fail ----
     queries: list[str] = []
     primary = build_scene_query(scene, visual_tone=visual_tone or None)
@@ -659,6 +716,10 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
             res = await stock_service.search_stock(
                 q, media_type="videos", per_page=20,
             )
+        except stock_service.RateLimitError as rle:
+            logger.warning("scene=%02d FOOTAGE_RETRY_RATE_LIMITED query=%r (%s) — stopping retries",
+                           idx + 1, q[:60], rle)
+            break
         except Exception as e:  # noqa: BLE001
             logger.warning("scene=%02d FOOTAGE_RETRY_ERROR query=%r err=%s",
                            idx + 1, q[:60], e)
@@ -703,23 +764,22 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
         return (target, "video", ext_id)
 
     # Fallback caption — CONSTITUTION §5: no giant per-scene title labels.
-    logger.warning("scene=%02d FOOTAGE_FALLBACK reason=all_candidates_rejected candidates=%d",
-                   idx + 1, len(candidates))
-    caption = scene.get("caption_text") or scene.get("narration_text") or scene.get("visual_direction") or ""
-    _pil_caption_frame(
-        fallback_path,
-        title="",  # Giant titles deleted per constitution
-        subtitle=(caption or "")[:160],
-        footer="",
-        palette=("#0F0F12", "#7B61FF"),
+    # FOOTAGE_FALLBACK is now FAIL-FAST: a scene with no usable footage (e.g.
+    # a caption-garbage Pexels query returning 0 candidates, or rate-limited)
+    # must fail the render job instead of emitting a static caption frame /
+    # looping one cached clip. The failed job is retried — it is never "completed".
+    logger.warning("scene=%02d FOOTAGE_FALLBACK reason=all_candidates_rejected candidates=%d — FAILING RENDER (no dotted roll)", idx + 1, len(candidates))
+    raise RuntimeError(
+        f"scene {idx + 1} footage: all candidates rejected (candidates={len(candidates)}); "
+        "no valid stock video/image available — render failed, not completed"
     )
-    return (fallback_path, "image", None)
 
 
 async def _resolve_scene_visuals(scene: dict, attached_assets: list[dict],
                                  project: dict, work_dir: Path, idx: int,
                                  max_visuals: int = 4,
-                                 used_ext_ids: Optional[set] = None) -> list[tuple[Path, str]]:
+                                 used_ext_ids: Optional[set] = None,
+                                 allow_fallback: bool = True) -> list[tuple[Path, str]]:
     """Resolve up to ``max_visuals`` distinct visuals for one scene.
 
     Verify check d needs a hard cut every ~8s; seek-offset jump cuts within
@@ -738,13 +798,13 @@ async def _resolve_scene_visuals(scene: dict, attached_assets: list[dict],
     (stock_image/unsplash/jpg/png) visuals are kept — images are rendered
     with Ken Burns via apply_ken_burns_effect() so they are not static holds.
     """
-    from .visual_query import build_scene_query, extract_visual_keywords
+    from .visual_query import build_scene_query, extract_visual_keywords, generate_broll_keywords
     if used_ext_ids is None:
         used_ext_ids = set()
     visuals: list[tuple[Path, str]] = []
     seen: set[str] = set()
     candidates = [a for a in attached_assets if a.get("scene_id") == scene.get("id")
-                  and a.get("asset_type") in ("stock_image", "stock_video")]
+                  and a.get("asset_type") in ("stock_image", "stock_video", *CLIENT_VISUAL_TYPES)]
 
     # 1) Attached assets — skip ext_ids already claimed by earlier scenes
     for a in candidates:
@@ -757,7 +817,7 @@ async def _resolve_scene_visuals(scene: dict, attached_assets: list[dict],
                         idx + 1, ext)
             continue
         path, kind, ext_id = await _resolve_scene_visual(
-            scene, [a], project, work_dir, idx, used_ext_ids=used_ext_ids)
+            scene, [a], project, work_dir, idx, used_ext_ids=used_ext_ids, allow_fallback=allow_fallback)
         # Allow both video and image (Ken Burns) — previously was video-only
         if kind not in ("video", "image") or str(path) in seen:
             continue  # rejected/fallback already handled — try the next candidate
@@ -766,9 +826,9 @@ async def _resolve_scene_visuals(scene: dict, attached_assets: list[dict],
         used_ext_ids.add(str(ext_id or ext))
 
     # 2) Top up from Pexels until we hold >= max_visuals DISTINCT visuals (video preferred).
-    #    Iterates query variants (narration-driven) so a 0-result keyword
+    #    Iterates query variants (narration/keyword-driven) so a 0-result keyword
     #    falls through to the next one instead of giving up.
-    if len(visuals) < max_visuals:
+    if allow_fallback and len(visuals) < max_visuals:
         visual_tone = (project or {}).get("visual_tone") or ""
         queries: list[str] = []
         for q in (
@@ -777,7 +837,15 @@ async def _resolve_scene_visuals(scene: dict, attached_assets: list[dict],
         ):
             if q and q not in queries:
                 queries.append(q)
-        kws = extract_visual_keywords(str(scene.get("narration_text") or ""), top_n=6)
+        # B-roll keywords come from the LLM (caption NEVER used verbatim — it is
+        # only context for visual-keyword generation).
+        generated = await generate_broll_keywords(
+            caption=str(scene.get("caption_text") or ""),
+            title=str(project.get("title") or project.get("topic") or ""),
+            narration=str(scene.get("narration_text") or ""),
+            top_n=5,
+        )
+        kws = generated or extract_visual_keywords(str(scene.get("narration_text") or ""), top_n=6)
         for n in (3, 2, 1):
             q = " ".join(kws[:n]).strip()
             if q and q not in queries:
@@ -790,6 +858,10 @@ async def _resolve_scene_visuals(scene: dict, attached_assets: list[dict],
                         idx + 1, q[:60], len(visuals), max_visuals)
             try:
                 results = await stock_service.search_stock_videos(q, per_page=30)
+            except stock_service.RateLimitError as rle:
+                logger.warning("scene=%02d FOOTAGE_TOPUP_RATE_LIMITED query=%r — stopping Pexels for this scene (%s)",
+                               idx + 1, q[:60], rle)
+                break
             except Exception as e:  # noqa: BLE001
                 logger.warning("scene=%02d FOOTAGE_TOPUP_ERROR query=%r err=%s",
                                idx + 1, q[:60], e)
@@ -806,8 +878,15 @@ async def _resolve_scene_visuals(scene: dict, attached_assets: list[dict],
                     logger.info("scene=%02d FOOTAGE_SKIP reason=duplicate_ext_id ext_id=%s",
                                 idx + 1, r_id)
                     continue
-                path, kind, ext_id = await _resolve_scene_visual(
-                    scene, [r], project, work_dir, idx, used_ext_ids=used_ext_ids)
+                try:
+                    path, kind, ext_id = await _resolve_scene_visual(
+                        scene, [r], project, work_dir, idx, used_ext_ids=used_ext_ids)
+                except RuntimeError as ffe:
+                    # A single top-up candidate failing must not fail the render —
+                    # it only skips that clip and tries the next one.
+                    logger.warning("scene=%02d FOOTAGE_TOPUP_SKIP query=%r err=%s",
+                                   idx + 1, q[:60], ffe)
+                    continue
                 if kind not in ("video", "image") or str(path) in seen:
                     continue  # rejected/fell back — try the next fresh result
                 seen.add(str(path))
@@ -819,6 +898,8 @@ async def _resolve_scene_visuals(scene: dict, attached_assets: list[dict],
                        idx + 1, len(visuals), max_visuals)
 
     if not visuals:
+        if not allow_fallback:
+            raise RuntimeError(f"No usable client visual assigned to scene {idx + 1}")
         path, kind, _ext_id = await _resolve_scene_visual(
             scene, attached_assets, project, work_dir, idx, used_ext_ids=used_ext_ids)
         visuals.append((path, kind))
@@ -1024,48 +1105,50 @@ def _is_image_asset(asset: dict | None) -> bool:
     return False
 
 
-def _ken_burns_filter(direction: str) -> str:
+def _ken_burns_filter(direction: str, w: int = None, h: int = None) -> str:
     """Return the -vf filter string for a Ken Burns direction - FIX pacing 1.0->1.15 + pan x+10px.
 
     Handles any input aspect by first crop-filling to WIDTHxHEIGHT,
     then over-scaling 1.15x to give headroom for zoom/pan (spec scale 1.0->1.15), then applying
     zoompan with pan x+10px over clip duration. Output is WIDTHxHEIGHT, setsar=1, yuv420p.
     """
+    W = w or WIDTH
+    H = h or HEIGHT
     # Crop-fill to WIDTHxHEIGHT so any aspect fills without black bars, then over-scale 1.15x for spec headroom.
     pre = (
-        f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase:flags=lanczos,"
-        f"crop={WIDTH}:{HEIGHT}:exact=1,"
+        f"scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,"
+        f"crop={W}:{H}:exact=1,"
         f"scale=iw*1.15:ih*1.15:flags=lanczos"
     )
     if direction == "zoom_in":
         zp = (
-            f"zoompan=d=1:s={WIDTH}x{HEIGHT}:"
+            f"zoompan=d=1:s={W}x{H}:"
             f"z='min(pzoom+0.0008,1.15)':x='iw/2-(iw/zoom/2)+10*on/100':y='ih/2-(ih/zoom/2)'"
         )
     elif direction == "zoom_out":
         zp = (
-            f"zoompan=d=1:s={WIDTH}x{HEIGHT}:"
+            f"zoompan=d=1:s={W}x{H}:"
             f"z='if(eq(on,1),1.15,max(pzoom-0.0008,1))':x='iw/2-(iw/zoom/2)+10*on/100':y='ih/2-(ih/zoom/2)'"
         )
     elif direction == "pan_left":
         zp = (
-            f"zoompan=d=1:s={WIDTH}x{HEIGHT}:"
+            f"zoompan=d=1:s={W}x{H}:"
             f"z='min(pzoom+0.0006,1.15)':x='iw/2-(iw/zoom/2)-10+10*on/100':y='ih/2-(ih/zoom/2)'"
         )
     elif direction == "pan_right":
         zp = (
-            f"zoompan=d=1:s={WIDTH}x{HEIGHT}:"
+            f"zoompan=d=1:s={W}x{H}:"
             f"z='min(pzoom+0.0006,1.15)':x='iw/2-(iw/zoom/2)+10-10*on/100':y='ih/2-(ih/zoom/2)'"
         )
     else:
         zp = (
-            f"zoompan=d=1:s={WIDTH}x{HEIGHT}:"
+            f"zoompan=d=1:s={W}x{H}:"
             f"z='min(pzoom+0.0008,1.15)':x='iw/2-(iw/zoom/2)+10*on/100':y='ih/2-(ih/zoom/2)'"
         )
     return f"{pre},{zp},setsar=1,format=yuv420p"
 
 
-def _ffmpeg_ken_burns_image(src: Path, duration: float, out: Path, direction: str = "random") -> list[str]:
+def _ffmpeg_ken_burns_image(src: Path, duration: float, out: Path, direction: str = "random", w: int = None, h: int = None) -> list[str]:
     """Build ffmpeg command for Ken Burns effect on a static image — motion 29.5.
 
     Args:
@@ -1078,7 +1161,7 @@ def _ffmpeg_ken_burns_image(src: Path, duration: float, out: Path, direction: st
     """
     if direction == "random":
         direction = random.choice(list(KEN_BURNS_DIRECTIONS))
-    vf = _ken_burns_filter(direction)
+    vf = _ken_burns_filter(direction, w, h)
     # motion 29.5 Ken Burns verified — log for journalctl proof
     logger.debug("_ffmpeg_ken_burns_image motion 29.5 direction=%s duration=%.2f", direction, duration)
     return [
@@ -1130,16 +1213,35 @@ def _build_ken_burns_command(image_path: Path | str, duration: float, out_path: 
     return _ffmpeg_ken_burns_image(Path(image_path), duration, Path(out_path), direction)
 
 
-# Force all stock to 1920x1080 before concat: pad black bars to handle mixed aspect ratios (Part1 aerial vertical, Part3 team, Part4 graph)
-def _ffmpeg_normalise_image(src: Path, duration: float, out: Path) -> list[str]:
+# CONSTITUTION §5: Use blurred-background zoom-to-fill for mixed-aspect stock
+# instead of black-letterbox/pillarbox padding.  This fills the entire output
+# canvas with the (blurred, dimmed) source so edges are never pure black, while
+# the focused foreground sits centred at its native aspect ratio.
+def _blur_fill_vf(W: int, H: int) -> str:
+    """Return the core split+overlay filtergraph chain for a blurred
+    background fill.  Callers may prepend additional filters (e.g. a
+    punch-in crop) before ``split`` and append final per-frame
+    constraints (fps, drawtext, etc.) after the overlay."""
+    return (
+        f"split=2[_bg][_fg];"
+        f"[_bg]scale={W}:{H}:force_original_aspect_ratio=increase:flags=bicubic,"
+        f"crop={W}:{H},boxblur=20:4,"
+        f"eq=brightness=-0.06:saturation=1.0,format=yuv420p[_bgv];"
+        f"[_fg]scale={W}:{H}:force_original_aspect_ratio=decrease:flags=lanczos,"
+        f"setsar=1,format=yuv420p[_fgv];"
+        f"[_bgv][_fgv]overlay=(W-w)/2:(H-h)/2:shortest=1"
+    )
+
+
+def _ffmpeg_normalise_image(src: Path, duration: float, out: Path, w: int = None, h: int = None) -> list[str]:
+    W = w or WIDTH
+    H = h or HEIGHT
+    vf = _blur_fill_vf(W, H) + ",format=yuv420p"
     return [
         FFMPEG_BIN, "-y",
         "-loop", "1", "-t", f"{duration:.2f}",
         "-i", str(src),
-        "-vf", (
-            f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,"
-            f"pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p"
-        ),
+        "-vf", vf,
         "-r", str(FPS),
         "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
         "-an",
@@ -1149,20 +1251,32 @@ def _ffmpeg_normalise_image(src: Path, duration: float, out: Path) -> list[str]:
 
 def _ffmpeg_normalise_video(src: Path, duration: float, out: Path,
                             *, start_offset: float = 0.0,
-                            punch_in: bool = False) -> list[str]:
+                            punch_in: bool = False, w: int = None, h: int = None) -> list[str]:
+    W = w or WIDTH
+    H = h or HEIGHT
     cmd = [FFMPEG_BIN, "-y"]
     if start_offset > 0:
         cmd += ["-ss", f"{start_offset:.2f}"]
-    pre = "crop=iw/1.19:ih/1.19," if punch_in else ""
+    if punch_in:
+        # Punch-in: split first so the blurred background uses the full frame
+        # while only the focused foreground is zoomed.
+        vf = (
+            f"split=2[_bg][_fg];"
+            f"[_bg]scale={W}:{H}:force_original_aspect_ratio=increase:flags=bicubic,"
+            f"crop={W}:{H},boxblur=20:4,"
+            f"eq=brightness=-0.06:saturation=1.0,format=yuv420p[_bgv];"
+            f"[_fg]crop=iw/1.19:ih/1.19,"
+            f"scale={W}:{H}:force_original_aspect_ratio=decrease:flags=lanczos,"
+            f"setsar=1,format=yuv420p[_fgv];"
+            f"[_bgv][_fgv]overlay=(W-w)/2:(H-h)/2:shortest=1,format=yuv420p,fps={FPS}"
+        )
+    else:
+        vf = _blur_fill_vf(W, H) + f",format=yuv420p,fps={FPS}"
     cmd += [
         "-stream_loop", "-1",
         "-i", str(src),
         "-t", f"{duration:.2f}",
-        "-vf", (
-            f"{pre}"
-            f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,"
-            f"pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p,fps={FPS}"
-        ),
+        "-vf", vf,
         "-r", str(FPS),
         "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
         "-an",
@@ -1173,8 +1287,10 @@ def _ffmpeg_normalise_video(src: Path, duration: float, out: Path,
 
 # CONSTITUTION §5: Intro card (≤2.5s): title centered, wrapped, ≥80px side
 # margins, over hook footage with dark overlay 30%.
-def _ffmpeg_intro_from_video(src: Path, duration: float, out: Path, title: str, work_dir: Path) -> list[str]:
+def _ffmpeg_intro_from_video(src: Path, duration: float, out: Path, title: str, work_dir: Path, w: int = None, h: int = None) -> list[str]:
     """Create intro clip from video hook footage with dark overlay and title."""
+    W = w or WIDTH
+    H = h or HEIGHT
     wrapped = _wrap_text(title, max_chars=30)
     text_file = work_dir / "intro_title.txt"
     text_file.write_text(wrapped, encoding="utf-8")
@@ -1184,8 +1300,8 @@ def _ffmpeg_intro_from_video(src: Path, duration: float, out: Path, title: str, 
         "-i", str(src),
         "-t", f"{duration:.2f}",
         "-vf", (
-            f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,"
-            f"pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p,fps={FPS},"
+            _blur_fill_vf(W, H) +
+            f",format=yuv420p,fps={FPS},"
             f"drawbox=y=0:color=black@0.3:w=iw:h=ih:t=fill,"
             f"drawtext=fontfile='{font_path}':"
             f"textfile='{text_file.as_posix()}':fontcolor=white:fontsize=72:"
@@ -1198,9 +1314,11 @@ def _ffmpeg_intro_from_video(src: Path, duration: float, out: Path, title: str, 
     ]
 
 
-def _ffmpeg_intro_from_image(src: Path, duration: float, out: Path, title: str, work_dir: Path) -> list[str]:
+def _ffmpeg_intro_from_image(src: Path, duration: float, out: Path, title: str, work_dir: Path, w: int = None, h: int = None) -> list[str]:
     """Create intro clip from static image with dark overlay and title.
     Used only when no video hook footage is available."""
+    W = w or WIDTH
+    H = h or HEIGHT
     wrapped = _wrap_text(title, max_chars=30)
     text_file = work_dir / "intro_title.txt"
     text_file.write_text(wrapped, encoding="utf-8")
@@ -1210,8 +1328,8 @@ def _ffmpeg_intro_from_image(src: Path, duration: float, out: Path, title: str, 
         "-loop", "1", "-t", f"{duration:.2f}",
         "-i", str(src),
         "-vf", (
-            f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,"
-            f"pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p,"
+            _blur_fill_vf(W, H) +
+            ",format=yuv420p,"
             f"drawbox=y=0:color=black@0.3:w=iw:h=ih:t=fill,"
             f"drawtext=fontfile='{font_path}':"
             f"textfile='{text_file.as_posix()}':fontcolor=white:fontsize=72:"
@@ -1247,11 +1365,70 @@ async def is_render_active(project_id: str) -> bool:
     return bool(job)
 
 
-async def queue_render(project_id: str, *, requested_by: str) -> dict:
-    """Create a job in 'queued' state and start the background worker."""
+async def queue_render(project_id: str, *, requested_by: str, burn_subtitles: bool = False, aspect_ratio: str | None = None) -> dict:
+    """Create a job in 'queued' state and start the background worker. Queue limit 3 concurrent, rest queued."""
     db = get_db()
     if await is_render_active(project_id):
         raise RuntimeError("A render is already in progress for this project.")
+    # Atomic deduct 3 credits (1 render = 3cr) before queue — prevents double-spend
+    try:
+        from pymongo import ReturnDocument
+        from fastapi import HTTPException
+        # Ensure subscription exists (free tier fallback)
+        sub = await db.subscriptions.find_one({"user_id": requested_by}, {"_id": 0})
+        if not sub:
+            # Check ff_credits fallback
+            ff = await db.ff_credits.find_one({"tenant_id": requested_by}, {"_id": 0}) or await db.ff_credits.find_one({"user_id": requested_by}, {"_id": 0})
+            if ff:
+                sub = {"credits_remaining": int(ff.get("credits", 0)), "credits_monthly": int(ff.get("credits", 30))}
+            else:
+                # create free tier
+                free_sub = {
+                    "user_id": requested_by,
+                    "paddle_customer_id": None,
+                    "paddle_subscription_id": None,
+                    "paddle_price_id": None,
+                    "plan": "free",
+                    "status": "active",
+                    "credits_monthly": 30,
+                    "credits_remaining": 30,
+                    "current_period_end": _now() + timedelta(days=30),
+                    "created_at": _now(),
+                    "updated_at": _now(),
+                }
+                await db.subscriptions.insert_one(dict(free_sub))
+                sub = free_sub
+        # Atomic findAndModify: only deduct if >=3
+        result = await db.subscriptions.find_one_and_update(
+            {"user_id": requested_by, "credits_remaining": {"$gte": 3}},
+            {"$inc": {"credits_remaining": -3}, "$set": {"updated_at": _now()}},
+            return_document=ReturnDocument.AFTER,
+        )
+        if not result:
+            # Also try ff_credits if subscriptions failed
+            ff_result = await db.ff_credits.find_one_and_update(
+                {"tenant_id": requested_by, "credits": {"$gte": 3}},
+                {"$inc": {"credits": -3}, "$set": {"updated_at": _now()}},
+                return_document=ReturnDocument.AFTER,
+            )
+            if not ff_result:
+                remaining = int((sub or {}).get("credits_remaining", 0))
+                raise HTTPException(status_code=402, detail={"code": "credits_exhausted", "required": 3, "remaining": remaining, "message": f"Insufficient credits: {remaining} remaining, 3 required"})
+            # Log ff_credits deduct
+            await db.credit_transactions.insert_one({"id": str(uuid.uuid4()), "user_id": requested_by, "amount": -3, "reason": f"render {project_id}", "created_at": _now()})
+        else:
+            await db.credit_transactions.insert_one({"id": str(uuid.uuid4()), "user_id": requested_by, "amount": -3, "reason": f"render {project_id}", "created_at": _now()})
+    except HTTPException:
+        raise
+    except Exception as e:
+        # If billing not configured, log but don't block render (fail open for dev)
+        logger.warning("credit deduct failed for %s: %s", requested_by, e)
+
+    # Queue limit: max 3 concurrent, rest stay queued (semaphore will block)
+    active = await db.render_jobs.count_documents({"status": {"$in": ["queued", "validating", "preparing_assets", "rendering"]}})
+    if active >= MAX_CONCURRENT_RENDERS:
+        logger.info("queue limit hit active=%s max=%s — job %s will queue", active, MAX_CONCURRENT_RENDERS, project_id)
+
     job_id = str(uuid.uuid4())
     now = _now()
     job = {
@@ -1262,6 +1439,7 @@ async def queue_render(project_id: str, *, requested_by: str) -> dict:
         "current_step": "queued",
         "output_path": None,
         "output_url": None,
+        "release_eligible": False,
         "duration": None,
         "error_message": None,
         "requested_by": requested_by,
@@ -1269,12 +1447,16 @@ async def queue_render(project_id: str, *, requested_by: str) -> dict:
         "completed_at": None,
         "created_at": now,
         "updated_at": now,
+        "burn_subtitles": bool(burn_subtitles),
+        "aspect_ratio": aspect_ratio or "9:16",
     }
     await db.render_jobs.insert_one(dict(job))
 
     task = asyncio.create_task(_run_render_safe(job_id, project_id))
     _ACTIVE_TASKS[project_id] = task
     job.pop("_id", None)
+    # Add queue info for frontend: if 135 ready, show 3 rendering, 132 queued
+    job["_queue_info"] = {"active": active, "max": MAX_CONCURRENT_RENDERS, "queued": max(0, active - MAX_CONCURRENT_RENDERS + 1) if active >= MAX_CONCURRENT_RENDERS else 0}
     return job
 
 
@@ -1306,9 +1488,51 @@ async def _run_render_safe(job_id: str, project_id: str):
             logger.exception("Render job failed")
             await _set_job(job_id, status="failed", current_step="failed",
                            error_message=f"{type(e).__name__}: {e}"[:240],
-                           completed_at=_now())
+                           completed_at=_now(), release_eligible=False)
         finally:
             _ACTIVE_TASKS.pop(project_id, None)
+
+
+STALE_JOB_TIMEOUT_SECONDS = int(
+    os.environ.get("STALE_JOB_TIMEOUT", str(60 * 60))
+)  # active longer than this without a heartbeat update = orphaned worker
+
+
+async def recover_stale_jobs() -> int:
+    """Mark active-pipeline jobs whose worker vanished (crash/restart) as failed.
+
+    Prevents phantom 'rendering/queued/preparing_assets' entries from wedging
+    the dashboard counts forever. Returns the number of jobs recovered.
+    """
+    db = get_db()
+    cutoff = _now() - timedelta(seconds=STALE_JOB_TIMEOUT_SECONDS)
+    active = ["queued", "validating", "preparing_assets", "rendering"]
+    cursor = db.render_jobs.find(
+        {"status": {"$in": active}, "updated_at": {"$lt": cutoff}},
+        {"_id": 0, "id": 1, "status": 1, "project_id": 1},
+    )
+    stale = await cursor.to_list(100)
+    if not stale:
+        return 0
+    ids = [j["id"] for j in stale]
+    res = await db.render_jobs.update_many(
+        {"id": {"$in": ids}},
+        {
+            "$set": {
+                "status": "failed",
+                "current_step": "failed",
+                "error_message": "Recovered stale job: worker crashed or pod restarted mid-render",
+                "completed_at": _now(),
+                "release_eligible": False,
+            }
+        },
+    )
+    for j in stale:
+        logger.warning(
+            "STALE_JOB_RECOVERED job=%s project=%s was=%s",
+            j["id"], j.get("project_id"), j.get("status"),
+        )
+    return res.modified_count or len(stale)
 
 
 async def _run_render(job_id: str, project_id: str):
@@ -1318,7 +1542,23 @@ async def _run_render(job_id: str, project_id: str):
         await _set_job(job_id, status="validating", current_step="validating",
                        progress=5, started_at=_now())
 
+        # Fetch job for per-render overrides (burn_subtitles, aspect_ratio) — default off for captions, 9:16 default
+        job_doc = await db.render_jobs.find_one({"id": job_id}, {"_id": 0}) or {}
         project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+        # Aspect: job overrides project (allows landscape/portrait choice at render time)
+        aspect = (job_doc.get("aspect_ratio") or project.get("aspect_ratio") or "9:16")
+        if aspect not in ("9:16", "1:1", "16:9"):
+            aspect = "9:16"
+        # Compute dimensions for this render (not global)
+        W, H = get_dims(aspect)
+        subtitle_style = subtitle_style_for(W, H)
+        # Burn subtitles only if explicitly requested (not during production by default)
+        # Still write SRT for download/CapCut even when not burned
+        burn_enabled = bool(job_doc.get("burn_subtitles") or project.get("burn_subtitles"))
+        # Also allow env override for backward compat, but default is False
+        if os.getenv("RENDER_BURN_SUBTITLES", "false").lower() in ("1", "true", "yes"):
+            burn_enabled = True
+        logger.info("RENDER dims %sx%s aspect=%s burn=%s job=%s", W, H, aspect, burn_enabled, job_id)
         script = await db.scripts.find_one({"project_id": project_id}, {"_id": 0})
         scenes = await db.scenes.find({"project_id": project_id}, {"_id": 0}).sort("scene_number", 1).to_list(500)
         metadata = await db.metadata_packages.find_one({"project_id": project_id}, {"_id": 0})
@@ -1327,8 +1567,14 @@ async def _run_render(job_id: str, project_id: str):
         check = validate_prerequisites(project, script, scenes, metadata, assets)
         if not check["ok"]:
             raise RuntimeError("Missing requirements: " + ", ".join(check["issues"][:5]))
+        commercial = project.get("production_mode") == "commercial_ad"
+        # Commercial ads are exact-duration creative.  There is no inherited
+        # YouTube title card before the supplied 15-second narrative.
+        intro_duration = 0.0 if commercial else INTRO_DURATION_SECONDS
 
         sel_thumb = next((a for a in assets if a["id"] == project.get("selected_thumbnail_asset_id")), None)
+        if commercial and not sel_thumb:
+            sel_thumb = next((a for a in assets if a.get("asset_type") in ("brand_image", "brand_logo", "client_image")), None)
 
         # Workdir per job
         work_dir = STATIC_RENDERS / project_id / f"_work_{job_id}"
@@ -1358,7 +1604,7 @@ async def _run_render(job_id: str, project_id: str):
             # Alternatively raise: but we allow truncated render to meet acceptance
             audio_duration = 600.0
         # Also estimate video total (intro + plan) before plan built; if audio not available, estimate from scenes
-        est_total = (audio_duration or sum(max(2.0, float((s.get("end_time") or 0) - (s.get("start_time") or 0)) or 4.0) for s in scenes) + INTRO_DURATION_SECONDS)
+        est_total = (audio_duration or sum(max(2.0, float((s.get("end_time") or 0) - (s.get("start_time") or 0)) or 4.0) for s in scenes) + intro_duration)
         if est_total > 600:
             logger.warning("RENDER_DURATION_LIMIT: estimated total %.2fs >600s for project %s — video will be trimmed via -shortest/-fs 1900M", est_total, project_id)
 
@@ -1373,10 +1619,14 @@ async def _run_render(job_id: str, project_id: str):
         used_ext_ids: set[str] = set()  # project-wide external_id uniqueness
         for i, scene in enumerate(scenes):
             n_clips = len(plan_by_idx.get(i, {"subclips": [4.0]})["subclips"])
-            required_visuals = max(n_clips, 20)
+            # One distinct source per emitted sub-clip is sufficient. Requiring
+            # twenty sources for a short scene turns transient stock-download
+            # failures into a long, unnecessary retry loop before fallback.
+            required_visuals = max(n_clips, 1)
             visuals = await _resolve_scene_visuals(scene, assets, project, work_dir, i,
                                                    max_visuals=required_visuals,
-                                                   used_ext_ids=used_ext_ids)
+                                                   used_ext_ids=used_ext_ids,
+                                                   allow_fallback=not commercial)
             scene_visuals.append((visuals, scene))
 
         # CONSTITUTION §5: Select hook footage — first video clip for intro background.
@@ -1413,13 +1663,14 @@ async def _run_render(job_id: str, project_id: str):
         # For roman template, also ensure retention beats include roman hook beats
         if use_roman_hook:
             logger.info("HOOK_TEMPLATE roman_longform active -> intro_title=%r", intro_title)
-        if hook_path:
-            ok, err = await _run_ffmpeg(_ffmpeg_intro_from_video(hook_path, INTRO_DURATION_SECONDS, intro_out, intro_title, work_dir))
-        else:
-            ok, err = await _run_ffmpeg(_ffmpeg_intro_from_image(intro_fallback_img, INTRO_DURATION_SECONDS, intro_out, intro_title, work_dir))
-        if not ok:
-            raise RuntimeError(f"intro encode failed: {err[-300:]}")
-        clips.append(intro_out)
+        if intro_duration:
+            if hook_path:
+                ok, err = await _run_ffmpeg(_ffmpeg_intro_from_video(hook_path, intro_duration, intro_out, intro_title, work_dir, w=W, h=H))
+            else:
+                ok, err = await _run_ffmpeg(_ffmpeg_intro_from_image(intro_fallback_img, intro_duration, intro_out, intro_title, work_dir, w=W, h=H))
+            if not ok:
+                raise RuntimeError(f"intro encode failed: {err[-300:]}")
+            clips.append(intro_out)
 
         # Scene clips — multiple sub-clips per scene, cycling through the
         # scene's distinct sources so sub-clip boundaries are real cuts.
@@ -1473,7 +1724,7 @@ async def _run_render(job_id: str, project_id: str):
                     else:
                         offset = 0.0
                     cmd = _ffmpeg_normalise_video(path, dur, out, start_offset=offset,
-                                                  punch_in=(j % 2 == 1))
+                                                   punch_in=(j % 2 == 1), w=W, h=H)
                 elif is_image:
                     # Ken Burns: duration = scene duration chunk, direction random per clip
                     # Example ffmpeg: -vf "scale=iw*2:ih*2,zoompan=d=1:s=1280x720:z='min(pzoom+0.0015,1.5)'..."
@@ -1483,13 +1734,13 @@ async def _run_render(job_id: str, project_id: str):
                     # Also support explicit check as per task wiring pseudocode:
                     # if is_image: clip = apply_ken_burns_effect(downloaded_path, scene_duration)
                     # Here we call the builder:
-                    cmd = _ffmpeg_ken_burns_image(path, dur, out, direction=direction)
+                    cmd = _ffmpeg_ken_burns_image(path, dur, out, direction=direction, w=W, h=H)
                     logger.info("KEN_BURNS_APPLIED scene=%02d clip=%02d direction=%s duration=%.2f image=%s motion 29.5",
                                 i + 1, j + 1, direction, dur, Path(path).name)
                     print(f"[RENDER] KEN_BURNS motion 29.5 scene={i+1} clip={j+1} direction={direction}", flush=True)
                 else:
                     # Fallback static image (should not happen — but keep old path)
-                    cmd = _ffmpeg_normalise_image(path, dur, out)
+                    cmd = _ffmpeg_normalise_image(path, dur, out, w=W, h=H)
                 ok, err = await _run_ffmpeg(cmd)
                 if not ok:
                     raise RuntimeError(f"scene {i+1} clip {j+1} encode failed: {err[-300:]}")
@@ -1519,10 +1770,12 @@ async def _run_render(job_id: str, project_id: str):
         # ---- subtitle burn-in: word-synchronised from Whisper STT + ASS karaoke ----
         # FIX 2: SRT is generated ONLY after final audio duration is locked (after concat + VO normalize).
         # No trim/pad/concat or audio filter may run after this point — burn is the last video filter before mux.
+        # Captions are optional at render time (not during production) — default off, auto-captions on platforms
         burned_out = silent_out
         # BEAT overlay removed — FIX 1: BEAT markers must never be burned into the video.
-        burn_enabled = os.environ.get("RENDER_BURN_SUBTITLES", "true").lower() in ("1", "true", "yes")
-        if burn_enabled and audio_path and audio_path.exists():
+        # burn_enabled already computed from job/project at top (default False)
+        # Still write SRT for download/CapCut even when not burned
+        if audio_path and audio_path.exists():
             await _set_job(job_id, current_step="transcribing_audio", progress=91)
             words = await transcribe_words(audio_path, language="en")
             srt_path = work_dir / "captions.srt"
@@ -1532,17 +1785,17 @@ async def _run_render(job_id: str, project_id: str):
                 if words:
                     write_srt_from_words(
                         words, srt_path,
-                        intro_offset_seconds=INTRO_DURATION_SECONDS,
+                        intro_offset_seconds=intro_duration,
                         words_per_cue=7,
                     )
                     write_ass_karaoke(
                         words, ass_path,
-                        intro_offset_seconds=INTRO_DURATION_SECONDS,
+                        intro_offset_seconds=intro_duration,
                         words_per_cue=7,
                     )
                 else:
                     cues: list[dict] = []
-                    t = float(INTRO_DURATION_SECONDS)
+                    t = float(intro_duration)
                     for i, scene in enumerate(ordered_scenes):
                         sub_plan = plan_by_idx.get(i, {"subclips": [4.0]})
                         scene_dur = sum(float(d) for d in sub_plan["subclips"])
@@ -1564,9 +1817,9 @@ async def _run_render(job_id: str, project_id: str):
                         write_ass_from_cues(cues, ass_path)
                     else:
                         write_srt(scenes, srt_path,
-                                  intro_offset_seconds=INTRO_DURATION_SECONDS)
+                                  intro_offset_seconds=intro_duration)
                         from .subtitles import build_ass_from_cues
-                        fallback_cues = [{"start": float(s.get("start_time") or 0) + INTRO_DURATION_SECONDS, "end": float(s.get("end_time") or 0) + INTRO_DURATION_SECONDS, "text": s.get("caption_text") or s.get("narration_text") or ""} for s in ordered_scenes]
+                        fallback_cues = [{"start": float(s.get("start_time") or 0) + intro_duration, "end": float(s.get("end_time") or 0) + intro_duration, "text": s.get("caption_text") or s.get("narration_text") or ""} for s in ordered_scenes]
                         write_ass_from_cues(fallback_cues, ass_path)
             except Exception as e:  # noqa: BLE001
                 logger.warning("SRT/ASS generation failed (%s) — skipping burn-in", e)
@@ -1579,17 +1832,16 @@ async def _run_render(job_id: str, project_id: str):
                 burn_is_ass = True
             elif srt_path and srt_path.exists() and srt_path.stat().st_size > 0:
                 burn_src = srt_path
-            if burn_src:
+            # Only burn if explicitly requested at render time (default off)
+            if burn_enabled and burn_src:
                 await _set_job(job_id, current_step="burning_subtitles", progress=92)
                 burned_out = work_dir / "video_subbed.mp4"
                 escaped = burn_src.as_posix().replace(":", r"\:").replace("'", r"\'")
                 if burn_is_ass:
                     vf = f"ass='{escaped}'"
                 else:
-                    sub_style = (
-                        "FontName=Arial,FontSize=60,Bold=1,Alignment=2,MarginL=460,MarginR=460,MarginV=280,"
-                        "BorderStyle=1,OutlineColour=&H00000000,PrimaryColour=&H00FFFFFF,Outline=3,Shadow=0"
-                    )
+                    # Use dynamic style for current aspect (was hardcoded 60/460 for 1920)
+                    sub_style = subtitle_style
                     vf = f"subtitles='{escaped}':force_style='{sub_style}'"
                 # FIX 2: Burn uses source FPS exactly — no drift. Explicit -r FPS on input/output
                 # and fps filter if needed so subtitle PTS matches video PTS.
@@ -1735,10 +1987,91 @@ async def _run_render(job_id: str, project_id: str):
             except Exception:
                 pass
         if duration is None:
-            est = INTRO_DURATION_SECONDS
+            est = intro_duration
             for s in scenes:
                 est += max(2.0, float((s.get("end_time") or 0) - (s.get("start_time") or 0)) or 4.0)
             duration = round(est, 2)
+        if commercial and abs(float(duration) - float(project.get("target_duration") or 0)) > 1.0:
+            raise RuntimeError(
+                f"Commercial duration mismatch: requested {project.get('target_duration')}s, encoded {duration:.2f}s"
+            )
+
+        # v6.2 Release Manifest + Deterministic QA Gate (Research G) — fail-closed, after muxing, before QA
+        try:
+            from .release_manifest import build_manifest
+            from .qa import run_checks, video_hash
+            import hashlib as _hl
+            # Find thumbnail path if selected
+            thumb_path = None
+            if sel_thumb and sel_thumb.get("file_path"):
+                tp = Path(sel_thumb["file_path"])
+                if tp.exists():
+                    thumb_path = tp
+            # Metadata hash
+            metadata_hash = None
+            if metadata:
+                metadata_hash = f"sha256:{_hl.sha256(json.dumps(metadata, sort_keys=True).encode()).hexdigest()}"
+            manifest = build_manifest(project, {"id": job_id, "duration": duration}, final, thumb_path, metadata, project.get("disclosure_decision"))
+            # Deterministic checks
+            qa = run_checks(final, manifest, duration)
+            # Store in db
+            await db.release_manifests.insert_one({**manifest, "created_at": _now()})
+            await db.qa_reports.insert_one({"project_id": project_id, "job_id": job_id, "version": "v1", "checks": qa["checks"], "blocked": qa["blocked"], "created_at": _now()})
+            if qa["blocked"]:
+                # Block publish if missing checks, but allow completed with blocked for QA_PENDING state
+                logger.warning("QA blocked %s for %s: %s", qa["blocked"], job_id, qa["checks"])
+                # Store blocked but don't fail render — render completes as QA_PENDING, publish will be blocked by approval check
+                await _set_job(job_id, status="verifying", current_step="qa_blocked", progress=96)
+        except Exception as e:
+            logger.warning("v6.2 manifest/QA failed %s: %s", job_id, e)
+
+        # Agentic Video QA release gate.  This always runs on the final local
+        # artifact before upload, posting, or a completed job status.  The
+        # evaluator is fail-closed when it has not been configured; it can
+        # report findings but has no authority to mutate this repository.
+        from .video_qa import QAPolicy, configured_vision_evaluator, run_video_qa
+        await _set_job(job_id, status="verifying", current_step="video_qa", progress=96)
+        qa_result = await asyncio.to_thread(
+            run_video_qa,
+            final,
+            job_id,
+            out_dir / "qa_runs",
+            visual_evaluator=configured_vision_evaluator(),
+            policy=QAPolicy(require_audio=True),
+        )
+        if not qa_result.get("release_eligible"):
+            raise RuntimeError(
+                "Video QA release gate blocked artifact: "
+                f"{qa_result.get('escalation_reason') or qa_result.get('status')}"
+            )
+
+        grounding = validate_commercial_grounding(project, script, scenes, assets) if commercial else None
+        # This report is emitted before storage/release and names each asset
+        # used for each timestamped scene.  A high technical score cannot hide
+        # a missing client identity or unrelated-footage rejection.
+        scene_review = [
+            {
+                "scene_number": scene.get("scene_number"),
+                "timestamp_start": scene.get("start_time"),
+                "timestamp_end": scene.get("end_time"),
+                "assigned_asset_ids": [a.get("id") for a in assets if a.get("scene_id") == scene.get("id")],
+                "status": "awaiting_human_visual_review" if commercial else "not_required",
+            }
+            for scene in scenes
+        ]
+        scorecard = commercial_scorecard(grounding=grounding, render_job={
+            "has_audio": bool(audio_path and audio_path.exists()),
+            "captions_burned": bool(burn_enabled and burned_out != silent_out),
+        }, qa_result=qa_result) if commercial else None
+        report_dir = out_dir / "commercial_reports"
+        report_dir.mkdir(parents=True, exist_ok=True)
+        report_path = report_dir / f"{job_id}.json"
+        report_path.write_text(json.dumps({
+            "project_id": project_id, "job_id": job_id, "created_at": _now().isoformat(),
+            "requested_format": {"duration": project.get("target_duration"), "aspect_ratio": project.get("aspect_ratio"), "resolution": project.get("resolution")},
+            "client_name": project.get("client_name"), "grounding": grounding,
+            "timestamped_scene_review": scene_review, "scorecard": scorecard,
+        }, indent=2, default=str) + "\n", encoding="utf-8")
 
         # ---- PRESERVE narration for verification before workdir cleanup ----
         narration_for_verify: Optional[Path] = None
@@ -1771,21 +2104,24 @@ async def _run_render(job_id: str, project_id: str):
                     scene_count=len(scenes),
                     cleanup=True,
                     local_fallback_path=str(final),
+                    expect_captions=bool(burn_enabled),
+                    aspect=aspect,
                 )
                 verification_passed = bool(verification_result.get("overall_passed"))
                 if not verification_passed:
-                    # FIX MUX FAILED 2e9: verification failures (d/f/g) are non-blocking for audio fix
-                    # Previously returned early with failed_verification; now log warning and continue to completed.
-                    # Audio mux is fixed (no size=2e9), visual checks d/f remain but do not block render success.
-                    logger.warning(f"[VERIFY] FAILED but continuing to completed (audio mux fixed) — {verification_result.get('report', {}).get('summary') if verification_result.get('report') else verification_result}")
-                    # Do NOT return; fall through to completed marking so job is considered successful
-                    # Keep verification_result for storage but treat as warning
+                    # VERIFY: any failing check (timing, silence_gaps, volume_consistency,
+                    # shot_change_rate, captions_present, no_pillarbox, loudnorm) FAILS the
+                    # job. It must NOT be marked completed — a failed render is retried, never shipped.
+                    summary = verification_result.get("report", {}).get("summary") if verification_result.get("report") else str(verification_result)
+                    logger.warning(f"[VERIFY] FAILED → marking render failed: {summary}")
+                    raise RuntimeError(f"Constitution verification failed: {summary}")
                 else:
                     logger.info(f"[VERIFY] PASSED all checks a-h")
+            except RuntimeError:
+                raise  # verification gate failure propagates → job marked failed
             except Exception as ve:
-                logger.exception(f"[VERIFY] Verification crashed: {ve} — continuing to completed (audio mux fixed)")
-                verification_result = {"error": str(ve), "overall_passed": False, "warning": "verification crashed but mux succeeded"}
-                # Do not mark failed_verification; continue to completed
+                logger.exception(f"[VERIFY] Verification crashed: {ve} — marking render failed")
+                raise RuntimeError(f"Verification crashed: {ve}") from ve
         else:
             logger.warning("[VERIFY] verify.py not available — skipping constitution check (DEV ONLY)")
 
@@ -1803,13 +2139,19 @@ async def _run_render(job_id: str, project_id: str):
             output_path=str(saved.file_path) if saved.file_path else None, output_url=saved.url,
             output_relative_url=saved.preview_path, output_storage_mode=store.mode, output_storage_key=saved.key,
             file_size=(saved.file_path.stat().st_size if saved.file_path and saved.file_path.exists() else final.stat().st_size if final.exists() else None),
-            duration=duration, completed_at=_now(), error_message=None, verification=verification_result)
+            duration=duration, completed_at=_now(), error_message=None, verification=verification_result,
+            video_qa=qa_result, commercial_report_path=str(report_path) if commercial else None,
+            timestamped_scene_review=scene_review if commercial else None,
+            scorecard=scorecard,
+            has_audio=bool(audio_path and audio_path.exists()),
+            captions_burned=bool(burn_enabled and burned_out != silent_out),
+            release_eligible=not commercial)
         await db.projects.update_one({"id": project_id}, {"$set": {"status": "COMPLETED", "rendered_video_asset_id": job_id, "updated_at": _now()}})
 
         # ── Auto-post engine: if project.auto_post=true, post to platform of choice (no manual prep) ──
         try:
             proj_for_post = await db.projects.find_one({"id": project_id}, {"_id":0})
-            if proj_for_post and proj_for_post.get("auto_post"):
+            if not commercial and proj_for_post and proj_for_post.get("auto_post"):
                 # fetch metadata for title/description
                 meta_for_post = await db.metadata_packages.find_one({"project_id": project_id}, {"_id":0}) or {}
                 meta_for_post["duration"] = duration
@@ -1831,7 +2173,7 @@ async def _run_render(job_id: str, project_id: str):
         try:
             from .email import send_video_ready_email
             project = await db.projects.find_one({"id": project_id}, {"_id": 0})
-            if project:
+            if project and not commercial:
                 user = await db.users.find_one({"id": project.get("user_id")}, {"_id": 0})
                 if user and user.get("email"):
                     share_token = project.get("share_token")
