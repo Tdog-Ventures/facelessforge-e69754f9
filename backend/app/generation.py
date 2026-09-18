@@ -11,8 +11,15 @@ import json
 import logging
 import os
 from dotenv import load_dotenv
-load_dotenv()
+try:
+    # Production configuration is supplied by systemd.  The repository .env
+    # file is intentionally not readable by the service account, so it must
+    # remain optional when this module is imported by the API router.
+    load_dotenv()
+except OSError:
+    pass
 
+import math
 import random
 import re
 import uuid
@@ -99,7 +106,7 @@ Respond with strict JSON in this exact shape:
   "cta_block": "call to action"
 }}
 
-CRITICAL: full_script must be ONE continuous string of ~{target_words} words, not a list or object."""
+CRITICAL: full_script must be ONE continuous string of ~{target_words} words (for 300s you MUST write 700-800 words, not 400), not a list or object. Count words before responding. Minimum 700 words for 300s."""
 
 
 def _llm_available() -> bool:
@@ -129,18 +136,86 @@ def _extract_json(text: str) -> Optional[dict]:
 
 
 async def _llm_json(system: str, user: str, cache_key: str = "") -> Optional[dict]:
-    """DeepSeek $15 credit first, then Kimi, then Claude."""
-    from dotenv import load_dotenv
-    load_dotenv()
-    last_error: str = ""
-    lower_user = user.lower()
-    is_edu = any(k in lower_user for k in ["pet", "dog", "cat", "mental health", "how much", "whether", "anxiety", "depression", "pet ownership", "wellbeing"])
+    """Ollama PRIMARY, then DeepSeek, Kimi, Claude backup.
 
-    # 1. DeepSeek - YOUR WORKING KEY
+    Ollama is local, private, no API costs — always tried first.
+    Cloud providers are fallbacks if Ollama is unavailable or returns non-JSON.
+    """
+    from dotenv import load_dotenv
+    try:
+        load_dotenv()
+    except OSError:
+        pass
+    last_error: str = ""
+
+    # 1. Local Ollama (PRIMARY) — 2 attempts, 600s timeout per attempt
+    ollama_model = os.environ.get("OLLAMA_MODEL", "llama3:latest").strip() or "llama3:latest"
+    ollama_timeout = float(os.environ.get("OLLAMA_TIMEOUT_SECONDS", "600") or 600)
+    ollama_url = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate").strip() or "http://localhost:11434/api/generate"
+    # Support both /api/generate and /api/chat style URLs
+    use_chat = ollama_url.rstrip("/").endswith("/chat")
+    for attempt in range(2):
+        try:
+            logger.info("Ollama (%s) request for %s attempt %d", ollama_model, cache_key, attempt + 1)
+            async with httpx.AsyncClient(timeout=ollama_timeout) as client:
+                if use_chat:
+                    resp = await client.post(
+                        ollama_url,
+                        json={
+                            "model": ollama_model,
+                            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                            "stream": False,
+                            "format": "json",
+                            "options": {"temperature": 0.7, "num_ctx": 8192},
+                        },
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        text = data.get("message", {}).get("content", "") or data.get("response", "")
+                        parsed = _extract_json(text)
+                        if parsed:
+                            logger.info("Ollama (%s) returned valid JSON for %s", ollama_model, cache_key)
+                            return parsed
+                        logger.warning("Ollama (%s) returned non-JSON for %s: %s", ollama_model, cache_key, text[:500])
+                        last_error = "Ollama non-JSON response"
+                    else:
+                        logger.warning("Ollama non-200 %s %s - %s", resp.status_code, resp.reason_phrase, resp.text[:500])
+                        last_error = f"Ollama HTTP {resp.status_code}"
+                else:
+                    resp = await client.post(
+                        ollama_url,
+                        json={
+                            "model": ollama_model,
+                            "system": system,
+                            "prompt": user,
+                            "stream": False,
+                            "format": "json",
+                            "options": {"temperature": 0.7, "num_ctx": 8192},
+                        },
+                    )
+                    if resp.status_code == 200:
+                        text = resp.json().get("response", "")
+                        parsed = _extract_json(text)
+                        if parsed:
+                            logger.info("Ollama (%s) returned valid JSON for %s", ollama_model, cache_key)
+                            return parsed
+                        logger.warning("Ollama (%s) returned non-JSON for %s: %s", ollama_model, cache_key, text[:500])
+                        last_error = "Ollama non-JSON response"
+                    else:
+                        logger.warning("Ollama non-200 %s %s - %s", resp.status_code, resp.reason_phrase, resp.text[:500])
+                        last_error = f"Ollama HTTP {resp.status_code}"
+        except httpx.TimeoutException as e:
+            last_error = f"Ollama timeout ({ollama_timeout}s)"
+            logger.warning("Ollama (%s) timeout for %s attempt %d: %s", ollama_model, cache_key, attempt + 1, e)
+        except Exception as e:
+            last_error = f"Ollama {type(e).__name__}: {e}"
+            logger.warning("Ollama (%s) call failed for %s attempt %d: %s", ollama_model, cache_key, attempt + 1, e)
+
+    # 2. DeepSeek — cloud backup
     deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
     if deepseek_key:
         try:
-            logger.info(f"DeepSeek for {cache_key} edu={is_edu}")
+            logger.info("Falling back to DeepSeek for %s", cache_key)
             async with httpx.AsyncClient(timeout=60.0) as client:
                 resp = await client.post(
                     "https://api.deepseek.com/chat/completions",
@@ -151,10 +226,10 @@ async def _llm_json(system: str, user: str, cache_key: str = "") -> Optional[dic
                     text = resp.json()["choices"][0]["message"]["content"]
                     parsed = _extract_json(text)
                     if parsed:
-                        logger.info(f"DeepSeek OK {cache_key}")
+                        logger.info("DeepSeek OK %s", cache_key)
                         return parsed
-                    else:
-                        last_error = f"DeepSeek no JSON: {text[:200]}"
+                    last_error = f"DeepSeek non-JSON: {text[:200]}"
+                    logger.warning(last_error)
                 else:
                     last_error = f"DeepSeek {resp.status_code}: {resp.text[:300]}"
                     logger.warning(last_error)
@@ -162,12 +237,12 @@ async def _llm_json(system: str, user: str, cache_key: str = "") -> Optional[dic
             last_error = f"DeepSeek {e}"
             logger.warning(last_error)
 
-    # 2. Kimi
+    # 3. Kimi — second cloud backup
     kimi_key = os.environ.get("KIMI_API_KEY", "").strip() or os.environ.get("MOONSHOT_API_KEY", "").strip()
     if kimi_key:
         try:
-            kimi_model = os.environ.get("KIMI_MODEL", "kimi-k2-0711-preview").strip()
-            logger.info(f"Kimi {kimi_model} for {cache_key}")
+            kimi_model = os.environ.get("KIMI_MODEL", "kimi-k2-0711-preview").strip() or "kimi-k2-0711-preview"
+            logger.info("Kimi %s for %s", kimi_model, cache_key)
             async with httpx.AsyncClient(timeout=90.0) as client:
                 resp = await client.post(
                     "https://api.moonshot.cn/v1/chat/completions",
@@ -178,20 +253,20 @@ async def _llm_json(system: str, user: str, cache_key: str = "") -> Optional[dic
                     text = resp.json()["choices"][0]["message"]["content"]
                     parsed = _extract_json(text)
                     if parsed:
+                        logger.info("Kimi OK %s", cache_key)
                         return parsed
                 last_error = f"Kimi {resp.status_code}"
         except Exception as e:
             last_error = f"Kimi {e}"
 
-    # 3. Claude - fixed model name
+    # 4. Claude — final backup (per skill: Claude is backup only)
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if anthropic_key:
         try:
-            # fixed model - old one you had is gone
-            anthropic_model = os.environ.get("LLM_MODEL", "claude-3-5-sonnet-latest").strip()
-            if "20241022" in anthropic_model:
-                anthropic_model = "claude-3-5-sonnet-latest"
-            logger.info(f"Claude {anthropic_model} for {cache_key}")
+            # NOTE: "claude-3-5-sonnet-latest" and "claude-3-5-sonnet-20241022" are
+            # RETIRED (404 not_found). Use the pinned snapshot claude-sonnet-4-5-20250929.
+            anthropic_model = os.environ.get("LLM_MODEL", "claude-sonnet-4-5-20250929").strip() or "claude-sonnet-4-5-20250929"
+            logger.info("Claude %s for %s (backup)", anthropic_model, cache_key)
             async with httpx.AsyncClient(timeout=90.0) as client:
                 resp = await client.post(
                     "https://api.anthropic.com/v1/messages",
@@ -199,9 +274,10 @@ async def _llm_json(system: str, user: str, cache_key: str = "") -> Optional[dic
                     json={"model": anthropic_model, "system": system, "messages": [{"role": "user", "content": user}], "max_tokens": 4096, "temperature": 0.7},
                 )
                 if resp.status_code == 200:
-                    text = "".join([b.get("text","") for b in resp.json().get("content",[])])
+                    text = "".join([b.get("text", "") for b in resp.json().get("content", [])])
                     parsed = _extract_json(text)
                     if parsed:
+                        logger.info("Claude OK %s", cache_key)
                         return parsed
                 else:
                     last_error = f"Claude {resp.status_code}: {resp.text[:300]}"
@@ -216,7 +292,7 @@ async def _llm_json(system: str, user: str, cache_key: str = "") -> Optional[dic
 # ------------------------------ SCRIPT ------------------------------
 
 SCRIPT_SYSTEM = (
-    "You are a senior YouTube scriptwriter specialised in faceless, high-retention videos. "
+    "You are a real business owner talking to a friend. Use contractions, short sentences, 8th grade words. No AI phrases. Start with personal story. For visuals: if you mention Zapier Notion Airtable Canva Airtasker, visual prompt MUST be 'Notion app interface' 'Zapier automation' 'Canva logo' not generic stressed man. Search 3 asset libraries first. "
     "Always respond with strict JSON, no commentary. All text in English."
 )
 
@@ -254,9 +330,31 @@ def _coerce_script(result: dict) -> dict:
     return out
 
 
-def _finalize_script(out: dict) -> dict:
-    """Attach derived stats so API consumers never see missing fields."""
-    words = len(re.findall(r"\b\w+\b", out.get("full_script") or ""))
+def _finalize_script(out: dict, target_duration: int = None) -> dict:
+    """Attach derived stats so API consumers never see missing fields. Enforce target duration if given."""
+    full = out.get("full_script") or ""
+    # Enforce target duration: truncate to target words if too long (LLM often ignores word count)
+    if target_duration is not None:
+        try:
+            target_dur = int(target_duration)
+            target_words = int(target_dur * 2.5)
+            # Allow 30% overrun, then word-boundary truncate
+            max_words = int(target_words * 1.5)
+            words_list = re.findall(r"\b\w+\b", full)
+            if len(words_list) > max_words:
+                # Truncate to target_words at word boundary, keep sentences
+                truncated = " ".join(words_list[:target_words])
+                # Try to end at sentence boundary if possible
+                if "." in truncated:
+                    last_dot = truncated.rfind(".")
+                    if last_dot > len(truncated) * 0.7:
+                        truncated = truncated[: last_dot + 1]
+                out["full_script"] = truncated
+                full = truncated
+                logger.info("Script truncated from %s to %s words for target %ss", len(words_list), len(re.findall(r"\b\w+\b", truncated)), target_dur)
+        except Exception:
+            pass
+    words = len(re.findall(r"\b\w+\b", full))
     out["word_count"] = words
     out["estimated_duration"] = int(words / 2.5)
     return out
@@ -273,12 +371,11 @@ async def generate_script(project: dict) -> dict:
     _is_edu = any(k in _haystack for k in _edu_keys)
 
     target_dur = int(project.get("target_duration", 300))
-    target_words = max(120, int(target_dur / 60 * 150))
+    # Fix: respect 5-3600 range, 2.5 w/s = 150 w/min. For 30s -> 75 words, not min 120.
+    target_words = max(20, int(target_dur * 2.5))
 
     if _is_edu:
-        # Never let a local Ollama model hallucinate the empire/noodles story.
-        os.environ["OLLAMA_MODEL"] = ""
-        logger.info(f"EDUCATIONAL topic detected: {project.get('topic')} -> using educational_script.txt")
+        logger.info(f"EDUCATIONAL topic detected: {project.get('topic')} -> using educational_script.txt (Ollama primary)")
         tmpl = _load_prompt_template("educational_script.txt")
         if tmpl:
             user = _render_educational_prompt(project, tmpl, target_words)
@@ -286,7 +383,7 @@ async def generate_script(project: dict) -> dict:
             if result:
                 coerced = _coerce_script(result)
                 if coerced and coerced.get("full_script"):
-                    return _finalize_script(coerced)
+                    return _finalize_script(coerced, target_dur)
             logger.warning("Educational template LLM failed - using on-topic deterministic fallback")
         # Educational topics never fall through to the generic business prompt:
         # straight to the on-topic deterministic fallback below.
@@ -307,7 +404,7 @@ Niche: {project.get('niche', 'business')}
 Target duration: {target_dur}s (~{target_words} words)
 Tone: {project.get('tone', 'documentary')}
 
-CRITICAL: full_script must be ONE continuous string of ~{target_words} words, not a list or object.
+CRITICAL: full_script must be ONE continuous string of ~{target_words} words (for 300s you MUST write 700-800 words, not 400), not a list or object. Count words before responding. Minimum 700 words for 300s.
 Write specifically about the Topic above. Do NOT fall back to a generic entrepreneur/startup origin story (instant noodles, sleeping in the office, investors saying no, first 100 customers) unless the Topic explicitly asks for one.
 Do not include BEAT markers, section headers, or structural labels (such as "BEAT 1", "INTRO:", "HOOK:", "CTA:", "SCENE 1:", etc.) in the output. All text must read as continuous voiceover."""
 
@@ -315,7 +412,7 @@ Do not include BEAT markers, section headers, or structural labels (such as "BEA
         if result:
             coerced = _coerce_script(result)
             if coerced and coerced.get("full_script", "").strip():
-                return _finalize_script(coerced)
+                return _finalize_script(coerced, target_dur)
 
     # Deterministic fallback - on-topic skeleton, never a canned unrelated story.
     topic = (project.get("topic") or project.get("title") or "this subject").strip().rstrip("?")
@@ -346,7 +443,7 @@ Do not include BEAT markers, section headers, or structural labels (such as "BEA
                 "Practical takeaways you can use today",
             ],
             "cta_block": "If this was useful, subscribe. New evidence-based videos every week.",
-        })
+        }, target_dur)
 
     return _finalize_script({
         "hook_option_one": f"What nobody tells you about {topic}",
@@ -375,7 +472,7 @@ Do not include BEAT markers, section headers, or structural labels (such as "BEA
             "The distribution mistake that kills good work",
         ],
         "cta_block": "If this was useful, subscribe. New videos like this every week.",
-    })
+    }, target_dur)
 
 
 # ------------------------------ SCENE PLAN ------------------------------
@@ -449,18 +546,22 @@ async def generate_scenes(project: dict, full_script: str) -> list[dict]:
 
 async def generate_scene_plan(project: dict, script: dict) -> list[dict]:
     target_dur = int(project.get("target_duration", 300))
+    # Lock formula: sceneCount = ceil(totalSeconds / sceneDuration). Never let LLM decide count.
+    scene_duration = 30
+    scene_count = max(1, math.ceil(target_dur / scene_duration))
     full_script = script.get("full_script", "")
     if not isinstance(full_script, str):
         full_script = ""
 
     user = f"""Break this script into scenes for a {target_dur}s faceless YouTube video.
+You MUST generate exactly {scene_count} scenes, each {scene_duration}s (total {target_dur}s = {scene_count} x {scene_duration}s).
 Return strict JSON with this exact shape:
 {{"scenes": [
   {{
     "scene_number": 1,
     "start_time": 0.0,
-    "end_time": 30.0,
-    "duration": 30.0,
+    "end_time": {scene_duration}.0,
+    "duration": {scene_duration}.0,
     "narration_text": "exact script excerpt for this scene",
     "visual_direction": "what stock footage to show — be specific to the topic",
     "caption_text": "key phrase for caption overlay",
@@ -469,6 +570,7 @@ Return strict JSON with this exact shape:
 ]}}
 
 The visual_direction and search_terms MUST be specific to the topic, not generic business footage.
+You MUST generate exactly {scene_count} scenes - no more, no less.
 
 Do not include BEAT markers, section headers, or structural labels (such as "BEAT 1", "INTRO:", "HOOK:", "SCENE 1:", etc.) in narration_text or caption_text. Text must read as continuous voiceover.
 
@@ -480,14 +582,39 @@ Niche: {project.get('niche', 'business')}"""
     if result and isinstance(result.get("scenes"), list):
         coerced = _coerce_scenes(result["scenes"])
         if coerced:
+            # Post-process: if returned scenes.length != sceneCount, slice or pad, don't accept wrong count
+            if len(coerced) != scene_count:
+                logger.warning("LLM scene count mismatch: got %s expected %s, slicing/padding", len(coerced), scene_count)
+                if len(coerced) > scene_count:
+                    coerced = coerced[:scene_count]
+                else:
+                    # Pad with deterministic scenes
+                    while len(coerced) < scene_count:
+                        idx = len(coerced)
+                        start = idx * scene_duration
+                        coerced.append({
+                            "scene_number": idx + 1,
+                            "start_time": float(start),
+                            "end_time": float(start + scene_duration),
+                            "duration": float(scene_duration),
+                            "narration_text": f"Part {idx + 1} of the video.",
+                            "visual_direction": f"stock b-roll illustrating scene {idx + 1}",
+                            "caption_text": f"Part {idx + 1}",
+                            "search_terms": derive_search_terms(f"Part {idx + 1}", idx, scene_count),
+                        })
+                # Re-normalize scene numbers and timings
+                for i, s in enumerate(coerced):
+                    s["scene_number"] = i + 1
+                    s["start_time"] = float(i * scene_duration)
+                    s["end_time"] = float((i + 1) * scene_duration)
+                    s["duration"] = float(scene_duration)
             return coerced
 
     # Deterministic fallback — visuals derived from each scene's narration,
-    # never from the raw project topic/description text
-    scene_count = 5
-    scene_dur = target_dur / scene_count
+    # never from the raw project topic/description text — LOCKED to sceneCount
+    scene_dur = float(scene_duration)
     sentences = re.split(r'(?<=[.!?])\s+', full_script) if full_script else ["Scene content."] * scene_count
-    chunk = max(1, len(sentences) // scene_count)
+    chunk = max(1, math.ceil(len(sentences) / scene_count)) if sentences else 1
     scenes = []
     for i in range(scene_count):
         start = i * scene_dur

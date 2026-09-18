@@ -162,7 +162,7 @@ async def _llm_visual_query(sentence: str) -> str:
                 async with httpx.AsyncClient(timeout=20) as c:
                     r=await c.post("https://api.anthropic.com/v1/messages",
                         headers={"x-api-key":key,"anthropic-version":"2023-06-01","Content-Type":"application/json"},
-                        json={"model":os.environ.get("LLM_MODEL","claude-3-5-sonnet-latest"),"max_tokens":30,"messages":[{"role":"user","content":prompt}]})
+                        json={"model":os.environ.get("LLM_MODEL","claude-sonnet-4-5-20250929"),"max_tokens":30,"messages":[{"role":"user","content":prompt}]})
                     if r.status_code==200:
                         txt="".join(b.get("text","") for b in r.json().get("content",[])).strip().lower()
                         return _strip_abstract_words(re.sub(r"[^a-z0-9 ]"," ",txt))
