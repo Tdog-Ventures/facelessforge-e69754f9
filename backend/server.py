@@ -1,7 +1,17 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.routing import Match
 from contextlib import asynccontextmanager
-from app.routes import fix_router as api_router
+# Production observability: surface module INFO logs (render progress, Pexels
+# query strings, LLM fallback decisions) to stderr/docker logs.  Without this,
+# the root logger stays at WARNING and critical debugging context is dropped.
+import logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+# ``app.routes`` is the canonical API router package.  Importing the small
+# compatibility ``fix_router`` here silently omitted authentication (and most
+# of the API) from the deployed application.
+from app.routes import router as api_router
 from app.billing_secure import router as billing_router
 import os
 # Revenue unblock - Invite bypass for agency sales (FORGE)
@@ -33,6 +43,13 @@ async def lifespan(app: FastAPI):
         start_scheduler()
     except Exception as e:
         print(f"scheduler start failed: {e}")
+    # recover orphaned render jobs from crashes/restarts
+    try:
+        from app.render import recover_stale_jobs
+        recovered = await recover_stale_jobs()
+        print(f"render stale-job recovery: {recovered} recovered")
+    except Exception as e:
+        print(f"render stale-job recovery failed: {e}")
     yield
     # shutdown
     try:
@@ -75,6 +92,47 @@ except ImportError:
 
 app.include_router(api_router)
 app.include_router(billing_router)
+
+
+def _partial_route_methods(route, scope) -> set[str]:
+    """Find allowed methods inside FastAPI's included-router wrappers."""
+    included_router = getattr(route, "original_router", None)
+    methods = set() if included_router is not None else set(getattr(route, "methods", set()) or set())
+    if included_router is not None:
+        for child in included_router.routes:
+            match, _ = child.matches(scope)
+            if match in (Match.FULL, Match.PARTIAL):
+                methods.update(_partial_route_methods(child, scope))
+    return methods
+
+
+@app.middleware("http")
+async def reserve_api_namespace(request, call_next):
+    """Do not allow the React catch-all route to consume API requests.
+
+    A matching API path with the wrong method remains a JSON 405.  An unknown
+    API path is a JSON 404.  CORS preflights pass to CORSMiddleware unchanged.
+    """
+    if request.url.path.startswith("/api/") and request.method != "OPTIONS":
+        allowed_methods: set[str] = set()
+        for route in app.router.routes:
+            # The React fallback is deliberately broad, but it is not an API
+            # route and must not turn API failures into HTML responses.
+            if getattr(route, "path", None) == "/{full_path:path}":
+                continue
+            match, _ = route.matches(request.scope)
+            if match is Match.FULL:
+                return await call_next(request)
+            if match is Match.PARTIAL:
+                allowed_methods.update(_partial_route_methods(route, request.scope))
+        if allowed_methods:
+            return JSONResponse(
+                status_code=405,
+                content={"detail": "Method Not Allowed"},
+                headers={"Allow": ", ".join(sorted(allowed_methods))},
+            )
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+    return await call_next(request)
 # External render API (pipeline)
 try:
     from app.external_api import router as external_router
@@ -141,6 +199,91 @@ def health():
 def healthz():
     return {"status":"ok"}
 
+@app.get("/api/health/detailed")
+def health_detailed():
+    import os, shutil, time
+    from pathlib import Path
+    now = time.time()
+    # ollama
+    ollama_status = {"reachable": False, "models": [], "latency_ms": None}
+    try:
+        import httpx
+        start = time.time()
+        r = httpx.get("http://localhost:11434/api/tags", timeout=3.0)
+        if r.status_code == 200:
+            data = r.json()
+            models = [m.get("name") for m in data.get("models", [])]
+            ollama_status = {"reachable": True, "models": models, "latency_ms": int((time.time()-start)*1000)}
+        else:
+            ollama_status = {"reachable": False, "status_code": r.status_code, "latency_ms": int((time.time()-start)*1000)}
+    except Exception as e:
+        ollama_status = {"reachable": False, "error": type(e).__name__}
+    # elevenlabs / pexels presence (no secret leak)
+    elevenlabs_present = bool((os.getenv("ELEVENLABS_API_KEY") or "").strip() and len((os.getenv("ELEVENLABS_API_KEY") or "").strip()) > 10)
+    pexels_present = bool((os.getenv("PEXELS_API_KEY") or "").strip() and len((os.getenv("PEXELS_API_KEY") or "").strip()) > 10)
+    elevenlabs_voice = bool((os.getenv("ELEVENLABS_VOICE_ID") or "").strip())
+    # R2 reachable (head bucket)
+    r2_status = {"reachable": False}
+    try:
+        import boto3
+        from botocore.config import Config
+        endpoint = os.getenv("STORAGE_ENDPOINT") or ""
+        bucket = os.getenv("STORAGE_BUCKET") or ""
+        key = os.getenv("STORAGE_ACCESS_KEY") or ""
+        secret = os.getenv("STORAGE_SECRET_KEY") or ""
+        if endpoint and bucket and key and secret:
+            client = boto3.client("s3", endpoint_url=endpoint, aws_access_key_id=key, aws_secret_access_key=secret, region_name=os.getenv("STORAGE_REGION","auto"), config=Config(signature_version="s3v4", connect_timeout=3, read_timeout=3))
+            client.head_bucket(Bucket=bucket)
+            r2_status = {"reachable": True, "bucket": bucket, "endpoint": endpoint}
+        else:
+            r2_status = {"reachable": False, "error": "config_missing"}
+    except Exception as e:
+        r2_status = {"reachable": False, "error": type(e).__name__}
+    # redis
+    redis_status = {"reachable": False}
+    try:
+        import redis
+        r = redis.Redis(host=os.getenv("REDIS_HOST","localhost"), port=int(os.getenv("REDIS_PORT","6379")), db=0, socket_connect_timeout=2, decode_responses=True)
+        pong = r.ping()
+        info = r.info("server") if pong else {}
+        redis_status = {"reachable": bool(pong), "version": info.get("redis_version") if isinstance(info, dict) else None}
+    except Exception as e:
+        redis_status = {"reachable": False, "error": type(e).__name__}
+    # disk
+    disk = {}
+    try:
+        total, used, free = shutil.disk_usage("/")
+        disk = {"total_gb": round(total/1024**3,1), "used_gb": round(used/1024**3,1), "free_gb": round(free/1024**3,1), "use_percent": round(used/total*100,1)}
+    except Exception as e:
+        disk = {"error": type(e).__name__}
+    return {
+        "status": "ok",
+        "timestamp": int(now),
+        "forge": "active",
+        "checks": {
+            "ollama": ollama_status,
+            "elevenlabs": {"key_present": elevenlabs_present, "voice_configured": elevenlabs_voice},
+            "pexels": {"key_present": pexels_present},
+            "r2": r2_status,
+            "redis": redis_status,
+            "disk": disk,
+        },
+        "version": "5.0",
+    }
+
+try:
+ from app.billing_dodo import router as dodo_router
+ app.include_router(dodo_router)
+ print("Dodo mounted")
+except Exception as e:
+ print(e)
+try:
+ from app.workers.autopost import autopost_router
+ app.include_router(autopost_router)
+ print("Autopost mounted")
+except Exception as e:
+ print(f"Autopost mount failed {e}")
+
 # Mount FacelessForge UI (React build) at root
 if frontend_build.exists():
     _static_assets = frontend_build / "static"
@@ -167,19 +310,6 @@ else:
     @app.get("/")
     def root():
         return {"message": "FacelessForge UI build not found at " + str(frontend_build)}
-
-try:
- from app.billing_dodo import router as dodo_router
- app.include_router(dodo_router)
- print("Dodo mounted")
-except Exception as e:
- print(e)
-try:
- from app.workers.autopost import autopost_router
- app.include_router(autopost_router)
- print("Autopost mounted")
-except Exception as e:
- print(f"Autopost mount failed {e}")
 try:
  from promo_swarm.app import app as promo_app
  # mount promo swarm under /api/promo for unified health
@@ -257,4 +387,3 @@ def debug_files_8081():
             for o in r.get("Contents",[]): r2.append({"Key":o["Key"],"Size":o["Size"]})
     except Exception as e: err=str(e)
     return {"local_files":locals,"r2_files":r2,"r2_error":err}
-

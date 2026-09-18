@@ -43,6 +43,18 @@ def _try_apt_install_ffmpeg() -> bool:
     return bool(_which("ffmpeg") and _which("ffprobe"))
 
 
+def probe_ffmpeg_status() -> dict:
+    """Lightweight, side-effect-free ffmpeg/ffprobe probe (no apt install)."""
+    sys_ffmpeg = _which("ffmpeg")
+    sys_ffprobe = _which("ffprobe")
+    return {
+        "ffmpeg": sys_ffmpeg,
+        "ffprobe": sys_ffprobe,
+        "ffmpeg_source": "apt" if sys_ffmpeg else None,
+        "ffprobe_source": "apt" if sys_ffprobe else None,
+    }
+
+
 def ensure_ffmpeg_available() -> dict:
     """Make sure ffmpeg/ffprobe are present. Returns a small status dict."""
     apt_ok = _try_apt_install_ffmpeg()
