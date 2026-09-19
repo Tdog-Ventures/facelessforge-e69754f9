@@ -1,0 +1,7 @@
+@media (max-width: 768px) {
+  .grid-cols-4 { grid-template-columns: repeat(1, minmax(0, 1fr)) !important; }
+  [class*="aspect-video"], .video-preview { width: 100% !important; aspect-ratio: 16 / 9; height: auto !important; }
+  button, a.btn, [role="button"] { min-height: 44px; min-width: 44px; }
+  table { display: block; overflow-x: auto; white-space: nowrap; }
+  body { overflow-x: hidden; }
+}
