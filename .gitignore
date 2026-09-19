@@ -25,6 +25,7 @@
 # Yarn lockfiles (yarn build regenerates these; not tracked in this repo)
 # backups
 # frontend build artifacts - old CRA builds
+# more backup variants that slipped through
 # storage handles persistence in production. Retention sweep purges these.
 **/*.tar
 **/*.tar.gz
@@ -32,13 +33,19 @@
 **/*.zip
 *-backup-*
 *.backup
+*.backup-*
+*.backup_*
 *.bak
 *.bak.*
 *.bak_*
 *.deb
 *.dylib
 *.env
+*.fixed
+*.fixed-*
 *.key
+*.live_*
+*.live_backup
 *.orig
 *.pack
 *.pem
