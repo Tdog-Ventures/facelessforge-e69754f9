@@ -23,21 +23,30 @@
 # System files
 # Testing
 # Yarn lockfiles (yarn build regenerates these; not tracked in this repo)
+# backups
+# frontend build artifacts - old CRA builds
 # storage handles persistence in production. Retention sweep purges these.
 **/*.tar
 **/*.tar.gz
 **/*.tgz
 **/*.zip
+*-backup-*
+*.backup
+*.bak
+*.bak.*
+*.bak_*
 *.deb
 *.dylib
 *.env
 *.key
+*.orig
 *.pack
 *.pem
 *.tsbuildinfo
 *credentials.json*
 *pyc*
 *token.json*
+*~
 -e 
 .DS_Store
 .ac
@@ -125,14 +134,19 @@
 __pycache__/
 agenthub/agents/youtube/db
 android-sdk/frontend/node_modules/.cache/default-development/4.pack
+backend/static/
 backend/static/audio/
+backend/static/frontend/
 backend/static/renders/
 backend/static/thumbs/
+build/
 chainlit.md
 credentials.json
 dist
 dist/
 dump.rdb
+frontend/build/
+frontend/dist/
 frontend/node_modules/.cache/default-development/1.pack
 frontend/node_modules/.cache/default-development/13.pack
 frontend/node_modules/.cache/default-development/15.pack
@@ -147,6 +161,7 @@ memory/test_credentials.md
 next-env.d.ts
 node_modules/
 npm-debug.log*
+remotion-renderer/
 secrets/
 venv/
 yarn-debug.log*
