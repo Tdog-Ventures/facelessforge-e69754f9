@@ -174,3 +174,7 @@ venv/
 yarn-debug.log*
 yarn-error.log*
 yarn.lock
+
+# local data / captures (not source)
+/data/
+/backend/HTTP
