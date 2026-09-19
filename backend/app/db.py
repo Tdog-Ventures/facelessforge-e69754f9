@@ -33,6 +33,8 @@ async def ensure_indexes():
         await db.forge_runs.create_index("id", unique=True, sparse=True)
         await db.niches.create_index("name", unique=True)
         await db.youtube_tokens.create_index("id", unique=True)
+        await db.longform_projects.create_index("id", unique=True)
+        await db.longform_projects.create_index("user_id")
         # seed niches if empty
         if await db.niches.count_documents({}) == 0:
             import uuid
@@ -74,4 +76,21 @@ async def ensure_indexes():
             name="assets_stock_unique",
         )
     except Exception:  # index already exists with different options — ignore in dev
+        pass
+    # Approval + intent lock — prevents double upload / race (Research p12-13)
+    try:
+        await db.publish_intents.create_index([("release_id", 1), ("channel_id", 1)], unique=True)
+    except Exception:
+        pass
+    try:
+        await db.approvals.create_index([("release_id", 1), ("valid", 1)])
+    except Exception:
+        pass
+    try:
+        await db.watch_logs.create_index([("release_id", 1), ("user_id", 1)])
+    except Exception:
+        pass
+    try:
+        await db.watch_events.create_index([("project_id", 1), ("job_id", 1), ("user_id", 1)])
+    except Exception:
         pass

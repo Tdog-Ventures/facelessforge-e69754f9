@@ -1,6 +1,6 @@
 """Pydantic models for request/response schemas."""
 from datetime import datetime
-from typing import List, Optional, Literal
+from typing import Any, Dict, List, Optional, Literal
 from pydantic import BaseModel, EmailStr, Field, ConfigDict
 # ---------- Auth ----------
 class RegisterRequest(BaseModel):
@@ -34,13 +34,28 @@ class UserPublic(BaseModel):
 
 
 # ---------- Project ----------
+class StructuredBrief(BaseModel):
+    service: str = Field(min_length=2, max_length=300)
+    offer: str = Field(min_length=2, max_length=500)
+    audience: str = Field(min_length=2, max_length=300)
+    location: str = Field(min_length=2, max_length=300)
+    problem: Optional[str] = Field(default=None, max_length=1000)
+    proof_points: List[str] = Field(default_factory=list, max_length=10)
+
+
+class VerifiedCTA(BaseModel):
+    text: str = Field(min_length=2, max_length=200)
+    destination: str = Field(min_length=3, max_length=500)
+    verified: bool = False
+
+
 class ProjectCreate(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     niche: str = Field(min_length=3, max_length=120)
     topic: str = Field(min_length=10, max_length=1000)
     audience: str = Field(min_length=1, max_length=200)
     tone: str = Field(min_length=1, max_length=80)
-    target_duration: int = Field(ge=30, le=3600)
+    target_duration: int = Field(ge=5, le=3600)
     voice_style: Optional[str] = "neutral male narrator"
     voice_id: Optional[str] = None
     visual_style: Optional[str] = "cinematic b-roll"
@@ -48,6 +63,15 @@ class ProjectCreate(BaseModel):
     cta_goal: Optional[str] = "subscribe"
     auto_post: Optional[bool] = False
     platforms: Optional[List[str]] = []
+    # Product Hunt / client-delivery path. Existing archival YouTube projects
+    # remain readable, but a new production project is grounded by default.
+    production_mode: Literal["commercial_ad", "editorial"] = "commercial_ad"
+    client_name: Optional[str] = Field(default=None, max_length=160)
+    structured_brief: Optional[StructuredBrief] = None
+    verified_cta: Optional[VerifiedCTA] = None
+    brand_assets_supplied: bool = False
+    aspect_ratio: Optional[Literal["9:16", "1:1", "16:9"]] = "9:16"
+    resolution: Optional[str] = Field(default="1080x1920", max_length=30)
 
 
 class ProjectUpdate(BaseModel):
@@ -56,7 +80,7 @@ class ProjectUpdate(BaseModel):
     topic: Optional[str] = None
     audience: Optional[str] = None
     tone: Optional[str] = None
-    target_duration: Optional[int] = None
+    target_duration: Optional[int] = Field(default=None, ge=5, le=3600)
     voice_style: Optional[str] = None
     voice_id: Optional[str] = None
     visual_style: Optional[str] = None
@@ -65,6 +89,12 @@ class ProjectUpdate(BaseModel):
     status: Optional[str] = None
     auto_post: Optional[bool] = None
     platforms: Optional[List[str]] = None
+    client_name: Optional[str] = Field(default=None, max_length=160)
+    structured_brief: Optional[StructuredBrief] = None
+    verified_cta: Optional[VerifiedCTA] = None
+    brand_assets_supplied: Optional[bool] = None
+    aspect_ratio: Optional[Literal["9:16", "1:1", "16:9"]] = None
+    resolution: Optional[str] = Field(default=None, max_length=30)
 
 
 class Project(BaseModel):
@@ -183,6 +213,9 @@ class AssetCreate(BaseModel):
     source: str = "generated_brief"
     tags: List[str] = []
     file_path: Optional[str] = None
+    scene_id: Optional[str] = None
+    provenance: Optional[str] = Field(default=None, max_length=100)
+    source_url: Optional[str] = Field(default=None, max_length=1000)
 
 
 # ---------- Stock / Pexels ----------
@@ -206,7 +239,7 @@ class StockAttachRequest(BaseModel):
 
 class FindAssetsRequest(BaseModel):
     query: Optional[str] = None
-    media_type: Literal["both", "videos", "photos"] = "videos"
+    media_type: Literal["both", "videos", "photos"] = "both"
     per_page: int = Field(default=12, ge=1, le=40)
 
 
@@ -217,7 +250,7 @@ class AssetStatusUpdate(BaseModel):
 # ---------- Auto-attach / Thumbnail images ----------
 class AutoAttachRequest(BaseModel):
     replace_existing: bool = False
-    media_type: Literal["both", "videos", "photos"] = "videos"
+    media_type: Literal["both", "videos", "photos"] = "both"
 
 
 class GenerateThumbnailImagesRequest(BaseModel):
@@ -236,8 +269,149 @@ class RenderStartRequest(BaseModel):
     force: Optional[bool] = False  # allow concurrent renders if explicitly forced (admin/owner)
     voice_style: Optional[str] = None  # narrator preset or style (moved from generate-script to render payload)
     voice_id: Optional[str] = None  # explicit ElevenLabs voice_id (also on projects table, not just scripts)
+    burn_subtitles: Optional[bool] = False  # optional at render time, default off (auto-captions on platforms)
+    aspect_ratio: Optional[str] = None  # 9:16|1:1|16:9 override at render time
+
+
+class ReleaseReviewRequest(BaseModel):
+    """Human visual sign-off after watching the finished client ad."""
+    scene_reviews: List[Dict[str, Any]] = Field(min_length=1)
+    approved: bool
+    notes: Optional[str] = Field(default=None, max_length=2000)
 
 
 # ---------- Share ----------
 class ShareUpdate(BaseModel):
     title_override: Optional[str] = Field(default=None, max_length=200)
+
+# --- Billing models (Paddle) ---
+"""Billing models - Paddle subscription & credit transactions."""
+from datetime import datetime, timezone
+from typing import Optional
+from pydantic import BaseModel, Field
+
+
+def _now():
+    return datetime.now(timezone.utc)
+
+
+class Subscription(BaseModel):
+    user_id: str
+    paddle_customer_id: Optional[str] = None
+    paddle_subscription_id: Optional[str] = None
+    paddle_price_id: Optional[str] = None
+    plan: str = Field(default="free", description="free/starter/creator/pro/agency")
+    status: str = Field(default="active", description="active/canceled/past_due/inactive")
+    credits_monthly: int = 30
+    credits_remaining: int = 30
+    current_period_end: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+    class Config:
+        extra = "allow"
+
+
+class CreditTransaction(BaseModel):
+    user_id: str
+    amount: int  # positive credit, negative debit
+    reason: str = Field(description="e.g. purchase starter, auto-attach scene 02, monthly reset")
+    created_at: datetime = Field(default_factory=_now)
+
+    class Config:
+        extra = "allow"
+
+
+# --- Release Contract (v6.2) ---
+class DisclosureDecision(BaseModel):
+    contains_synthetic_media: bool = False
+    is_realistic_alteration: bool = False
+    is_altered: bool = False
+    rationale: str = Field(default="", max_length=1000)
+
+
+class ReleaseManifest(BaseModel):
+    tenant_id: str
+    channel_id: Optional[str] = None
+    project_id: str
+    job_id: str
+    video_hash: str  # sha256:ffprobe file
+    thumbnail_hash: Optional[str] = None
+    metadata_hash: Optional[str] = None
+    duration: float
+    disclosure_decision: DisclosureDecision = Field(default_factory=DisclosureDecision)
+    qa_version: str = "v1"
+    policy_version: str = "2026-09-10"
+    approver: Optional[str] = None
+    created_at: datetime = Field(default_factory=_now)
+
+
+class QAReport(BaseModel):
+    job_id: str
+    project_id: str
+    version: str = "v1"
+    checks: List[dict] = Field(default_factory=list)
+    blocked: List[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=_now)
+
+
+class Approval(BaseModel):
+    project_id: str
+    job_id: str
+    video_hash: str
+    manifest_hash: str
+    approver_id: str
+    approval_time: datetime = Field(default_factory=_now)
+    expiry: Optional[datetime] = None
+
+
+class RightsRecord(BaseModel):
+    project_id: str
+    asset_id: str
+    source: Optional[str] = None
+    licence: Optional[str] = None
+    licence_url: Optional[str] = None
+    usage: Optional[str] = None
+    sha256: Optional[str] = None
+    original_page_url: Optional[str] = None
+    ownership_declaration: Optional[str] = None
+    retrieval_time: Optional[datetime] = None
+    claim: Optional[str] = None
+
+
+class ClaimRecord(BaseModel):
+    project_id: str
+    claim_id: str = Field(default_factory=lambda: __import__("uuid").uuid4().hex[:8])
+    exact_wording: str
+    source_url: Optional[str] = None
+    publisher: Optional[str] = None
+    source_date: Optional[datetime] = None
+    retrieval_time: Optional[datetime] = None
+    excerpt: Optional[str] = None
+    region: Optional[str] = None
+    factual_status: Optional[str] = None  # firsthand, attributed, measured, inference
+    contradiction_notes: Optional[str] = None
+    reviewer: Optional[str] = None
+    script_location: Optional[str] = None
+
+
+class IntakePacket(BaseModel):
+    project_id: str
+    tenant_id: Optional[str] = None
+    logo: Optional[str] = None  # base64 or URL
+    colours: Optional[List[str]] = None
+    service_descriptions: Optional[str] = None
+    candidate_images: Optional[List[dict]] = None  # [{url, original_url, ownership_declaration, intended_use, consent}]
+    version: int = 1
+    created_at: datetime = Field(default_factory=_now)
+
+
+class PublishIntent(BaseModel):
+    release_id: str
+    channel_id: str
+    project_id: str
+    job_id: str
+    status: str = "pending"  # pending, uploading, processing, published, failed
+    session_ref: Optional[str] = None
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
