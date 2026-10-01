@@ -1,4 +1,5 @@
 from __future__ import annotations
+from .visual_guard import get_search_terms, render_title_safe, allocate_scenes
 
 """CHANGELOG
 ==========
@@ -83,7 +84,7 @@ MAX_SUBCLIP_SECONDS = 5.0
 MIN_SUBCLIP_SECONDS = 3.0
 
 # FIX Visual mismatch blocklist (mirror stock.py) — discard attached asset if blocklisted
-_BLOCKLIST = ["split", "saldi", "slack", "2026", "sale", "umbrella", "tourist"]
+_BLOCKLIST = ["split", "saldi", "slack", "2026", "sale", "umbrella", "tourist", "beach hut", "pink house", "bangles", "peeling orange", "orange peel", "pottery painting", "beach huts", "hand jewelry", "bracelet", "food closeup", "generic beach", "tourist beach"]
 _DATE_RE = re.compile(r"(?:^|[^0-9])(?:[4-9]\.9\.2026|4-9\.9\.2026)(?:[^0-9]|$)")
 def _is_blocklisted_asset(asset: dict) -> bool:
     tags = asset.get("tags") or []
@@ -2082,7 +2083,15 @@ async def _run_render(job_id: str, project_id: str):
             except Exception:
                 narration_for_verify = audio_path
 
-        # Persist to storage backend BEFORE cleanup — final must exist
+        # Persist to storage backend BEFORE cleanup — final must exist.
+        # NOTE: S3Storage.save_file deletes the source file after a successful
+        # upload, so keep our own local copy for the verification fallback.
+        verify_local: Optional[Path] = None
+        try:
+            verify_local = out_dir / f"{job_id}_verify{final.suffix}"
+            shutil.copy2(final, verify_local)
+        except Exception:
+            verify_local = final if final.exists() else None
         store = get_storage()
         key = f"renders/{project_id}/{final.name}"
         try:
@@ -2103,7 +2112,7 @@ async def _run_render(job_id: str, project_id: str):
                     narration_path=str(narration_for_verify) if narration_for_verify else None,
                     scene_count=len(scenes),
                     cleanup=True,
-                    local_fallback_path=str(final),
+                    local_fallback_path=str(verify_local) if verify_local and verify_local.exists() else None,
                     expect_captions=bool(burn_enabled),
                     aspect=aspect,
                 )

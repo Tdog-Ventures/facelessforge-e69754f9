@@ -1,5 +1,5 @@
 // Dodo Payments - checkout via backend /api/billing/dodo/checkout
-// Replaces Paddle client-side SDK. Flow: POST to backend with JWT, redirect to checkout_url
+// Replaces Dodo Payments client-side SDK. Flow: POST to backend with JWT, redirect to checkout_url
 import { api } from "./api";
 
 export const creditsMap = { basic: 150, pro: 600, advanced: 2000 };
@@ -35,5 +35,5 @@ export async function redirectToDodoCheckout(productId, quantity = 1) {
 
 // Keep getPaddle shim for any lingering imports - throws helpful error
 export const getPaddle = async () => {
-  throw new Error("Paddle removed - use Dodo Payments via createDodoCheckout()");
+  throw new Error("Dodo Payments removed - use Dodo Payments via createDodoCheckout()");
 };

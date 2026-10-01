@@ -22,7 +22,7 @@ export default function PrivacyPage() {
             <li><b>Account:</b> name, email, password hash (bcrypt), role (creator/viewer/admin) — stored in Mongo `users`.</li>
             <li><b>Projects:</b> topics, scripts, scenes, metadata, thumbnail briefs — you own this content.</li>
             <li><b>Renders:</b> MP4s stored in R2 `facelessforge-prod` bucket (`https://videos.ethinx.solutions`) and locally under `backend/static/renders/` (retention 6h via `RENDER_RETENTION_INTERVAL_SECONDS=21600`).</li>
-            <li><b>Billing:</b> email + plan via Paddle (`pdl_live_...`) or Dodo Payments (`pdt_*`) — we store only `tenant:id` credits in Redis `127.0.0.1:6379` and `ff_credits`/`subscriptions` in Mongo; card data stays with the provider.</li>
+            <li><b>Billing:</b> email + plan via Dodo Payments (`pdt_*` test products) — we store only `tenant:id` credits in Redis and `ff_credits`/`subscriptions` in Mongo; card data stays with the provider.</li>
             <li><b>Usage:</b> waitlist emails, `provider_settings` (tone, white-label), `analytics/overview` aggregates.</li>
             <li><b>YouTube (if you connect):</b> OAuth refresh token encrypted (`YOUTUBE_ENCRYPTION_KEY`) in Mongo `youtube_tokens`; we request `youtube.upload` scope only when you enable auto-publish.</li>
           </ul>
@@ -34,7 +34,7 @@ export default function PrivacyPage() {
             <p><b>Pexels / Pixabay / Unsplash</b> — stock search proxies via `backend/app/stock.py` using your query + `PEXELS_API_KEY`. Results include `photographer` + `attribution_url` (e.g. `https://www.pexels.com/@photographer`). See <Link to="/license" className="text-blue-400 hover:underline">/license</Link> for license terms.</p>
             <p><b>YouTube Data API v3</b> — auto-publish uses `youtube.upload` + `youtube` scope; we never read your watch history. You can disconnect at `/app/settings` → `POST /api/youtube-oauth/disconnect`. YouTube’s Terms apply: <a href="https://www.youtube.com/t/terms" className="text-blue-400 hover:underline" target="_blank" rel="noreferrer">youtube.com/t/terms</a> and Google Privacy: <a href="https://policies.google.com/privacy" className="text-blue-400 hover:underline" target="_blank" rel="noreferrer">policies.google.com/privacy</a>.</p>
             <p><b>ElevenLabs</b> — TTS via `https://api.elevenlabs.io/v1/text-to-speech/voice_id` with `ELEVENLABS_API_KEY`; text is sent for synthesis, audio returned as MP3 stored in R2 `audio/project/*.mp3`.</p>
-            <p><b>Dodo Payments</b> (`DODO_PAYMENTS_ENVIRONMENT=test_mode` with `REACT_APP_DODO_PRODUCT_*=pdt_*`) and <b>Paddle</b> (`pdl_live_...` prices `pri_01...`) — they handle checkout; we receive only `email`, `plan`, `transaction_id` via webhook and grant finite credits (`tenant:id` Redis hash).</p>
+            <p><b>Dodo Payments</b> (`DODO_PAYMENTS_ENVIRONMENT=test_mode` with `REACT_APP_DODO_PRODUCT_*=pdt_*`) — handles checkout; we receive only `email`, `plan`, `transaction_id` via webhook and grant finite credits (Redis `tenant:id` hash plus the Mongo ledger). Dodo Payments is retired and no longer used.</p>
             <p><b>Ollama</b> — local LLM at `http://localhost:11434` (`llama3:latest`, `qwen2.5:7b-instruct`) — prompts never leave Hetzner when Ollama succeeds; fallback DeepSeek/Kimi/Claude only if Ollama times out (20s).</p>
           </div>
         </section>

@@ -98,7 +98,8 @@ export default function AdminDiagnosticsPage() {
   const allOk = data.ok
     && !data.cors.wildcard
     && !!data.binaries.ffmpeg_path
-    && (data.dev_mode || data.cookie_mode === "none+secure");
+    && (data.dev_mode || data.cookie_mode === "none+secure")
+    && data.storage.probe_ok === true;
 
   return (
     <AppShell>
@@ -248,6 +249,12 @@ export default function AdminDiagnosticsPage() {
           )}
           {"credentials_present" in data.storage && (
             <Row label="Credentials present" value={data.storage.credentials_present ? "yes" : "no"} ok={data.storage.credentials_present} />
+          )}
+          {"probe_ok" in data.storage && (
+            <Row label="Live storage probe" value={data.storage.probe_ok ? `ok · ${data.storage.probe_latency_ms ?? "?"} ms` : (data.storage.probe_error || "failed")} ok={!!data.storage.probe_ok} />
+          )}
+          {data.storage.probed_at && (
+            <Row label="Probed at" value={data.storage.probed_at} />
           )}
           <Row label="Retention" value={`${data.storage.retention_days} days`} />
           <Row label="Renders" value={`${fmtBytes(data.storage.renders.bytes)} · ${data.storage.renders.files} files`} />

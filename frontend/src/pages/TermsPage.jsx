@@ -27,12 +27,12 @@ export default function TermsPage() {
         </section>
 
         <section className="space-y-3">
-          <h2 className="text-lg font-semibold">3. Billing — Dodo & Paddle disclosure</h2>
+          <h2 className="text-lg font-semibold">3. Billing — Dodo disclosure</h2>
           <div className="border border-amber-500/20 bg-amber-500/5 rounded-md p-4 text-sm space-y-2">
-            <p><b>Providers:</b> Dodo Payments (current, `DODO_PAYMENTS_ENVIRONMENT=test_mode`, products `pdt_starter`/`pdt_creator`/`pdt_pro`/`pdt_scale` → credits `150/600/2000/10000`) and Paddle (legacy `pdl_live_...` prices `pri_01m17yk...` → plans Basic $29/150cr, Pro $79/600cr, Advanced $299/2000cr). Paddle is the checkout that issues JWT (`POST /billing/create-checkout` mock when `PADDLE_API_KEY` empty) and grants finite credits via webhook `POST /api/billing/webhook` / `POST /api/billing/dodo/webhook` → `hincrby tenant:id credits`.</p>
-            <p><b>No auto-charge without checkout:</b> You are charged only after you complete Dodo/Paddle/ PayPal (`PAYMENT_PROVIDER=dodo`) checkout and redirect to `/billing/success`. Credits are finite and decremented via `POST /api/billing/deduct` (atomic `findOneAndUpdate` required — see audit).</p>
+            <p><b>Provider:</b> Dodo Payments (current, `DODO_PAYMENTS_ENVIRONMENT=test_mode`, products `pdt_starter`/`pdt_creator`/`pdt_pro`/`pdt_scale` → test credits `100/500/2000/10000`). Dodo Payments checkout has been retired and is no longer offered. Finite credits are granted via webhook `POST /api/billing/dodo/webhook` → Redis `tenant:id` hash plus the Mongo ledger (`subscriptions`/`ff_credits`).</p>
+            <p><b>No auto-charge without checkout:</b> You are charged only after you complete Dodo (`PAYMENT_PROVIDER=dodo`) checkout and redirect to `/billing/success`. Credits are finite and gated per render.</p>
             <p><b>Refunds:</b> Contact via billing portal or <code>tdogga14@gmail.com</code> within 14 days for unused credits. Rendered minutes consumed are non-refundable.</p>
-            <p><b>Tax:</b> Paddle/Dodo handle VAT/GST; invoices available in provider dashboard.</p>
+            <p><b>Tax:</b> Dodo handles VAT/GST; invoices available in the provider dashboard.</p>
           </div>
         </section>
 

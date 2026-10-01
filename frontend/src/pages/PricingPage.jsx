@@ -56,33 +56,10 @@ export default function PricingPage() {
     let cancelled = false;
     async function loadRealProducts() {
       try {
-        // Pull real Paddle products from backend — not hardcoded Stripe
-        // Primary: /billing/status (Paddle PLANS) and /api/billing/provider (provider flag)
-        const [statusRes, providerRes] = await Promise.allSettled([
-          fetch(`${BACKEND_URL}/billing/status`, { credentials: "include" }).then(r => r.json()),
-          api.get("/billing/provider").then(r => r.data).catch(() => null),
-        ]);
-        const statusData = statusRes.status === "fulfilled" ? statusRes.value : null;
-        const providerData = providerRes.status === "fulfilled" ? providerRes.value : null;
-        if (!cancelled && providerData) setProviderInfo(providerData);
-        if (!cancelled && statusData && statusData.plans) {
-          const iconMap = { basic: Zap, pro: Crown, advanced: Building };
-          const realPlans = Object.entries(statusData.plans)
-            .filter(([k]) => ["basic", "pro", "advanced"].includes(k))
-            .map(([key, v]) => ({
-              key,
-              name: v.label || key,
-              priceMonthly: `$${v.price}`,
-              priceYearly: v.pri_yearly ? `$${Math.round(v.price * 10)}` : `$${v.price * 10}`,
-              credits: v.credits,
-              desc: v.desc || `${v.credits} credits`,
-              icon: iconMap[key] || Zap,
-              hero: key === "pro",
-              product_id: v.price_id || v.product_id || FALLBACK_PLANS.find(f => f.key === key)?.product_id,
-              features: v.desc ? [v.desc, `${v.credits} credits / mo`] : FALLBACK_PLANS.find(f => f.key === key)?.features || [],
-            }));
-          if (realPlans.length) setPlans(realPlans);
-        }
+        // Dodo is the live provider. Plans come from FALLBACK_PLANS with
+        // Dodo test product ids (lib/dodo); provider flag from backend.
+        const providerRes = await api.get("/billing/provider").then(r => r.data).catch(() => null);
+        if (!cancelled && providerRes) setProviderInfo(providerRes);
       } catch {}
     }
     loadRealProducts();
@@ -105,11 +82,11 @@ export default function PricingPage() {
 
   return (
     <AppShell>
-      <TopBar title="Pricing" subtitle={`${providerInfo?.provider || "Paddle"} · 3 plans · 14d trial`} />
+      <TopBar title="Pricing" subtitle={`${providerInfo?.provider || "Dodo"} · 3 plans · 14d trial`} />
       <div className="p-8 space-y-6">
         <div className="max-w-5xl mx-auto text-center space-y-3">
           <h1 className="text-3xl font-bold tracking-tight">Choose your plan</h1>
-          <p className="text-zinc-400 text-sm">{providerInfo ? `${providerInfo.provider} · live` : "Paddle"} · 3 plans · 14d trial · credits for 3s assets {providerInfo?.provider ? `· ${providerInfo.provider}` : ""}</p>
+          <p className="text-zinc-400 text-sm">{providerInfo ? `${providerInfo.provider} · live` : "Dodo"} · 3 plans · 14d trial · credits for 3s assets {providerInfo?.provider ? `· ${providerInfo.provider}` : ""}</p>
           <div className="flex items-center justify-center gap-3 pt-2">
             <span className={`text-xs ${!yearly ? "text-white" : "text-zinc-500"}`}>Monthly</span>
             <button

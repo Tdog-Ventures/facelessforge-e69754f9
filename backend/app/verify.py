@@ -52,6 +52,10 @@ BLACK_BAR_LUM_MAX = 24.0         # check f: max mean luminance (0-255) of a bar 
                                  # distinguishes true black letterbox/pillarbox
                                  # bars from the (non-black) blurred background
                                  # fill used by the render pipeline
+CENTER_BRIGHT_LUM_MIN = 40.0     # check f: a flat dark edge strip is only a bar
+                                 # when the frame centre is actually bright.
+                                 # Full-frame fades-to-black / black leaders
+                                 # have dark centres and must NOT fail.
 LOUDNORM_I_TARGET = -16.0        # check g: target integrated loudness
                                  # (must match the render pipeline's two-pass
                                  # mux target `loudnorm=I=-16:TP=-1.5:LRA=11`;
@@ -86,13 +90,35 @@ async def _run_cmd(*cmd: str, timeout: int = 300) -> tuple[str, str, int]:
 
 
 async def _download_video(url: str, dest: Path) -> None:
-    """Download remote video to local temp path for analysis."""
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            resp.raise_for_status()
-            with open(dest, "wb") as f:
-                async for chunk in resp.content.iter_chunked(8192):
-                    f.write(chunk)
+    """Download remote video to local temp path for analysis.
+
+    Retries transient failures (connection blips, 5xx) — a single failed
+    GET must not fail an otherwise good render.
+    """
+    import aiohttp
+
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            timeout = aiohttp.ClientTimeout(total=300, connect=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url) as resp:
+                    resp.raise_for_status()
+                    with open(dest, "wb") as f:
+                        async for chunk in resp.content.iter_chunked(8192):
+                            f.write(chunk)
+            if dest.exists() and dest.stat().st_size > 0:
+                return
+            last_exc = RuntimeError(f"downloaded 0 bytes from {url}")
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+        if dest.exists():
+            try:
+                dest.unlink()
+            except Exception:
+                pass
+        await asyncio.sleep(2 * (attempt + 1))
+    raise RuntimeError(f"video download failed after 3 attempts: {last_exc}")
 
 
 async def ffprobe_duration(path: str) -> float:
@@ -503,9 +529,19 @@ async def check_f_no_pillarbox(video_path: str, scene_count: Optional[int] = Non
                 bot_var = _image_variance(frame_path, bot_region)
                 top_lum = _image_luminance(frame_path, top_region)
                 bot_lum = _image_luminance(frame_path, bot_region)
-                is_black_bar = (
+                edge_dark = (
                     (top_var < EDGE_VAR_MAX and top_lum < BLACK_BAR_LUM_MAX)
                     or (bot_var < EDGE_VAR_MAX and bot_lum < BLACK_BAR_LUM_MAX)
+                )
+                # A bar needs bright content behind it — a fully dark frame is
+                # a fade/leader, not letterboxing.
+                center_lum = None
+                if edge_dark:
+                    center_region = (0, EDGE_CHECK_WIDTH, width or 0, (height or 0) - EDGE_CHECK_WIDTH)
+                    center_lum = _image_luminance(frame_path, center_region)
+                is_black_bar = bool(
+                    edge_dark and center_lum is not None
+                    and center_lum >= CENTER_BRIGHT_LUM_MIN
                 )
                 flat_edges = is_black_bar
                 per_frame.append({
@@ -514,6 +550,7 @@ async def check_f_no_pillarbox(video_path: str, scene_count: Optional[int] = Non
                     "top_luminance": round(top_lum, 2),
                     "bottom_variance": round(bot_var, 2),
                     "bottom_luminance": round(bot_lum, 2),
+                    "center_luminance": round(center_lum, 2) if center_lum is not None else None,
                     "flat_edges": flat_edges,
                 })
             else:
@@ -527,9 +564,19 @@ async def check_f_no_pillarbox(video_path: str, scene_count: Optional[int] = Non
                 right_var = _image_variance(frame_path, right_region)
                 left_lum = _image_luminance(frame_path, left_region)
                 right_lum = _image_luminance(frame_path, right_region)
-                is_black_bar = (
+                edge_dark = (
                     (left_var < EDGE_VAR_MAX and left_lum < BLACK_BAR_LUM_MAX)
                     or (right_var < EDGE_VAR_MAX and right_lum < BLACK_BAR_LUM_MAX)
+                )
+                # A bar needs bright content behind it — a fully dark frame is
+                # a fade/leader, not pillarboxing.
+                center_lum = None
+                if edge_dark:
+                    center_region = (EDGE_CHECK_WIDTH, 0, (width or 0) - EDGE_CHECK_WIDTH, height or 0)
+                    center_lum = _image_luminance(frame_path, center_region)
+                is_black_bar = bool(
+                    edge_dark and center_lum is not None
+                    and center_lum >= CENTER_BRIGHT_LUM_MIN
                 )
                 flat_edges = is_black_bar
                 per_frame.append({
@@ -538,6 +585,7 @@ async def check_f_no_pillarbox(video_path: str, scene_count: Optional[int] = Non
                     "left_luminance": round(left_lum, 2),
                     "right_variance": round(right_var, 2),
                     "right_luminance": round(right_lum, 2),
+                    "center_luminance": round(center_lum, 2) if center_lum is not None else None,
                     "flat_edges": flat_edges,
                 })
 

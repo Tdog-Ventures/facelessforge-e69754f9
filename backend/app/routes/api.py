@@ -439,7 +439,7 @@ async def list_projects(user=Depends(get_current_user)):
         # Admin sees all non-demo across all users, with badge
     else:
         q = {"user_id": user["id"], "is_demo": {"$ne": True}, "is_template": {"$ne": True}}
-    projs = await db.projects.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
+    projs = await db.projects.find(q, {"_id": 0}).sort("created_at", -1).to_list(5000)
     # Attach derived score labels without recomputing too expensively:
     result = [_ser(p) | {"quality_label": quality_label(int(p.get("quality_score", 0)))} for p in projs]
     # For admin, add flag so frontend can show badge
@@ -2017,6 +2017,7 @@ async def list_waitlist(user=Depends(require_roles("admin"))):
 
 # ============================ ADMIN DIAGNOSTICS / RETENTION ============================
 from .. import retention as retention_service
+from ..storage import get_storage as _get_storage_backend
 from ..storage import storage_status as storage_status_fn
 
 
@@ -2046,6 +2047,28 @@ def _provider_modes() -> dict:
             "provider": "pexels",
         },
     }
+
+
+def _live_storage_probe() -> dict:
+    """Run a live storage write/read/delete probe so Diagnostics reflects
+    reality, not just config presence. A misconfigured endpoint (bad DNS,
+    wrong bucket, bad creds) previously reported healthy here while every
+    asset save failed downstream."""
+    try:
+        probe = _get_storage_backend().probe()
+        return {
+            "probe_ok": bool(probe.get("ok")),
+            "probe_latency_ms": probe.get("latency_ms"),
+            "probe_error": probe.get("error"),
+            "probed_at": probe.get("probed_at"),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "probe_ok": False,
+            "probe_latency_ms": None,
+            "probe_error": str(exc)[:200],
+            "probed_at": None,
+        }
 
 
 @router.get("/admin/diagnostics")
@@ -2101,7 +2124,18 @@ async def admin_diagnostics(_admin=Depends(require_roles("admin"))):
         ),
     }
 
-    ok = bool(system_ok and deps.get("redis_ping") and deps.get("mongo_ping"))
+    storage_info = {
+        **retention_service.disk_usage_report(),
+        **storage_status_fn(),
+        **_live_storage_probe(),
+    }
+
+    ok = bool(
+        system_ok
+        and deps.get("redis_ping")
+        and deps.get("mongo_ping")
+        and storage_info.get("probe_ok")
+    )
 
     return {
         "service": "facelessforge",
@@ -2121,10 +2155,7 @@ async def admin_diagnostics(_admin=Depends(require_roles("admin"))):
             "ffprobe_source": sys_status.get("ffprobe_source"),
         },
         "providers": _provider_modes(),
-        "storage": {
-            **retention_service.disk_usage_report(),
-            **storage_status_fn(),
-        },
+        "storage": storage_info,
         "render_queue": {
             "active_jobs": active_renders,
             "concurrency": "single asyncio worker per pod",
@@ -2282,35 +2313,45 @@ async def analytics_overview(user=Depends(get_current_user)):
     else:
         q = {"user_id": user["id"], "is_demo": {"$ne": True}, "is_template": {"$ne": True}}
         is_admin_view = False
-    projects = await db.projects.find(q, {"_id": 0}).to_list(1000)
-    total = len(projects)
-    completed = sum(1 for p in projects if p.get("status") == "COMPLETED")
-    in_progress = sum(1 for p in projects if p.get("status") not in ("COMPLETED", "FAILED", "DRAFT"))
-    avg_q = (sum(int(p.get("quality_score", 0)) for p in projects) / total) if total else 0
+    projects_coll = db.projects
+    # Totals must be exact — never cap the listing cursor (the old
+    # to_list(1000)/to_list(500) caps made dashboard, projects page and
+    # diagnostics disagree once the DB grew past the caps).
+    total = await projects_coll.count_documents(q)
+    status_rows = await projects_coll.aggregate([
+        {"$match": q},
+        {"$group": {"_id": "$status", "n": {"$sum": 1}}},
+    ]).to_list(length=None)
+    status_counts = {str(r.get("_id") or "DRAFT"): int(r.get("n") or 0) for r in status_rows}
+    niche_rows = await projects_coll.aggregate([
+        {"$match": q},
+        {"$group": {"_id": "$niche", "n": {"$sum": 1}}},
+    ]).to_list(length=None)
+    niche_counts = {str(r.get("_id") or "other"): int(r.get("n") or 0) for r in niche_rows}
+    avg_rows = await projects_coll.aggregate([
+        {"$match": {**q, "quality_score": {"$type": "number"}}},
+        {"$group": {"_id": None, "avg": {"$avg": "$quality_score"}}},
+    ]).to_list(length=None)
+    avg_q = round(float((avg_rows[0].get("avg") if avg_rows else 0) or 0), 1)
+    completed = status_counts.get("COMPLETED", 0)
+    failed = status_counts.get("FAILED", 0)
+    draft = status_counts.get("DRAFT", 0)
+    in_progress = max(0, total - completed - failed - draft)
 
-    status_counts = {}
-    niche_counts = {}
-    for p in projects:
-        status_counts[p.get("status", "DRAFT")] = status_counts.get(p.get("status", "DRAFT"), 0) + 1
-        niche_counts[p.get("niche", "other")] = niche_counts.get(p.get("niche", "other"), 0) + 1
-
-    # projects over time (last 14 days)
-    from collections import Counter
-    by_day = Counter()
-    for p in projects:
-        created = p.get("created_at")
-        if isinstance(created, datetime):
-            by_day[created.date().isoformat()] += 1
+    # projects over time (all matching projects, grouped by day)
+    by_day_rows = await projects_coll.aggregate([
+        {"$match": {**q, "created_at": {"$type": "date"}}},
+        {"$group": {
+            "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$created_at"}},
+            "n": {"$sum": 1},
+        }},
+    ]).to_list(length=None)
+    by_day = {str(r.get("_id") or ""): int(r.get("n") or 0) for r in by_day_rows if r.get("_id")}
     # EST MONTHLY OUTPUT = count of projects where status=completed in last 30d * 4.3 (weekly avg)
     cutoff = _now() - timedelta(days=30)
-    def _is_recent(p):
-        ca = p.get("created_at")
-        if not isinstance(ca, datetime):
-            return False
-        if ca.tzinfo is None:
-            ca = ca.replace(tzinfo=timezone.utc)
-        return ca >= cutoff
-    completed_last_30d = sum(1 for p in projects if p.get("status") == "COMPLETED" and _is_recent(p))
+    completed_last_30d = await projects_coll.count_documents(
+        {**q, "status": "COMPLETED", "created_at": {"$gte": cutoff}}
+    )
     # Fallback if no completed in last 30d but there are completed overall, use completed count for projection (better than 0)
     monthly_output_projection = round(completed_last_30d * 4.3, 1) if completed_last_30d else round(completed * 4.3, 1) if completed else 0.0
     # TOTAL EST COST = EST OUTPUT * 3 credits (1 render = 3cr). 572 min total should not multiply. Remove 11435cr calc.

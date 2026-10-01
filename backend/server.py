@@ -330,8 +330,8 @@ _TEASER_DIR.mkdir(parents=True, exist_ok=True)
 # also check local 8081's own /tmp and /app/teasers equivalent for container? Use both
 _R2_BUCKET_PATCH = _os.getenv("STORAGE_BUCKET","facelessforge-prod")
 _R2_ENDPOINT_PATCH = _os.getenv("STORAGE_ENDPOINT","https://9d1310958fd8b19bb31d13f6ebe66581.r2.cloudflarestorage.com")
-_R2_KEY_PATCH = _os.getenv("STORAGE_ACCESS_KEY","d6140fee66412c90419a821299c4890a")
-_R2_SECRET_PATCH = _os.getenv("STORAGE_SECRET_KEY","c90fe03d3b05b7b8a31ee263142065e06170c5d504d88be64603f54580ca1f26")
+_R2_KEY_PATCH = _os.getenv("STORAGE_ACCESS_KEY", "")
+_R2_SECRET_PATCH = _os.getenv("STORAGE_SECRET_KEY", "")
 
 def _r2_client_patch():
     try:

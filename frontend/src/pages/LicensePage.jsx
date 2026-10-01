@@ -38,10 +38,10 @@ export default function LicensePage() {
         </section>
 
         <section className="space-y-3">
-          <h2 className="text-lg font-semibold">3. Billing — Dodo / Paddle / PayPal</h2>
+          <h2 className="text-lg font-semibold">3. Billing — Dodo</h2>
           <div className="border border-amber-500/20 bg-amber-500/5 rounded-md p-4 text-sm space-y-2">
-            <p><b>Dodo Payments</b> (current, `DODO_PAYMENTS_ENVIRONMENT=test_mode`, products `pdt_starter` `pdt_creator` `pdt_pro` `pdt_scale` → credits `150/600/2000/10000` via `billing_dodo.py:63`). Checkout `POST /api/billing/dodo/checkout` (JWT) → `DodoPayments.checkout_sessions.create` → webhook `POST /api/billing/dodo/webhook` verifies Standard Webhooks (`webhook-id/timestamp/signature` via `DODO_PAYMENTS_WEBHOOK_KEY`) and does atomic `hincrby tenant:tenant_id credits` in Redis (idempotent `set nx 86400`). Empty `DODO_PAYMENTS_WEBHOOK_KEY` currently skips verify (dev) — must be set in prod (see audit).</p>
-            <p><b>Paddle</b> (legacy, `pdl_live_...` `PADDLE_API_KEY` `PADDLE_WEBHOOK_SECRET=pdl_ntfset_...` → plans Basic $29/150cr, Pro $79/600cr, Advanced $299/2000cr, mock `POST /billing/create-checkout` with `email` only when key missing). Webhook `POST /api/billing/webhook` verifies `paddle-signature` when `PADDLE_WEBHOOK_SECRET` set; `test_secret` bypass is dev only.</p>
+            <p><b>Dodo Payments</b> (current, `DODO_PAYMENTS_ENVIRONMENT=test_mode`, products `pdt_starter` `pdt_creator` `pdt_pro` `pdt_scale` → test credits `100/500/2000/10000` via `billing_dodo.py`). Checkout `POST /api/billing/dodo/checkout` (JWT) → `DodoPayments.checkout_sessions.create` → webhook `POST /api/billing/dodo/webhook` verifies Standard Webhooks (`webhook-id/timestamp/signature` via `DODO_PAYMENTS_WEBHOOK_KEY`) and grants finite credits to Redis `tenant:id` plus the Mongo ledger (`subscriptions`/`ff_credits`). Empty `DODO_PAYMENTS_WEBHOOK_KEY` currently skips verify (dev) — must be set in prod.</p>
+            <p><b>Dodo Payments</b> (retired) — Dodo Payments checkout and webhook surfaces are unmounted and no longer offered. Historical subscription rows may retain Dodo Payments id fields for audit only.</p>
             <p><b>PayPal shim</b> (`PAYMENT_PROVIDER=dodo` default, so `POST /api/billing/webhook/paypal` returns `dormant` unless `provider=paypal|both`). When active, verifies `paypal-transmission-sig` via `PAYPAL_WEBHOOK_ID/SECRET` and `hincrby tenant:tenant credits` (HMAC, idempotent `set nx`).</p>
             <p><b>Single source of truth concern:</b> 3 stores (`subscriptions` + `ff_credits` + Redis `tenant:id`) exist — status endpoint merges; audit recommends unifying to `subscriptions.findOneAndUpdate` atomic deduct.</p>
           </div>
