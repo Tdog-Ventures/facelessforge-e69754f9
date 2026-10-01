@@ -38,7 +38,7 @@ export default function AnalyticsPage() {
     <AppShell>
       <TopBar title="Analytics" subtitle="Studio intelligence" />
       <div className="p-8 space-y-6">
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           <Stat label="Projects" value={a.total_projects} />
           <Stat label="Completed" value={a.completed} color="#00FF66" />
           <Stat label="Avg quality" value={Math.round(a.average_quality_score)} unit="/100" color="#7B61FF" />

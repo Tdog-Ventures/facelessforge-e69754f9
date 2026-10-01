@@ -18,7 +18,7 @@ const VISUAL_STYLES = ["cinematic b-roll", "moody minimal", "motion graphic heav
 const MONETISATION = ["Grow channel to 50k subs", "Sell my product", "Build authority", "ads", "ads + affiliate", "affiliate", "digital product", "sponsorship"];
 const CTAS = ["Visit website", "Subscribe", "Buy product", "subscribe", "join newsletter", "visit website", "buy product", "book call"];
 
-const DURATIONS = [60, 180, 300, 420, 600, 900];
+const DURATIONS = [5, 15, 30, 60, 120, 300, 600, 1800, 3600];
 
 const inputClass = "w-full bg-[#0A0A0A] border border-zinc-800 px-3 py-2.5 text-sm rounded-sm focus:border-[#00E5FF]";
 const selectClass = inputClass + " font-mono uppercase text-xs tracking-wider";
@@ -47,8 +47,15 @@ export default function CreateProjectPage() {
     visual_style: VISUAL_STYLES[0],
     monetisation_intent: MONETISATION[1],
     cta_goal: CTAS[0],
-    auto_post: true,
+    auto_post: false,
     platforms: PLATFORMS.map((p) => p.key),
+    production_mode: "commercial_ad",
+    client_name: "",
+    structured_brief: { service: "", offer: "", audience: "", location: "", problem: "" },
+    verified_cta: { text: "", destination: "", verified: false },
+    brand_assets_supplied: false,
+    aspect_ratio: "9:16",
+    resolution: "1080x1920",
   });
   const [errors, setErrors] = useState({});
   const [loading, setLoading] = useState(false);
@@ -63,7 +70,12 @@ export default function CreateProjectPage() {
     if (!form.audience.trim()) e.audience = "Audience is required";
     if (!form.tone) e.tone = "Pick a tone";
     const d = Number(form.target_duration);
-    if (!(d >= 30 && d <= 3600)) e.target_duration = "30–3600 seconds";
+    if (!(d >= 5 && d <= 3600)) e.target_duration = "5–3600 seconds";
+    if (!form.client_name.trim()) e.client_name = "Client name is required";
+    for (const key of ["service", "offer", "audience", "location"]) {
+      if (!form.structured_brief[key].trim()) e[`brief_${key}`] = "Required for a commercial brief";
+    }
+    if (!form.verified_cta.text.trim() || !form.verified_cta.destination.trim() || !form.verified_cta.verified) e.verified_cta = "Enter and verify the CTA destination";
     setErrors(e);
     return Object.keys(e).length === 0;
   };
@@ -114,6 +126,30 @@ export default function CreateProjectPage() {
             </Field>
           </div>
 
+          <div className="border border-[#00E5FF]/30 bg-[#121212] p-6 rounded-sm space-y-5">
+            <div className="flex items-center gap-2 text-[#00E5FF] mb-2">
+              <Sparkles size={14} strokeWidth={1.5} />
+              <span className="font-mono text-[10px] uppercase tracking-widest">Commercial ground truth · required</span>
+            </div>
+            <Field label="Client business name" name="client_name" errors={errors}>
+              <input data-testid="field-client-name" value={form.client_name} onChange={(e) => update("client_name", e.target.value)} className={inputClass} placeholder="e.g. Effective Wash" />
+            </Field>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+              {[["service", "Advertised service", "Pressure washing"], ["offer", "Offer", "Free driveway quote"], ["audience", "Client audience", "Adelaide homeowners"], ["location", "Location", "Adelaide, SA"]].map(([key, label, placeholder]) => (
+                <Field key={key} label={label} name={`brief_${key}`} errors={errors}>
+                  <input value={form.structured_brief[key]} onChange={(e) => update("structured_brief", { ...form.structured_brief, [key]: e.target.value })} className={inputClass} placeholder={placeholder} />
+                </Field>
+              ))}
+            </div>
+            <Field label="Verified CTA" name="verified_cta" errors={errors}>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <input value={form.verified_cta.text} onChange={(e) => update("verified_cta", { ...form.verified_cta, text: e.target.value })} className={inputClass} placeholder="Call for a free quote" />
+                <input value={form.verified_cta.destination} onChange={(e) => update("verified_cta", { ...form.verified_cta, destination: e.target.value })} className={inputClass} placeholder="https://… or tel:+61…" />
+              </div>
+              <label className="flex items-center gap-2 text-sm text-zinc-300 mt-3"><input type="checkbox" checked={form.verified_cta.verified} onChange={(e) => update("verified_cta", { ...form.verified_cta, verified: e.target.checked })} /> I verified this CTA with the client.</label>
+            </Field>
+          </div>
+
           <div className="border border-zinc-800 bg-[#121212] p-6 rounded-sm space-y-5">
             <div className="flex items-center gap-2 text-[#7B61FF] mb-2">
               <Sparkles size={14} strokeWidth={1.5} />
@@ -136,9 +172,9 @@ export default function CreateProjectPage() {
                 </select>
               </Field>
             </div>
-            <Field label="Target duration (seconds)" name="target_duration" hint="30 – 3600" errors={errors}>
+            <Field label="Target duration (seconds)" name="target_duration" hint="5 – 3600" errors={errors}>
               <div className="flex items-center gap-3">
-                <input data-testid="field-duration" type="number" min={30} max={3600} value={form.target_duration}
+                <input data-testid="field-duration" type="number" min={5} max={3600} value={form.target_duration}
                   onChange={(e) => update("target_duration", e.target.value)}
                   className={inputClass + " w-32 font-mono"} />
                 <div className="flex gap-2">

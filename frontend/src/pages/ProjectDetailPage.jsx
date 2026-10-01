@@ -13,6 +13,12 @@ import ThumbnailPanel from "../components/ThumbnailPanel";
 import RenderPanel from "../components/RenderPanel";
 import SharePanel from "../components/SharePanel";
 import VoiceoverPanel from "../components/VoiceoverPanel";
+import IntakePacket from "../components/IntakePacket";
+import ClaimLedger from "../components/ClaimLedger";
+import RightsRegistry from "../components/RightsRegistry";
+import ComplianceChecklist from "../components/ComplianceChecklist";
+import ApprovalPanel from "../components/ApprovalPanel";
+import ProductionReceipt from "../components/ProductionReceipt";
 import { api, formatApiError, API } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { formatCurrency, formatDuration } from "../lib/format";
@@ -26,6 +32,12 @@ const TABS = [
   { id: "thumbnails", label: "Thumbnails" },
   { id: "voiceover", label: "Voiceover" },
   { id: "render", label: "Render & Export" },
+  { id: "intake", label: "Intake" },
+  { id: "claims", label: "Claims" },
+  { id: "rights", label: "Rights" },
+  { id: "compliance", label: "Checklist" },
+  { id: "approval", label: "Approval" },
+  { id: "receipt", label: "Receipt" },
 ];
 
 export default function ProjectDetailPage() {
@@ -39,12 +51,24 @@ export default function ProjectDetailPage() {
   const [autoGeneratingThumbnails, setAutoGeneratingThumbnails] = useState(false);
   const confirm = useConfirm();
 
-  const canEdit = user && user.role !== "viewer";
+  const canEdit = user && user.role !== "viewer" && (user.role === "admin" || !view || view.project?.user_id === user.id);
 
   const fetchView = async () => {
     try {
       const { data } = await api.get(`/projects/${id}`);
-      setView(data);
+      setView(prev => {
+        // Don't overwrite existing script with null from stale fetch (regression from last fix)
+        if (prev?.script && !data?.script) {
+          return { ...data, script: prev.script };
+        }
+        // Also persist script to localStorage for ScriptPanel recovery
+        if (data?.script?.full_script) {
+          try {
+            localStorage.setItem(`script-${id}`, JSON.stringify(data.script));
+          } catch {}
+        }
+        return data;
+      });
     } catch (err) {
       toast.error("Could not load project", { description: formatApiError(err.response?.data?.detail) || err.message });
     } finally {
@@ -311,6 +335,12 @@ export default function ProjectDetailPage() {
               onChange={setView}
             />
           )}
+          {tab === "intake" && <IntakePacket projectId={project.id} />}
+          {tab === "claims" && <ClaimLedger projectId={project.id} />}
+          {tab === "rights" && <RightsRegistry projectId={project.id} />}
+          {tab === "compliance" && <ComplianceChecklist projectId={project.id} />}
+          {tab === "approval" && <ApprovalPanel projectId={project.id} jobId={render_job?.id} />}
+          {tab === "receipt" && <ProductionReceipt projectId={project.id} />}
         </div>
       </div>
     </AppShell>

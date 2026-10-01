@@ -312,13 +312,13 @@ async def _ensure_assets_and_render(project: dict) -> dict:
     except Exception as e:
         logger.debug("thumbnail concepts failed %s", e)
 
-    # Voiceover: full-script with timeout
+    # Voiceover: full-script with timeout (ElevenLabs can take 30-60s for long scripts)
     try:
         script = await db.scripts.find_one({"project_id": pid}, {"_id": 0})
         text = (script or {}).get("full_script") or project.get("topic") or "Welcome to Faceless Forge"
         vo_id = str(uuid.uuid4())
         try:
-            vo_payload = await asyncio.wait_for(tts_service.generate_voiceover(text=text, voice_style="narrative", project_id=pid, asset_id=vo_id, scene_id=None), timeout=15)
+            vo_payload = await asyncio.wait_for(tts_service.generate_voiceover(text=text, voice_style="narrative", project_id=pid, asset_id=vo_id, scene_id=None), timeout=120)
         except asyncio.TimeoutError:
             logger.warning("voiceover timeout — using mock")
             raise Exception("voiceover_timeout_mock")

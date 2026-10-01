@@ -5,6 +5,7 @@ import "@/App.css";
 
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { ConfirmProvider } from "@/components/ConfirmDialog";
+import BillingBankTransfer from "@/components/BillingBankTransfer";
 
 class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -49,6 +50,10 @@ import ForgotPasswordPage from "@/pages/ForgotPasswordPage";
 import ResetPasswordPage from "@/pages/ResetPasswordPage";
 import PricingPage from "@/pages/PricingPage";
 import AutomationPage from "@/pages/AutomationPage";
+import PHPage from "@/pages/PHPage";
+import PrivacyPage from "@/pages/PrivacyPage";
+import TermsPage from "@/pages/TermsPage";
+import LicensePage from "@/pages/LicensePage";
 
 function WaitlistGate({ children }) {
   const hasInvite = typeof window !== "undefined" && !!localStorage.getItem("forge_invite");
@@ -101,15 +106,38 @@ function GuestOnly({ children }) {
   return children;
 }
 
+function ProductHuntRedirect() {
+  // Global redirect: if utm_source=producthunt or referrer producthunt.com -> /ph
+  React.useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const utm = (params.get("utm_source") || params.get("utm_medium") || "").toLowerCase();
+      const isPHParam = utm.includes("producthunt") || params.get("ref") === "producthunt" || params.has("ph");
+      const isPHReferrer = typeof document !== "undefined" && document.referrer && document.referrer.toLowerCase().includes("producthunt.com");
+      const alreadyPH = window.location.pathname === "/ph";
+      if (!alreadyPH && (isPHParam || isPHReferrer)) {
+        window.history.replaceState({}, "", "/ph" + window.location.search + window.location.hash);
+        window.location.replace("/ph");
+      }
+    } catch {}
+  }, []);
+  return null;
+}
+
 export default function App() {
   return (
     <div className="App">
       <AuthProvider>
         <ConfirmProvider>
           <BrowserRouter>
+          <ProductHuntRedirect />
           <ErrorBoundary>
           <Routes>
             <Route path="/" element={<LandingPage />} />
+            <Route path="/ph" element={<PHPage />} />
+            <Route path="/privacy" element={<PrivacyPage />} />
+            <Route path="/terms" element={<TermsPage />} />
+            <Route path="/license" element={<LicensePage />} />
             <Route path="/s/:token" element={<PublicSharePage />} />
             <Route path="/login" element={<GuestOnly><LoginPage /></GuestOnly>} />
             <Route path="/register" element={<GuestOnly><RegisterPage /></GuestOnly>} />
@@ -129,8 +157,8 @@ export default function App() {
             <Route path="/pricing" element={<PricingPage />} />
             <Route path="/app/pricing" element={<Protected><PricingPage /></Protected>} />
             <Route path="/app/automation" element={<Protected><AutomationPage /></Protected>} />
-            <Route path="/billing" element={<Navigate to="/pricing" replace />} />
-            <Route path="/app/billing" element={<Navigate to="/pricing" replace />} />
+            <Route path="/billing" element={<Navigate to="/app/billing" replace />} />
+            <Route path="/app/billing" element={<Protected><BillingBankTransfer /></Protected>} />
 
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

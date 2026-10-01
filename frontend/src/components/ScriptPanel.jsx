@@ -8,18 +8,39 @@ export default function ScriptPanel({ projectId, script, canEdit, onChange }) {
   const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [autoSelectFirst, setAutoSelectFirst] = useState(true);
-  const [draft, setDraft] = useState({
-    selected_hook: script?.selected_hook || "",
-    full_script: script?.full_script || "",
-    cta_block: script?.cta_block || "",
-  });
-
-  useEffect(() => {
-    setDraft({
+  const [draft, setDraft] = useState(() => {
+    // Persist script immediately: check localStorage first, don't init as '' if saved exists
+    try {
+      const saved = localStorage.getItem(`script-${projectId}`);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed?.id === script?.id || (!script?.id && parsed?.full_script)) {
+          return {
+            selected_hook: parsed.selected_hook || script?.selected_hook || "",
+            full_script: parsed.full_script || script?.full_script || "",
+            cta_block: parsed.cta_block || script?.cta_block || "",
+          };
+        }
+      }
+    } catch {}
+    return {
       selected_hook: script?.selected_hook || "",
       full_script: script?.full_script || "",
       cta_block: script?.cta_block || "",
-    });
+    };
+  });
+
+  useEffect(() => {
+    if (!script?.id) return; // don't clear if fetch returns null — keep persisted draft
+    const next = {
+      selected_hook: script?.selected_hook || "",
+      full_script: script?.full_script || "",
+      cta_block: script?.cta_block || "",
+    };
+    setDraft(next);
+    try {
+      localStorage.setItem(`script-${projectId}`, JSON.stringify({ id: script.id, ...next }));
+    } catch {}
   }, [script?.id]);
 
   // Auto-select the first hook if the user hasn't picked one within 5 seconds.
@@ -41,6 +62,18 @@ export default function ScriptPanel({ projectId, script, canEdit, onChange }) {
     toast.loading("Generating with DeepSeek…", { id: "gen-script" });
     try {
       const { data } = await api.post(`/projects/${projectId}/generate-script`);
+      // Persist immediately to store + backend + localStorage
+      const newScript = data?.script || data;
+      if (newScript?.full_script) {
+        try {
+          localStorage.setItem(`script-${projectId}`, JSON.stringify(newScript));
+        } catch {}
+        setDraft({
+          selected_hook: newScript.selected_hook || "",
+          full_script: newScript.full_script || "",
+          cta_block: newScript.cta_block || "",
+        });
+      }
       onChange(data);
       toast.success("Script generated", { id: "gen-script" });
     } catch (err) {
@@ -68,6 +101,31 @@ export default function ScriptPanel({ projectId, script, canEdit, onChange }) {
   };
 
   if (!script) {
+    // Show skeleton while generating, don't unmount component
+    if (generating) {
+      return (
+        <div className="space-y-6 animate-pulse">
+          <div className="h-6 bg-zinc-800 rounded w-1/3" />
+          <div className="h-32 bg-zinc-800 rounded" />
+          <div className="h-6 bg-zinc-800 rounded w-1/4" />
+        </div>
+      );
+    }
+    // Try localStorage fallback before showing empty
+    let hasLocal = false;
+    try {
+      const saved = localStorage.getItem(`script-${projectId}`);
+      hasLocal = !!(saved && JSON.parse(saved)?.full_script);
+    } catch {}
+    if (hasLocal) {
+      // Will be picked up by useEffect on next render — show skeleton briefly
+      return (
+        <div className="border border-zinc-800 p-10 text-center rounded-sm">
+          <Loader2 size={18} className="animate-spin text-[#00E5FF] mx-auto mb-3" />
+          <p className="text-sm text-zinc-400">Restoring script…</p>
+        </div>
+      );
+    }
     return (
       <div className="border border-zinc-800 border-dashed p-10 text-center rounded-sm">
         <p className="text-sm text-zinc-400 mb-4">No script yet. Generate one to get started.</p>
@@ -78,7 +136,8 @@ export default function ScriptPanel({ projectId, script, canEdit, onChange }) {
             disabled={generating}
             className="inline-flex items-center gap-2 bg-[#00E5FF] text-black font-semibold text-sm px-4 py-2 rounded-sm hover:bg-[#33EFFF] disabled:opacity-60 transition-colors"
           >
-            {generating ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} strokeWidth={2} />}
+            <Loader2 size={14} className={generating ? "animate-spin" : "hidden"} />
+            <Sparkles size={14} strokeWidth={2} className={generating ? "hidden" : "block"} />
             {generating ? "Generating…" : "Generate Script"}
           </button>
         )}

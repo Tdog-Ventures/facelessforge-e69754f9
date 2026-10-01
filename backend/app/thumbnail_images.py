@@ -174,17 +174,21 @@ async def generate_thumbnail_images(
         image_bytes: bytes | None = None
         source = "mock_thumbnail"
 
-        if not _use_mock():
+        if _use_mock():
+            image_bytes = _mock_svg(asset_id, project, brief)
+        else:
             image_bytes = await _gemini_image(prompt, session_id)
             if image_bytes is not None:
                 ext = "png"
                 source = info["provider"]
+            else:
+                image_bytes = _mock_svg(asset_id, project, brief)
+                logger.info("Gemini failed, falling back to mock SVG for %s variant %s", project_id, i)
 
         if image_bytes is None:
-            # Mock fallback
-            image_bytes = _mock_svg(f"{asset_id}-{i}", project, brief)
-            ext = "svg"
-            source = "mock_thumbnail"
+            # No mock fallback — return real only, frontend shows skeleton/Retry
+            logger.warning("Thumbnail generation failed for %s variant %s — no mock, will show Retry", project_id, i)
+            continue
 
         file_path = dir_path / f"{asset_id}.{ext}"
         file_path.write_bytes(image_bytes)

@@ -164,7 +164,7 @@ export default function LandingPage() {
             </Link>
           </div>
 
-          <div className="mt-20 grid grid-cols-1 md:grid-cols-4 gap-4">
+          <div className="mt-20 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
             {[
               { icon: Sparkles, title: "Create", body: "DeepSeek writes hooks, scripts, scenes, and metadata tuned to your niche." },
               { icon: Layers, title: "Automate", body: "Every project moves through a visible 8-step production pipeline." },
@@ -185,7 +185,14 @@ export default function LandingPage() {
         </section>
 
         <footer className="border-t border-[rgba(59,130,246,0.15)] px-8 py-6 font-mono text-[11px] text-slate-500 uppercase tracking-widest">
-          FacelessForge · creator operations · navy theme · ethinx.solutions
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <span>FacelessForge · creator operations · navy theme · ethinx.solutions</span>
+            <div className="flex gap-4 normal-case tracking-normal">
+              <Link to="/privacy" className="hover:text-blue-400 normal-case">Privacy</Link>
+              <Link to="/terms" className="hover:text-blue-400 normal-case">Terms</Link>
+              <Link to="/license" className="hover:text-blue-400 normal-case">License</Link>
+            </div>
+          </div>
         </footer>
       </div>
     </div>
