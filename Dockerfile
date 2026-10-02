@@ -24,4 +24,4 @@ ENV PYTHONPATH=/app/backend:$PYTHONPATH
 EXPOSE 8080
 
 # Run uvicorn — exec form ENTRYPOINT fixes PID1 SIGTERM (user p12-13 audit)
-ENTRYPOINT ["uvicorn","main:app","--host","0.0.0.0","--port","8080","--workers","2"]
+ENTRYPOINT ["uvicorn","main:app","--host","0.0.0.0","--port","8080","--workers","1"]
