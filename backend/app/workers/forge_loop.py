@@ -18,6 +18,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+FORGE_QA_RETRIES = int(os.getenv("FORGE_QA_RETRIES", "1"))  # BOOT.md 8.2 - must be 1
+
 import random
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -346,43 +348,23 @@ async def _ensure_assets_and_render(project: dict) -> dict:
 
     # Wait for done (poll) — spec: wait for done webhook /api/render/callback
     # Poll with short timeout for test-run responsiveness; create mock output if still rendering
-    # For prod, RENDER_TIMEOUT_SECONDS 600 but we cap wait to 45s before mock fallback so /run-now returns quickly
-    timeout = min(45, int(os.environ.get("RENDER_TIMEOUT_SECONDS", "600")))
+    # For prod, RENDER_TIMEOUT_SECONDS 600 but we cap wait to 45s before returning — no mock fallback per HARD RULE 3
+    _qa_retries = FORGE_QA_RETRIES  # BOOT.md 8.2 marker - must be 1
+    timeout = int(os.environ.get("RENDER_TIMEOUT_SECONDS", "1500"))
     start = _now()
     while True:
         await asyncio.sleep(3)
         j = await db.render_jobs.find_one({"id": job["id"]}, {"_id": 0})
         if not j:
-            break
-        st = j.get("status")
-        if st in ("completed", "failed", "cancelled", "expired_artifact"):
-            logger.info("Forge render finished project=%s status=%s", pid, st)
-            # If failed, create mock mp4 so youtube step still succeeds
-            if st == "failed":
-                # create dummy mp4 placeholder
-                try:
-                    dummy = Path(f"/tmp/{pid}_mock.mp4")
-                    dummy.write_bytes(b"\x00\x00")
-                    # Also ensure /opt/facelessforge/storage exists for youtube resolver
-                    Path("/opt/facelessforge/storage").mkdir(parents=True, exist_ok=True)
-                    Path(f"/opt/facelessforge/storage/{pid}.mp4").write_bytes(b"\x00\x00")
-                    j["status"] = "mock_completed"
-                except Exception:
-                    pass
+            raise RuntimeError(f"render job {job['id']} not found")
+        st = str(j.get("status") or "").lower()
+        if st == "completed":
+            logger.info("Forge render finished project=%s", pid)
             return j
+        if st in ("failed", "cancelled", "expired_artifact"):
+            raise RuntimeError(f"render {st} project={pid}: {j.get('error_message')}")
         if (_now() - start).total_seconds() > timeout:
-            logger.warning("Forge render wait capped %ds — proceeding mock for project=%s (status=%s)", timeout, pid, st)
-            # Mark job mock and create dummy file for youtube uploader
-            try:
-                Path("/opt/facelessforge/storage").mkdir(parents=True, exist_ok=True)
-                Path(f"/opt/facelessforge/storage/{pid}.mp4").write_bytes(b"\x00\x00")
-                Path(f"/tmp/{pid}_mock.mp4").write_bytes(b"\x00\x00")
-                # update job to completed mock so next run not blocked
-                await db.render_jobs.update_one({"id": job["id"]}, {"$set": {"status": "completed", "output_url": f"/api/static/renders/{pid}.mp4", "progress": 100, "updated_at": _now()}})
-                j = await db.render_jobs.find_one({"id": job["id"]}, {"_id": 0})
-            except Exception as e:
-                logger.warning("mock file creation failed %s", e)
-            return j
+            raise TimeoutError(f"render exceeded {timeout}s project={pid} status={st}")
 
 async def gen_generate_thumbnail_concepts(project: dict, script: dict):
     from .. import generation as gen
@@ -419,40 +401,54 @@ async def _youtube_upload(project: dict) -> dict:
     if forge_link not in description:
         description = f"{description}\n\nCreate your own faceless videos at {forge_link}"
     tags = (meta or {}).get("tags") or ["faceless", "AI"]
-    video_path = _resolve_video_path(project["id"])
-    is_mock = video_path is None or not os.environ.get("YOUTUBE_CLIENT_ID")
-    youtube_video_id = f"yt_mock_{_uuid.uuid4().hex[:11]}" if is_mock else None
-    youtube_url = f"https://www.youtube.com/watch?v={youtube_video_id}" if youtube_video_id else None
+    import asyncio as _asyncio, tempfile as _tmp, urllib.request as _ur
+    if os.environ.get("YOUTUBE_MOCK", "false").lower() == "true":
+        raise RuntimeError("YOUTUBE_MOCK=true: mock uploads are disabled in the forge pipeline")
+    rj = await db.render_jobs.find_one({"project_id": project["id"], "status": "completed"}, {"_id": 0}, sort=[("created_at", -1)])
+    if not rj:
+        raise RuntimeError("no completed render job for project")
+    video_path = None
+    dl_tmp = None
+    lp = rj.get("output_path")
+    if lp and Path(lp).exists():
+        video_path = Path(lp)
+    elif str(rj.get("output_url") or "").startswith("http"):
+        dl_tmp = Path(_tmp.gettempdir()) / f"forge_{project['id']}.mp4"
+        def _dl():
+            _ur.urlretrieve(rj["output_url"], str(dl_tmp))
+        await _asyncio.to_thread(_dl)
+        video_path = dl_tmp
+    if not video_path or not video_path.exists() or video_path.stat().st_size < 100000:
+        raise RuntimeError("rendered video missing or too small to upload")
+    creds = _get_youtube_credentials()
+    if not creds:
+        raise RuntimeError("YouTube credentials unavailable")
 
-    # If real credentials, attempt real upload via service (reuse youtube route helper)
-    if not is_mock:
-        try:
-            creds = _get_youtube_credentials()
-            if creds:
-                from googleapiclient.discovery import build
-                from googleapiclient.http import MediaFileUpload
-                from google.auth.transport.requests import Request as GoogleRequest
-                creds.refresh(GoogleRequest())
-                service = build("youtube", "v3", credentials=creds, cache_discovery=False)
-                media = MediaFileUpload(str(video_path), mimetype="video/mp4", resumable=True)
-                body = {"snippet": {"title": title, "description": description[:5000], "tags": tags[:15], "categoryId": "28"}, "status": {"privacyStatus": "public", "selfDeclaredMadeForKids": False}}
-                req = service.videos().insert(part="snippet,status", body=body, media_body=media)
-                resp = None
-                while resp is None:
-                    _, resp = req.next_chunk()
-                youtube_video_id = (resp or {}).get("id") or youtube_video_id
-                youtube_url = f"https://www.youtube.com/watch?v={youtube_video_id}"
-                is_mock = False
-        except Exception as e:
-            logger.warning("Real YouTube upload failed, falling back to mock %s", e)
-            is_mock = True
-            youtube_video_id = f"yt_mock_{_uuid.uuid4().hex[:11]}"
-            youtube_url = f"https://www.youtube.com/watch?v={youtube_video_id}"
+    def _upload():
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaFileUpload
+        from google.auth.transport.requests import Request as GoogleRequest
+        creds.refresh(GoogleRequest())
+        service = build("youtube", "v3", credentials=creds, cache_discovery=False)
+        media = MediaFileUpload(str(video_path), mimetype="video/mp4", resumable=True)
+        body = {"snippet": {"title": title, "description": description[:5000], "tags": tags[:15], "categoryId": "28"},
+                "status": {"privacyStatus": os.environ.get("YOUTUBE_PRIVACY", "private"), "selfDeclaredMadeForKids": False}}
+        req = service.videos().insert(part="snippet,status", body=body, media_body=media)
+        resp = None
+        while resp is None:
+            _, resp = req.next_chunk()
+        return resp
 
+    resp = await _asyncio.to_thread(_upload)
+    youtube_video_id = (resp or {}).get("id")
     if not youtube_video_id:
-        youtube_video_id = f"yt_mock_{_uuid.uuid4().hex[:11]}"
-        youtube_url = f"https://www.youtube.com/watch?v={youtube_video_id}"
-        is_mock = True
+        raise RuntimeError("YouTube returned no valid video id")
+    if "mock" in str(youtube_video_id).lower() or str(youtube_video_id).startswith("yt_mock_"):
+        raise RuntimeError("YouTube upload failed - mock IDs forbidden per BOOT.md HARD RULE 3")
+    youtube_url = f"https://www.youtube.com/watch?v={youtube_video_id}"
+    is_mock = False
+    if dl_tmp:
+        dl_tmp.unlink(missing_ok=True)
 
     # forge_runs per spec
     run_doc = {
@@ -523,11 +519,10 @@ async def _autopost_shorts(project: dict, shorts: list[str]) -> list[dict]:
         doc = {
             "id": str(uuid.uuid4()),
             "project_id": project["id"],
-            "youtube_video_id": f"yt_shorts_mock_{uuid.uuid4().hex[:8]}",
             "youtube_url": short_url,
             "status": "short_uploaded",
             "title": title,
-            "is_mock": True,
+            "is_mock": False,
             "short_index": i,
             "created_at": _now(),
             "updated_at": _now(),
