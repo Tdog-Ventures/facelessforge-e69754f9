@@ -19,7 +19,7 @@ def build_manifest(project: dict, job: dict, video_path: Path, thumb_path: Path 
     # hashes
     vh = file_hash(video_path) if video_path and video_path.exists() else "sha256:missing"
     th = file_hash(thumb_path) if thumb_path and thumb_path.exists() else None
-    mh = hashlib.sha256(json.dumps(metadata or {}, sort_keys=True).encode()).hexdigest()
+    mh = hashlib.sha256(json.dumps(metadata or {}, sort_keys=True, default=str).encode()).hexdigest()
     mh = f"sha256:{mh}" if metadata else None
     disc = disclosure or project.get("disclosure_decision") or {"contains_synthetic_media": True, "is_altered": False, "rationale": "ElevenLabs voice is synthetic, script/captions are assistance"}
     # Normalize

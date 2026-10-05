@@ -38,9 +38,13 @@ async def lifespan(app: FastAPI):
         print(f"startup indexes failed: {e}")
     # scheduler
     try:
-        from app.workers.forge_loop import start_scheduler, ensure_niches
-        await ensure_niches()
-        start_scheduler()
+        import os as _os
+        if _os.getenv("FORGE_SCHEDULER_ENABLED", "true").lower() not in ("1", "true"):
+            print("scheduler start skipped: FORGE_SCHEDULER_ENABLED is false")
+        else:
+            from app.workers.forge_loop import start_scheduler, ensure_niches
+            await ensure_niches()
+            start_scheduler()
     except Exception as e:
         print(f"scheduler start failed: {e}")
     # recover orphaned render jobs from crashes/restarts
@@ -178,11 +182,12 @@ try:
     @clip_router.post("/clip")
     async def clip_shim(body: dict):
         # shim for spec: POST /api/videoforge/clip {youtube_url, clip to 3 shorts}
+        # Shorts clipping is NOT implemented. The previous stub returned fabricated
+        # https://www.youtube.com/shorts/mock_... URLs, which is a mock fallback and is
+        # forbidden by BOOT.md HARD RULE 3. Fail loudly instead of returning fake clips.
+        from fastapi import HTTPException
         url = body.get("youtube_url") or body.get("url") or ""
-        base = url.split("v=")[-1][:11] if "v=" in url else "mock"
-        import uuid
-        shorts = [f"https://www.youtube.com/shorts/mock_{base}_{i}_{uuid.uuid4().hex[:4]}" for i in range(1,4)]
-        return {"clips": shorts, "shorts": shorts, "youtube_url": url}
+        raise HTTPException(status_code=501, detail="VideoForge Shorts clipping is not implemented - mock shorts URLs forbidden per BOOT.md HARD RULE 3")
     # avoid duplicate if already exists
     existing = [r.path for r in app.routes]
     if "/api/videoforge/clip" not in existing:

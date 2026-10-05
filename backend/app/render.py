@@ -2011,7 +2011,8 @@ async def _run_render(job_id: str, project_id: str):
             # Metadata hash
             metadata_hash = None
             if metadata:
-                metadata_hash = f"sha256:{_hl.sha256(json.dumps(metadata, sort_keys=True).encode()).hexdigest()}"
+                # default=str: BSON datetimes in metadata_packages are not JSON-native
+                metadata_hash = f"sha256:{_hl.sha256(json.dumps(metadata, sort_keys=True, default=str).encode()).hexdigest()}"
             manifest = build_manifest(project, {"id": job_id, "duration": duration}, final, thumb_path, metadata, project.get("disclosure_decision"))
             # Deterministic checks
             qa = run_checks(final, manifest, duration)

@@ -197,11 +197,9 @@ async def _ensure_assets_and_render(project: dict) -> dict:
         for sc in scenes[:5]:
             try:
                 q = (sc.get("search_terms") or ["nature cinematic"])[0]
-                # Fast path: use mock results directly for forge auto-post
-                if os.environ.get("FORGE_MOCK_STOCK", "true").lower() in ("1","true"):
-                    # Empty URLs -> render falls back to caption frame instantly, no network
-                    mock_res = {"title": f"Mock {q}", "media_type": "stock_video", "source": "pexels", "external_id": f"mock_{uuid.uuid4().hex[:6]}", "preview_url": "", "download_url": "", "tags": [q]}
-                    r = mock_res
+                # Mock stock path removed: BOOT.md HARD RULE 3 forbids mock fallbacks
+                if os.environ.get("FORGE_MOCK_STOCK", "false").lower() in ("1","true"):
+                    raise RuntimeError("FORGE_MOCK_STOCK is enabled - mock stock results forbidden per BOOT.md HARD RULE 3")
                 else:
                     # FIX 4: paginated Pexels min 20 unique, per_page 40, 60s dedup window
                     # Track last_used clip_id timestamps to avoid repeat within 60s
@@ -257,7 +255,7 @@ async def _ensure_assets_and_render(project: dict) -> dict:
                         if r and r.get("external_id"):
                             _last_used[str(r.get("external_id"))] = now_ts
                     except asyncio.TimeoutError:
-                        r = {"title": f"Mock {q}", "media_type": "stock_video", "source": "mock", "external_id": f"mock_{uuid.uuid4().hex[:6]}", "preview_url": "", "download_url": "", "tags": [q]}
+                        raise RuntimeError(f"Stock search timed out for '{q}' - mock stock results forbidden per BOOT.md HARD RULE 3") from None
                     if not r:
                         continue
                 doc = {
@@ -283,9 +281,9 @@ async def _ensure_assets_and_render(project: dict) -> dict:
                 except Exception:
                     pass
             except Exception as e:
-                logger.debug("auto-attach scene %s failed %s", sc.get("id"), e)
+                raise RuntimeError(f"Stock auto-attach failed for scene {sc.get('id')}: {e}"[:190]) from e
     except Exception as e:
-        logger.warning("auto-attach failed %s", e)
+        raise RuntimeError(f"Stock auto-attach failed: {e}"[:190]) from e
 
     # Thumbnail: generate concepts + images, auto-select
     try:
@@ -322,21 +320,15 @@ async def _ensure_assets_and_render(project: dict) -> dict:
         try:
             vo_payload = await asyncio.wait_for(tts_service.generate_voiceover(text=text, voice_style="narrative", project_id=pid, asset_id=vo_id, scene_id=None), timeout=120)
         except asyncio.TimeoutError:
-            logger.warning("voiceover timeout — using mock")
-            raise Exception("voiceover_timeout_mock")
+            raise RuntimeError("Voiceover generation timed out after 120s - mock voiceover forbidden per BOOT.md HARD RULE 3") from None
         vo_payload["created_at"] = _now()
         vo_payload["updated_at"] = _now()
         vo_payload["status"] = "selected"
         await db.assets.insert_one(vo_payload)
         await db.projects.update_one({"id": pid}, {"$set": {"selected_voiceover_asset_id": vo_id}})
     except Exception as e:
-        logger.warning("voiceover failed %s — inserting mock voiceover", e)
-        try:
-            mock_vo = {"id": str(uuid.uuid4()), "project_id": pid, "asset_type": "voiceover_audio", "source": "mock_tts", "mock": True, "preview_url": f"/api/static/audio/{pid}_mock.mp3", "status": "selected", "created_at": _now(), "updated_at": _now()}
-            await db.assets.insert_one(mock_vo)
-            await db.projects.update_one({"id": pid}, {"$set": {"selected_voiceover_asset_id": mock_vo["id"]}})
-        except Exception:
-            pass
+        logger.error("voiceover failed: %s", e)
+        raise RuntimeError(f"Voiceover failed - mock voiceover forbidden per BOOT.md HARD RULE 3: {e}"[:190]) from e
 
     # Queue render — POST /render/full/{id} equivalent
     try:
@@ -443,7 +435,8 @@ async def _youtube_upload(project: dict) -> dict:
     youtube_video_id = (resp or {}).get("id")
     if not youtube_video_id:
         raise RuntimeError("YouTube returned no valid video id")
-    if "mock" in str(youtube_video_id).lower() or str(youtube_video_id).startswith("yt_mock_"):
+    # substring check covers every fabricated-ID form, whatever its prefix
+    if "mock" in str(youtube_video_id).lower():
         raise RuntimeError("YouTube upload failed - mock IDs forbidden per BOOT.md HARD RULE 3")
     youtube_url = f"https://www.youtube.com/watch?v={youtube_video_id}"
     is_mock = False
@@ -495,10 +488,8 @@ async def _videoforge_clip(youtube_url: str) -> list[str]:
     except Exception as e:
         logger.debug("videoforge clip failed %s", e)
     if not shorts:
-        # mock 3 shorts derived from youtube_url
-        base = youtube_url.split("v=")[-1][:11] if "v=" in youtube_url else "mock"
-        shorts = [f"https://www.youtube.com/shorts/mock_{base}_{i}" for i in range(1, 4)]
-        logger.info("VideoForge mock clips %s", shorts)
+        # Mock Shorts removed: fabricating shorts/mock_ URLs is forbidden by BOOT.md HARD RULE 3
+        raise RuntimeError("VideoForge returned no Shorts - mock Shorts URLs forbidden per BOOT.md HARD RULE 3")
     return shorts[:3]
 
 async def _autopost_shorts(project: dict, shorts: list[str]) -> list[dict]:

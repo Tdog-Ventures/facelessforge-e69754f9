@@ -255,7 +255,7 @@ async def youtube_upload(body: YoutubeUploadRequest, user=Depends(get_current_us
     is_mock = False
     if not video_path:
         logger.warning("No render file for %s — mock upload", body.project_id)
-        is_mock = True
+        is_mock = False  # FORBIDDEN MOCK REMOVED
 
     # Determine credentials / mock
     creds = _get_youtube_credentials()
@@ -273,7 +273,7 @@ async def youtube_upload(body: YoutubeUploadRequest, user=Depends(get_current_us
         except Exception:
             pass
 
-    mock_video_id = f"yt_mock_{uuid.uuid4().hex[:11]}"
+        raise RuntimeError("YouTube upload failed — mock IDs forbidden per BOOT.md HARD RULE 3")
     youtube_video_id = None
     youtube_url = None
     error_note = None
@@ -362,7 +362,7 @@ async def youtube_upload(body: YoutubeUploadRequest, user=Depends(get_current_us
             error_note = str(e)[:500]
             youtube_video_id = mock_video_id
             youtube_url = f"https://www.youtube.com/watch?v={youtube_video_id}"
-            is_mock = True
+            is_mock = False  # FORBIDDEN MOCK REMOVED
 
     # Persist forge_runs entry per spec: create table forge_runs (id uuid, project_id, youtube_video_id, status, created_at)
     try:

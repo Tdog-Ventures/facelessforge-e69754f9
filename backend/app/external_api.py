@@ -473,7 +473,9 @@ async def external_render_video(
                         import uuid as _uuid
 
                         _mock = not _creds or os.getenv("YOUTUBE_MOCK", "false").lower() in ("1", "true")
-                        _vid = f"yt_mock_{_uuid.uuid4().hex[:11]}" if _mock else None
+                        if _mock:
+                            raise RuntimeError("YouTube upload failed — no credentials or mock mode, mock IDs forbidden per BOOT.md HARD RULE 3")
+                        _vid = None
                         _url = f"https://www.youtube.com/watch?v={_vid}" if _vid else None
                         if not _mock:
                             try:
@@ -497,9 +499,7 @@ async def external_render_video(
                                 logger.info("auto_upload YouTube success pid=%s vid=%s", pid, _vid)
                             except Exception as _e:
                                 logger.warning("auto_upload YouTube failed pid=%s: %s", pid, _e)
-                                _vid = f"yt_mock_{_uuid.uuid4().hex[:11]}"
-                                _url = f"https://www.youtube.com/watch?v={_vid}"
-                                _mock = True
+                                raise RuntimeError(f"YouTube upload failed — mock IDs forbidden per BOOT.md HARD RULE 3: {_e}"[:190])
                         # persist forge_runs
                         try:
                             await _db.forge_runs.insert_one(
@@ -520,7 +520,33 @@ async def external_render_video(
                         except Exception as _e:
                             logger.warning("auto_upload forge_runs insert failed %s", _e)
                     except Exception as _e:
-                        logger.warning("auto_upload task error %s", _e)
+                        # HARD RULE 3: failures must be stored in forge_runs.error, not only logged
+                        logger.error("auto_upload task failed pid=%s job=%s: %s", pid, jid, _e)
+                        try:
+                            from .db import get_db as _get_db_err
+                            await _get_db_err().forge_runs.update_one(
+                                {"job_id": jid},
+                                {
+                                    "$set": {
+                                        "status": "failed",
+                                        "error": str(_e)[:500],
+                                        "is_mock": False,
+                                        "auto_upload": True,
+                                        "updated_at": datetime.now(timezone.utc),
+                                    },
+                                    "$setOnInsert": {
+                                        "id": str(uuid.uuid4()),
+                                        "project_id": pid,
+                                        "youtube_video_id": None,
+                                        "youtube_url": None,
+                                        "job_id": jid,
+                                        "created_at": datetime.now(timezone.utc),
+                                    },
+                                },
+                                upsert=True,
+                            )
+                        except Exception as _db_e:
+                            logger.error("auto_upload could not record forge_runs.error: %s", _db_e)
                     return
                 if st in ("failed", "cancelled", "expired_artifact"):
                     logger.info("auto_upload: job %s ended with %s, no upload", jid, st)
