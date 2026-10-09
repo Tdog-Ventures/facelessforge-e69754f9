@@ -17,7 +17,7 @@ const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 const PROMOTABLE = new Set([...ACTIVE_STATES, "completed"]);
 
 export default function RenderPanel({
-  projectId, project, script, scenes, metadata, assets, canEdit, onChange,
+  projectId, project, script, scenes, metadata, assets, timing, canEdit, onChange,
 }) {
   const [preflight, setPreflight] = useState(null);
   const [jobs, setJobs] = useState([]);
@@ -210,6 +210,30 @@ export default function RenderPanel({
 
   return (
     <div className="space-y-6">
+      {timing && (
+        <div className="border border-[#00E5FF]/30 bg-[#00E5FF]/5 rounded-sm p-4" data-testid="timing-contract">
+          <div className="font-mono text-[10px] uppercase tracking-widest text-[#00E5FF] mb-3">
+            Selected duration controls the final video
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+            <div><span className="block text-zinc-500 text-xs">Final</span>{Number(timing.target_seconds).toFixed(1)}s</div>
+            <div><span className="block text-zinc-500 text-xs">Intro</span>{Number(timing.intro_seconds).toFixed(1)}s</div>
+            <div><span className="block text-zinc-500 text-xs">Narration + scenes</span>{Number(timing.narration_seconds).toFixed(1)}s</div>
+            <div><span className="block text-zinc-500 text-xs">Voiceover</span>{timing.voiceover_seconds ? `${Number(timing.voiceover_seconds).toFixed(1)}s` : "Not generated"}</div>
+          </div>
+          {(!timing.scenes_match || timing.voiceover_action === "rebuild") && (
+            <p className="font-mono text-[10px] text-amber-300 mt-3">
+              {!timing.scenes_match && <>Stored scene timing will be repaired to {Number(timing.narration_seconds).toFixed(1)}s. </>}
+              {timing.voiceover_action === "rebuild" && "Regenerate the script and voiceover before rendering."}
+            </p>
+          )}
+          {timing.voiceover_action === "tempo_fit" && (
+            <p className="font-mono text-[10px] text-zinc-400 mt-3">
+              Voiceover is within 5% and will be tempo-fitted to the narration budget.
+            </p>
+          )}
+        </div>
+      )}
       <PrereqChecklist preflight={preflight} onRefresh={refreshAll} />
 
       {canEdit && (

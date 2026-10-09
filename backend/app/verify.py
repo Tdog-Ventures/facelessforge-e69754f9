@@ -30,7 +30,8 @@ from PIL import Image
 # ---------------------------------------------------------------------------
 # Constitution constants (Section 6 — Verification)
 # ---------------------------------------------------------------------------
-MAX_DURATION_DIFF = 2.0          # check a: |video − narration| ≤ 2s
+MAX_DURATION_DIFF = 2.0          # legacy fallback when no project target is supplied
+EXPECTED_DURATION_TOLERANCE = 0.25
 SILENCE_NOISE_DB = -35           # check b: silencedetect threshold
 SILENCE_MIN_DURATION = 2.0      # check b: minimum silence gap to flag
 SILENCE_SKIP_PCT = 0.05          # check b: ignore gaps before 5% runtime
@@ -207,24 +208,32 @@ def _parse_volumedetect_mean(stderr_text: str) -> Optional[float]:
 # Check a: Timing — |video_duration − total_narration_duration| ≤ 2s
 # ---------------------------------------------------------------------------
 
-async def check_a_timing(video_path: str, narration_path: str) -> dict[str, Any]:
+async def check_a_timing(
+    video_path: str,
+    narration_path: str,
+    expected_duration: Optional[float] = None,
+) -> dict[str, Any]:
     """
     Constitution §6a:
     |video_duration − total_narration_duration| ≤ 2 seconds.
     """
     video_dur = await ffprobe_video_duration(video_path)
     narr_dur = await ffprobe_duration(narration_path)
-    diff = abs(video_dur - narr_dur)
-    passed = diff <= MAX_DURATION_DIFF
+    authority = float(expected_duration) if expected_duration is not None else narr_dur
+    threshold = EXPECTED_DURATION_TOLERANCE if expected_duration is not None else MAX_DURATION_DIFF
+    diff = abs(video_dur - authority)
+    passed = diff <= threshold
 
     return {
         "check": "a",
         "name": "timing",
         "video_duration_s": round(video_dur, 2),
         "narration_duration_s": round(narr_dur, 2),
+        "expected_duration_s": round(authority, 2),
+        "authority": "selected_duration" if expected_duration is not None else "narration",
         "diff_s": round(diff, 2),
         "passed": passed,
-        "threshold_s": MAX_DURATION_DIFF,
+        "threshold_s": threshold,
     }
 
 
@@ -717,6 +726,7 @@ async def verify_render(
     local_fallback_path: Optional[str] = None,
     expect_captions: Optional[bool] = None,
     aspect: Optional[str] = None,
+    expected_duration: Optional[float] = None,
 ) -> dict[str, Any]:
     """
     Constitution §6 — Full verification suite.
@@ -729,6 +739,8 @@ async def verify_render(
         expect_captions: True if subtitles were burned into the render, False if
             not, None to keep the legacy "captions must be present" behaviour.
         aspect: "9:16"/"1:1"/"16:9" (or None) so check f inspects the correct edges.
+        expected_duration: User-selected final runtime; when supplied it is the
+            timing authority rather than the raw narration file.
 
     Returns:
         A dict with keys:
@@ -777,7 +789,7 @@ async def verify_render(
         # a — timing (only if narration provided)
         if narration_path and Path(narration_path).exists():
             try:
-                checks.append(await check_a_timing(video_path, narration_path))
+                checks.append(await check_a_timing(video_path, narration_path, expected_duration))
             except Exception as e:
                 checks.append({
                     "check": "a",

@@ -119,7 +119,7 @@ export default function ProjectDetailPage() {
     );
   }
 
-  const { project, script, scenes, metadata, assets, render_job, share } = view;
+  const { project, script, scenes, metadata, assets, render_job, share, timing } = view;
 
   return (
     <AppShell>
@@ -331,6 +331,7 @@ export default function ProjectDetailPage() {
               scenes={scenes}
               metadata={metadata}
               assets={assets}
+              timing={timing}
               canEdit={canEdit}
               onChange={setView}
             />

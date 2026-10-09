@@ -57,6 +57,7 @@ from .storage import get_storage
 from .subtitles import write_srt, write_srt_from_cues, write_srt_from_words
 from .transcribe import transcribe_words
 from .visual_query import truncate_words
+from .timing import TimingContract, build_timing_status, normalize_scene_timeline
 from . import stock as stock_service
 from .grounding import CLIENT_VISUAL_TYPES, validate_commercial_grounding
 from .scoring import commercial_scorecard
@@ -138,10 +139,10 @@ async def _probe_duration_seconds(path: Path) -> Optional[float]:
         return None
 
 
-def _build_subclip_plan(scenes: list[dict], audio_duration: Optional[float]) -> list[dict]:
+def _build_subclip_plan(scenes: list[dict], timeline_duration: Optional[float]) -> list[dict]:
     """Return a per-scene plan describing how many sub-clips to render and
-    each sub-clip's duration. When ``audio_duration`` is provided, the total
-    video time is stretched/contracted to match the voiceover exactly.
+    each sub-clip's duration. ``timeline_duration`` is derived from the
+    selected project duration, never from measured voiceover length.
 
     Each scene entry: ``{"scene_index": i, "subclips": [seconds, ...]}``.
     """
@@ -150,8 +151,8 @@ def _build_subclip_plan(scenes: list[dict], audio_duration: Optional[float]) -> 
 
     planned = [_scene_dur(s) for s in scenes]
     planned_total = sum(planned)
-    if audio_duration and audio_duration > 1.0 and planned_total > 1.0:
-        scale = audio_duration / planned_total
+    if timeline_duration and timeline_duration > 1.0 and planned_total > 1.0:
+        scale = timeline_duration / planned_total
     else:
         scale = 1.0
     plan: list[dict] = []
@@ -162,16 +163,14 @@ def _build_subclip_plan(scenes: list[dict], audio_duration: Optional[float]) -> 
         else:
             import math
             n = max(2, math.ceil(target / MAX_SUBCLIP_SECONDS))
-            # 3x5 images fix: ensure 3 cuts per section when target ~60s yields 3 images
-            # xfade 0.3s overlap: S = (duration + (n-1)*0.3)/n  e.g. 60s -> (60+0.6)/3=20.2s per clip
-            xfade = 0.3
-            even = (target + (n - 1) * xfade) / n if n == 3 else target / n
+            even = target / n
             # Avoid runt clips
             if even < MIN_SUBCLIP_SECONDS:
                 n = max(2, int(target // MIN_SUBCLIP_SECONDS) or 2)
-                even = (target + (n - 1) * xfade) / n if n == 3 else target / n
-            subclips = [round(even, 3)] * n
-        plan.append({"scene_index": i, "subclips": subclips, "target": round(target, 3)})
+                even = target / n
+            subclips = [round(even, 6)] * (n - 1)
+            subclips.append(round(target - sum(subclips), 6))
+        plan.append({"scene_index": i, "subclips": subclips, "target": round(target, 6)})
     return plan
 
 
@@ -272,7 +271,24 @@ def validate_prerequisites(project: dict, script: dict | None,
     _add("voiceover", "Voiceover ready (full or per-scene)", has_voice,
          "Generate a full-script voiceover, or scene voiceovers.")
 
-    # VO is master timeline: check VO vs scenes total duration mismatch — warn only, don't block (VO is master, video will be trimmed/padded)
+    voice_for_timing = full_voice
+    if not voice_for_timing and scene_voices:
+        latest_by_scene: dict[str, dict] = {}
+        for voice in scene_voices:
+            scene_id = voice.get("scene_id")
+            if scene_id not in latest_by_scene or str(voice.get("created_at") or "") > str(latest_by_scene[scene_id].get("created_at") or ""):
+                latest_by_scene[scene_id] = voice
+        voice_for_timing = {"duration": sum(float(voice.get("duration") or 0) for voice in latest_by_scene.values())}
+    timing_status = build_timing_status(project=project, scenes=scenes, voiceover=voice_for_timing)
+    _add(
+        "timing",
+        "Voiceover fits selected duration",
+        timing_status["voiceover_action"] in {"ready", "tempo_fit"},
+        "Regenerate the script and voiceover; automatic tempo fitting is limited to 5%.",
+    )
+
+    # Report stored drift only. The selected duration remains authoritative and
+    # stale scene timestamps are repaired before rendering.
     try:
         vo_duration = 0
         if full_voice and full_voice.get("duration"):
@@ -288,8 +304,8 @@ def validate_prerequisites(project: dict, script: dict | None,
         target = int(project.get("target_duration", 0) or 0)
         mismatch = abs(vo_duration - scenes_total) if vo_duration and scenes_total else 0
         if vo_duration and scenes_total and mismatch > 5:
-            _add("duration_match", f"VO vs Video mismatch: VO {vo_duration:.1f}s vs Video {scenes_total:.1f}s (Δ {mismatch:.1f}s) — video will be trimmed to VO", True,
-                 f"Target {target}s, VO {vo_duration:.1f}s, Scenes {scenes_total:.1f}s — VO is master, video will match VO")
+            _add("duration_match", f"Stored scenes need timing repair: VO {vo_duration:.1f}s vs Scenes {scenes_total:.1f}s (Δ {mismatch:.1f}s)", True,
+                 f"Target {target}s remains authoritative; scenes are normalized during render")
         else:
             _add("duration_match", "VO and video durations aligned", True)
     except Exception:
@@ -317,6 +333,7 @@ def validate_prerequisites(project: dict, script: dict | None,
         "selected_thumbnail_asset_id": (sel_thumb or {}).get("id"),
         "selected_voiceover_asset_id": (full_voice or {}).get("id"),
         "scene_voiceover_count": len(scene_voices),
+        "timing": timing_status,
     }
 
 
@@ -1576,13 +1593,29 @@ async def _run_render(job_id: str, project_id: str):
         metadata = await db.metadata_packages.find_one({"project_id": project_id}, {"_id": 0})
         assets = await db.assets.find({"project_id": project_id}, {"_id": 0}).to_list(500)
 
+        timing = TimingContract.from_project(project)
+        scenes = normalize_scene_timeline(
+            scenes,
+            narration_frames=timing.narration_frames,
+            fps=timing.fps,
+        )
+        for scene in scenes:
+            if scene.get("id"):
+                await db.scenes.update_one(
+                    {"id": scene["id"], "project_id": project_id},
+                    {"$set": {
+                        key: scene[key] for key in (
+                            "scene_number", "start_frame", "end_frame", "duration_frames",
+                            "start_time", "end_time", "duration",
+                        )
+                    }},
+                )
+
         check = validate_prerequisites(project, script, scenes, metadata, assets)
         if not check["ok"]:
             raise RuntimeError("Missing requirements: " + ", ".join(check["issues"][:5]))
         commercial = project.get("production_mode") == "commercial_ad"
-        # Commercial ads are exact-duration creative.  There is no inherited
-        # YouTube title card before the supplied 15-second narrative.
-        intro_duration = 0.0 if commercial else INTRO_DURATION_SECONDS
+        intro_duration = timing.intro_seconds
 
         sel_thumb = next((a for a in assets if a["id"] == project.get("selected_thumbnail_asset_id")), None)
         if commercial and not sel_thumb:
@@ -1608,22 +1641,11 @@ async def _run_render(job_id: str, project_id: str):
         if audio_path and audio_path.exists():
             audio_duration = await _probe_duration_seconds(audio_path)
 
-        # Hard limit: total duration <600s (10min) per prompt; split or cap to avoid 2GB mux buffer
-        # Check decoded VO duration; if >600 raise informative error (caller can split project)
-        if audio_duration and audio_duration > 600:
-            logger.warning("RENDER_DURATION_LIMIT: audio_duration=%.2fs exceeds 600s cap for project %s — truncating to 600s", audio_duration, project_id)
-            # Cap to 600s by trimming VO to 600s (ffmpeg will trim via -t on final mux via -shortest + -fs)
-            # Alternatively raise: but we allow truncated render to meet acceptance
-            audio_duration = 600.0
-        # Also estimate video total (intro + plan) before plan built; if audio not available, estimate from scenes
-        est_total = (audio_duration or sum(max(2.0, float((s.get("end_time") or 0) - (s.get("start_time") or 0)) or 4.0) for s in scenes) + intro_duration)
-        if est_total > 600:
-            logger.warning("RENDER_DURATION_LIMIT: estimated total %.2fs >600s for project %s — video will be trimmed via -shortest/-fs 1900M", est_total, project_id)
-
-        # Build per-scene sub-clip plan first (cuts every ≤6s, total = audio
-        # length) so each scene resolves one distinct visual per sub-clip.
+        # Build the visual plan from the selected narration budget. Long videos
+        # remain valid; ffmpeg and storage capacity, not a hidden 600s cap, are
+        # the operational limits.
         ordered_scenes = sorted(scenes, key=lambda x: x.get("scene_number", 0))
-        plan = _build_subclip_plan(ordered_scenes, audio_duration)
+        plan = _build_subclip_plan(ordered_scenes, timing.narration_seconds)
         plan_by_idx = {p["scene_index"]: p for p in plan}
 
         await _set_job(job_id, current_step="preparing_scenes", progress=35)
@@ -1880,6 +1902,17 @@ async def _run_render(job_id: str, project_id: str):
         music_path = _resolve_music_bed()
         use_music = bool(music_path and music_path.exists()
                          and os.environ.get("RENDER_MUSIC_BED", "true").lower() in ("1", "true", "yes"))
+        final_duration = timing.target_seconds
+        narration_duration = timing.narration_seconds
+        intro_delay_ms = round(timing.intro_seconds * 1000)
+        tempo_ratio = (audio_duration / narration_duration) if audio_duration else 1.0
+        if audio_duration and abs(tempo_ratio - 1.0) > 0.05:
+            raise RuntimeError(
+                f"Voiceover is {audio_duration:.2f}s but the narration budget is "
+                f"{narration_duration:.2f}s. Regenerate the script and voiceover before rendering."
+            )
+        voice_fade_start = max(0.0, narration_duration - 2.0)
+        final_fade_start = max(0.0, final_duration - 2.0)
 
         # FIX MUX FAILED 2e9 — 2026-08-25: simplify audio to avoid 2GB aloop buffer + 1-pass loudnorm
         # Previous: [1:a]loudnorm + [2:a]aloop:size=2e9 + afeade + sidechaincompress + amix:duration=first + loudnorm
@@ -1891,9 +1924,6 @@ async def _run_render(job_id: str, project_id: str):
         # 4. Hard limit total duration <600s (checked above)
         if audio_path and audio_path.exists() and use_music:
             vo_dur = audio_duration or (await _probe_duration_seconds(audio_path)) or 0.0
-            # video duration for fade — prefer burned_out probe, fallback to vo_dur
-            burned_dur = await _probe_duration_seconds(burned_out) or vo_dur or 0.0
-            fade_start = max(0.0, burned_dur - 2.0) if burned_dur else max(0.0, vo_dur - 2.0)
             # Vol duck: bg at 0.126 (~ -18dB sidechain) while VO active, passthrough after. Filter removes aloop/size=2e9 entirely;
             # -stream_loop on input already loops bg, amix shortest trims to video length.
             # Spec: Music must duck under voice - not drown it. Fix: -18dB sidechain when voice plays (0.126 = -18dB)
@@ -1903,54 +1933,48 @@ async def _run_render(job_id: str, project_id: str):
                 "-i", str(audio_path),
                 "-stream_loop", "-1", "-i", str(music_path),
                 "-filter_complex",
-                f"[1:a]aformat=sample_fmts=fltp:channel_layouts=stereo,afade=t=out:st={fade_start:.2f}:d=2[voa];"
-                f"[2:a]aformat=sample_fmts=fltp:channel_layouts=stereo,volume=0.126:enable='between(t,0,{vo_dur:.2f})',afade=t=out:st={fade_start:.2f}:d=2[bgduck];"
-                f"[bgduck][voa]amix=inputs=2:duration=shortest:dropout_transition=0:normalize=0[aout]",
+                f"[1:a]atempo={tempo_ratio:.8f},atrim=duration={narration_duration:.6f},afade=t=out:st={voice_fade_start:.6f}:d=2,adelay={intro_delay_ms}:all=1,apad,atrim=duration={final_duration:.6f},aformat=sample_fmts=fltp:channel_layouts=stereo[voa];"
+                f"[2:a]atrim=duration={final_duration:.6f},aformat=sample_fmts=fltp:channel_layouts=stereo,volume=0.126,afade=t=out:st={final_fade_start:.6f}:d=2[bgduck];"
+                f"[bgduck][voa]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,atrim=duration={final_duration:.6f}[aout]",
                 "-map", "0:v", "-map", "[aout]",
                 "-c:v", "copy",
                 "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
                 "-max_muxing_queue_size", "4096",
-                "-shortest",
+                "-t", f"{final_duration:.6f}",
                 "-fs", "1900M",
                 "-movflags", "+faststart",
                 str(final),
             ]
         elif audio_path and audio_path.exists():
             # Voiceover only — no loudnorm in filter (already normalized via _normalize_vo_track); add fade only
-            burned_dur = await _probe_duration_seconds(burned_out) or audio_duration or 0.0
-            fade_start = max(0.0, burned_dur - 2.0) if burned_dur else 0.0
             cmd = [
                 FFMPEG_BIN, "-y",
                 "-i", str(burned_out),
                 "-i", str(audio_path),
                 "-filter_complex",
-                f"[1:a]aformat=sample_fmts=fltp:channel_layouts=stereo,afade=t=out:st={fade_start:.2f}:d=2[aout]",
+                f"[1:a]atempo={tempo_ratio:.8f},atrim=duration={narration_duration:.6f},afade=t=out:st={voice_fade_start:.6f}:d=2,adelay={intro_delay_ms}:all=1,apad,atrim=duration={final_duration:.6f},aformat=sample_fmts=fltp:channel_layouts=stereo[aout]",
                 "-map", "0:v", "-map", "[aout]",
                 "-c:v", "copy",
                 "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
                 "-max_muxing_queue_size", "4096",
-                "-shortest",
+                "-t", f"{final_duration:.6f}",
                 "-fs", "1900M",
                 "-movflags", "+faststart",
                 str(final),
             ]
         elif use_music:
             # Music only — volume 0.126 constant (-18dB), no loudnorm in graph (post-pass will handle)
-            burned_dur = await _probe_duration_seconds(burned_out) or 0.0
-            music_dur = await _probe_duration_seconds(music_path) or burned_dur or 0.0
-            fade_ref = burned_dur if burned_dur > 0 else music_dur
-            fade_start = max(0.0, fade_ref - 2.0) if fade_ref > 0 else 0.0
             cmd = [
                 FFMPEG_BIN, "-y",
                 "-i", str(burned_out),
                 "-stream_loop", "-1", "-i", str(music_path),
                 "-filter_complex",
-                f"[1:a]aformat=sample_fmts=fltp:channel_layouts=stereo,volume=0.126,afade=t=out:st={fade_start:.2f}:d=2[aout]",
+                f"[1:a]atrim=duration={final_duration:.6f},aformat=sample_fmts=fltp:channel_layouts=stereo,volume=0.126,afade=t=out:st={final_fade_start:.6f}:d=2[aout]",
                 "-map", "0:v", "-map", "[aout]",
                 "-c:v", "copy",
                 "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
                 "-max_muxing_queue_size", "4096",
-                "-shortest",
+                "-t", f"{final_duration:.6f}",
                 "-fs", "1900M",
                 "-movflags", "+faststart",
                 str(final),
@@ -1970,7 +1994,7 @@ async def _run_render(job_id: str, project_id: str):
                 "-c:v", "copy",
                 "-c:a", "aac", "-b:a", "128k",
                 "-max_muxing_queue_size", "4096",
-                "-shortest",
+                "-t", f"{final_duration:.6f}",
                 "-fs", "1900M",
                 "-movflags", "+faststart",
                 str(final),
@@ -2003,9 +2027,9 @@ async def _run_render(job_id: str, project_id: str):
             for s in scenes:
                 est += max(2.0, float((s.get("end_time") or 0) - (s.get("start_time") or 0)) or 4.0)
             duration = round(est, 2)
-        if commercial and abs(float(duration) - float(project.get("target_duration") or 0)) > 1.0:
+        if abs(float(duration) - timing.target_seconds) > 0.25:
             raise RuntimeError(
-                f"Commercial duration mismatch: requested {project.get('target_duration')}s, encoded {duration:.2f}s"
+                f"Final duration mismatch: selected {timing.target_seconds:.2f}s, encoded {duration:.2f}s"
             )
 
         # v6.2 Release Manifest + Deterministic QA Gate (Research G) — fail-closed, after muxing, before QA
@@ -2127,6 +2151,7 @@ async def _run_render(job_id: str, project_id: str):
                     local_fallback_path=str(verify_local) if verify_local and verify_local.exists() else None,
                     expect_captions=bool(burn_enabled),
                     aspect=aspect,
+                    expected_duration=timing.target_seconds,
                 )
                 verification_passed = bool(verification_result.get("overall_passed"))
                 if not verification_passed:

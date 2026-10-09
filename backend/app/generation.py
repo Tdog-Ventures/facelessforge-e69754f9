@@ -6,6 +6,7 @@ Falls back to deterministic generation if no LLM is available.
 from __future__ import annotations
 from app.scene_terms import derive_search_terms, derive_visual_query
 from app.visual_query import extract_visual_keywords, is_garbage_token, truncate_words
+from app.timing import TimingContract, normalize_scene_timeline, target_word_count
 
 import json
 import logging
@@ -330,14 +331,14 @@ def _coerce_script(result: dict) -> dict:
     return out
 
 
-def _finalize_script(out: dict, target_duration: int = None) -> dict:
+def _finalize_script(out: dict, narration_duration: float = None) -> dict:
     """Attach derived stats so API consumers never see missing fields. Enforce target duration if given."""
     full = out.get("full_script") or ""
     # Enforce target duration: truncate to target words if too long (LLM often ignores word count)
-    if target_duration is not None:
+    if narration_duration is not None:
         try:
-            target_dur = int(target_duration)
-            target_words = int(target_dur * 2.5)
+            target_dur = float(narration_duration)
+            target_words = target_word_count(target_dur)
             # Allow 30% overrun, then word-boundary truncate
             max_words = int(target_words * 1.5)
             words_list = re.findall(r"\b\w+\b", full)
@@ -351,7 +352,7 @@ def _finalize_script(out: dict, target_duration: int = None) -> dict:
                         truncated = truncated[: last_dot + 1]
                 out["full_script"] = truncated
                 full = truncated
-                logger.info("Script truncated from %s to %s words for target %ss", len(words_list), len(re.findall(r"\b\w+\b", truncated)), target_dur)
+                logger.info("Script truncated from %s to %s words for narration budget %.2fs", len(words_list), len(re.findall(r"\b\w+\b", truncated)), target_dur)
         except Exception:
             pass
     words = len(re.findall(r"\b\w+\b", full))
@@ -371,8 +372,9 @@ async def generate_script(project: dict) -> dict:
     _is_edu = any(k in _haystack for k in _edu_keys)
 
     target_dur = int(project.get("target_duration", 300))
-    # Fix: respect 5-3600 range, 2.5 w/s = 150 w/min. For 30s -> 75 words, not min 120.
-    target_words = max(20, int(target_dur * 2.5))
+    timing = TimingContract.from_project(project)
+    narration_dur = timing.narration_seconds
+    target_words = max(20, target_word_count(narration_dur))
 
     if _is_edu:
         logger.info(f"EDUCATIONAL topic detected: {project.get('topic')} -> using educational_script.txt (Ollama primary)")
@@ -383,7 +385,7 @@ async def generate_script(project: dict) -> dict:
             if result:
                 coerced = _coerce_script(result)
                 if coerced and coerced.get("full_script"):
-                    return _finalize_script(coerced, target_dur)
+                    return _finalize_script(coerced, narration_dur)
             logger.warning("Educational template LLM failed - using on-topic deterministic fallback")
         # Educational topics never fall through to the generic business prompt:
         # straight to the on-topic deterministic fallback below.
@@ -412,7 +414,7 @@ Do not include BEAT markers, section headers, or structural labels (such as "BEA
         if result:
             coerced = _coerce_script(result)
             if coerced and coerced.get("full_script", "").strip():
-                return _finalize_script(coerced, target_dur)
+                return _finalize_script(coerced, narration_dur)
 
     # Deterministic fallback - on-topic skeleton, never a canned unrelated story.
     topic = (project.get("topic") or project.get("title") or "this subject").strip().rstrip("?")
@@ -443,7 +445,7 @@ Do not include BEAT markers, section headers, or structural labels (such as "BEA
                 "Practical takeaways you can use today",
             ],
             "cta_block": "If this was useful, subscribe. New evidence-based videos every week.",
-        }, target_dur)
+        }, narration_dur)
 
     return _finalize_script({
         "hook_option_one": f"What nobody tells you about {topic}",
@@ -472,7 +474,7 @@ Do not include BEAT markers, section headers, or structural labels (such as "BEA
             "The distribution mistake that kills good work",
         ],
         "cta_block": "If this was useful, subscribe. New videos like this every week.",
-    }, target_dur)
+    }, narration_dur)
 
 
 # ------------------------------ SCENE PLAN ------------------------------
@@ -546,15 +548,17 @@ async def generate_scenes(project: dict, full_script: str) -> list[dict]:
 
 async def generate_scene_plan(project: dict, script: dict) -> list[dict]:
     target_dur = int(project.get("target_duration", 300))
-    # Lock formula: sceneCount = ceil(totalSeconds / sceneDuration). Never let LLM decide count.
+    timing = TimingContract.from_project(project)
+    narration_dur = timing.narration_seconds
+    # The model decides semantics only. Code owns all frame timestamps.
     scene_duration = 30
-    scene_count = max(1, math.ceil(target_dur / scene_duration))
+    scene_count = max(1, math.ceil(narration_dur / scene_duration))
     full_script = script.get("full_script", "")
     if not isinstance(full_script, str):
         full_script = ""
 
-    user = f"""Break this script into scenes for a {target_dur}s faceless YouTube video.
-You MUST generate exactly {scene_count} scenes, each {scene_duration}s (total {target_dur}s = {scene_count} x {scene_duration}s).
+    user = f"""Break this script into {scene_count} semantic scenes for a {narration_dur}s narration inside a {target_dur}s faceless YouTube video.
+Do not calculate timestamps. The application assigns an exact frame budget after generation.
 Return strict JSON with this exact shape:
 {{"scenes": [
   {{
@@ -582,7 +586,7 @@ Niche: {project.get('niche', 'business')}"""
     if result and isinstance(result.get("scenes"), list):
         coerced = _coerce_scenes(result["scenes"])
         if coerced:
-            # Post-process: if returned scenes.length != sceneCount, slice or pad, don't accept wrong count
+            # Enforce semantic count, then discard every model-supplied timestamp.
             if len(coerced) != scene_count:
                 logger.warning("LLM scene count mismatch: got %s expected %s, slicing/padding", len(coerced), scene_count)
                 if len(coerced) > scene_count:
@@ -602,17 +606,15 @@ Niche: {project.get('niche', 'business')}"""
                             "caption_text": f"Part {idx + 1}",
                             "search_terms": derive_search_terms(f"Part {idx + 1}", idx, scene_count),
                         })
-                # Re-normalize scene numbers and timings
-                for i, s in enumerate(coerced):
-                    s["scene_number"] = i + 1
-                    s["start_time"] = float(i * scene_duration)
-                    s["end_time"] = float((i + 1) * scene_duration)
-                    s["duration"] = float(scene_duration)
-            return coerced
+            return normalize_scene_timeline(
+                coerced,
+                narration_frames=timing.narration_frames,
+                fps=timing.fps,
+            )
 
     # Deterministic fallback — visuals derived from each scene's narration,
     # never from the raw project topic/description text — LOCKED to sceneCount
-    scene_dur = float(scene_duration)
+    scene_dur = narration_dur / scene_count
     sentences = re.split(r'(?<=[.!?])\s+', full_script) if full_script else ["Scene content."] * scene_count
     chunk = max(1, math.ceil(len(sentences) / scene_count)) if sentences else 1
     scenes = []
@@ -630,7 +632,11 @@ Niche: {project.get('niche', 'business')}"""
             "caption_text": f"Part {i + 1}",
             "search_terms": terms,
         })
-    return scenes
+    return normalize_scene_timeline(
+        scenes,
+        narration_frames=timing.narration_frames,
+        fps=timing.fps,
+    )
 
 
 # ------------------------------ METADATA ------------------------------

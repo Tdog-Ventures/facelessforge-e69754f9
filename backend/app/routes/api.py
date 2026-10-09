@@ -35,6 +35,7 @@ try:
 except Exception:
     check_credits = None  # fallback if billing not yet patched
 from ..scoring import quality_score, quality_label, compute_project_status, scenes_to_csv
+from ..timing import build_timing_status
 from .. import generation as gen
 from .. import stock as stock_service
 from .. import thumbnail_images as thumb_images
@@ -388,6 +389,16 @@ async def _attach_project_view(db, project: dict) -> dict:
     if score != project.get("quality_score"):
         await db.projects.update_one({"id": project["id"]}, {"$set": {"quality_score": score, "updated_at": _now()}})
         project["quality_score"] = score
+    selected_voiceover = next((
+        asset for asset in assets
+        if asset.get("id") == project.get("selected_voiceover_asset_id")
+        and asset.get("asset_type") == "voiceover_audio"
+    ), None)
+    timing = build_timing_status(
+        project=project,
+        scenes=scenes,
+        voiceover=selected_voiceover,
+    )
     return {
         "project": _ser(project) | {"quality_label": quality_label(score)},
         "script": _ser(script) if script else None,
@@ -396,6 +407,7 @@ async def _attach_project_view(db, project: dict) -> dict:
         "assets": [_ser(a) for a in assets],
         "render_job": _ser(render_job) if render_job else None,
         "share": _share_payload(project),
+        "timing": timing,
     }
 
 
