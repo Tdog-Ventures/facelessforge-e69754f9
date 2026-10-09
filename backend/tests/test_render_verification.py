@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 
 import pytest
 
-from backend.app import verify
+from backend.app import render, verify
 
 portrait_W, portrait_H = 1080, 1920
 ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
@@ -88,3 +88,42 @@ def test_configured_object_storage_endpoint_resolves():
     except socket.gaierror as exc:
         pytest.fail(f"object storage endpoint host does not resolve: {host} ({exc})")
     assert infos, f"no addresses for {host}"
+
+
+class _ReachedScriptLookup(RuntimeError):
+    """Sentinel proving render startup progressed past environment handling."""
+
+
+class _FindOneCollection:
+    def __init__(self, value=None, error=None):
+        self.value = value
+        self.error = error
+
+    async def find_one(self, *_args, **_kwargs):
+        if self.error:
+            raise self.error
+        return self.value
+
+
+class _StartupDB:
+    render_jobs = _FindOneCollection({"aspect_ratio": "16:9", "burn_subtitles": True})
+    projects = _FindOneCollection({"aspect_ratio": "16:9", "burn_subtitles": True})
+    scripts = _FindOneCollection(error=_ReachedScriptLookup("script lookup reached"))
+
+
+def test_run_render_can_read_environment_before_script_lookup(monkeypatch):
+    """An inner ``import os`` must not shadow the module import in _run_render.
+
+    The production incident failed on RENDER_BURN_SUBTITLES before the first
+    script lookup. Reaching the sentinel demonstrates startup passed that line.
+    """
+
+    async def _no_op_set_job(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(render, "get_db", lambda: _StartupDB())
+    monkeypatch.setattr(render, "_set_job", _no_op_set_job)
+    monkeypatch.setenv("RENDER_BURN_SUBTITLES", "true")
+
+    with pytest.raises(_ReachedScriptLookup, match="script lookup reached"):
+        asyncio.run(render._run_render("job-id", "project-id"))

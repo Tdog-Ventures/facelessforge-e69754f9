@@ -2066,7 +2066,6 @@ async def _run_render(job_id: str, project_id: str):
         # artifact before upload, posting, or a completed job status.  The
         # evaluator is fail-closed when it has not been configured; it can
         # report findings but has no authority to mutate this repository.
-        import os
         from .video_qa import QAPolicy, configured_vision_evaluator, run_video_qa
         if os.getenv("FFORGE_SKIP_QA") == "1" or os.getenv("VIDEO_QA_ENABLED") == "false":
             qa_result = {"release_eligible": True, "status": "PASS", "qa_passes": 0, "escalation_reason": None}
