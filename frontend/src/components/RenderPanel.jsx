@@ -138,13 +138,13 @@ export default function RenderPanel({
       const target = parseInt(project?.target_duration || 0, 10);
       const mismatch = Math.abs(voDuration - scenesTotal);
       if (voDuration && scenesTotal && mismatch > 5) {
-        toast.error("Render blocked: duration mismatch", {
-          description: `Target ${target}s, VO ${voDuration.toFixed(1)}s, Scenes ${scenesTotal.toFixed(1)}s — Δ ${mismatch.toFixed(1)}s. Regenerate scenes (locked to ${target}s) or VO to align.`,
+        // VO is master: backend _build_subclip_plan() scales video to VO
+        // exactly (render.py). Warn only — do not block. Video will match VO.
+        toast.warning("Duration auto-alignment: video will match VO", {
+          description: `Target ${target}s, VO ${voDuration.toFixed(1)}s, Scenes ${scenesTotal.toFixed(1)}s — Δ ${mismatch.toFixed(1)}s. VO is master, video will be scaled to ${voDuration.toFixed(1)}s.`,
           duration: 8000,
         });
-        console.error("[Render] Blocked: VO vs Scenes mismatch", { target, voDuration, scenesTotal, mismatch, projectId });
-        setStarting(false);
-        return;
+        console.warn("[Render] VO vs Scenes mismatch — auto-aligning to VO", { target, voDuration, scenesTotal, mismatch, projectId });
       }
     } catch (e) {
       console.warn("[Render] Preflight validation failed", e);

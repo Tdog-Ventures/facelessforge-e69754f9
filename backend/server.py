@@ -96,6 +96,8 @@ except ImportError:
 
 app.include_router(api_router)
 app.include_router(billing_router)
+from app.billing_dodo import router as dodo_router
+app.include_router(dodo_router)
 
 
 def _partial_route_methods(route, scope) -> set[str]:
@@ -277,8 +279,6 @@ def health_detailed():
     }
 
 try:
- from app.billing_dodo import router as dodo_router
- app.include_router(dodo_router)
  print("Dodo mounted")
 except Exception as e:
  print(e)

@@ -1399,12 +1399,21 @@ async def queue_render(project_id: str, *, requested_by: str, burn_subtitles: bo
                 }
                 await db.subscriptions.insert_one(dict(free_sub))
                 sub = free_sub
-        # Atomic findAndModify: only deduct if >=3
-        result = await db.subscriptions.find_one_and_update(
-            {"user_id": requested_by, "credits_remaining": {"$gte": 3}},
-            {"$inc": {"credits_remaining": -3}, "$set": {"updated_at": _now()}},
-            return_document=ReturnDocument.AFTER,
+        # Dodo full-access bypass: subscriptions.full_access=True + active means a
+        # paid plan granted by billing_dodo.py. Skip the finite-credit deduction
+        # rather than falling through to the 402 credits_exhausted path.
+        _full_access = bool(
+            sub and sub.get("full_access") is True and sub.get("access_status") == "active"
         )
+        # Atomic findAndModify: only deduct if >=3
+        if _full_access:
+            result = dict(sub)  # truthy sentinel: bypass deduction
+        else:
+            result = await db.subscriptions.find_one_and_update(
+                {"user_id": requested_by, "credits_remaining": {"$gte": 3}},
+                {"$inc": {"credits_remaining": -3}, "$set": {"updated_at": _now()}},
+                return_document=ReturnDocument.AFTER,
+            )
         if not result:
             # Also try ff_credits if subscriptions failed
             ff_result = await db.ff_credits.find_one_and_update(
@@ -1417,6 +1426,8 @@ async def queue_render(project_id: str, *, requested_by: str, burn_subtitles: bo
                 raise HTTPException(status_code=402, detail={"code": "credits_exhausted", "required": 3, "remaining": remaining, "message": f"Insufficient credits: {remaining} remaining, 3 required"})
             # Log ff_credits deduct
             await db.credit_transactions.insert_one({"id": str(uuid.uuid4()), "user_id": requested_by, "amount": -3, "reason": f"render {project_id}", "created_at": _now()})
+        elif _full_access:
+            pass  # bypass: do not log a deduction that never happened
         else:
             await db.credit_transactions.insert_one({"id": str(uuid.uuid4()), "user_id": requested_by, "amount": -3, "reason": f"render {project_id}", "created_at": _now()})
     except HTTPException:

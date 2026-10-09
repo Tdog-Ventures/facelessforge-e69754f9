@@ -94,3 +94,14 @@ async def ensure_indexes():
         await db.watch_events.create_index([("project_id", 1), ("job_id", 1), ("user_id", 1)])
     except Exception:
         pass
+    # Dodo billing idempotency (billing_dodo.py webhook upserts on these keys).
+    # Without unique indexes the "mark processed after grant" ordering is the
+    # only defence against duplicate fulfillment under concurrent deliveries.
+    try:
+        await db.webhook_events.create_index("webhook_id", unique=True)
+    except Exception:
+        pass
+    try:
+        await db.payments.create_index("payment_id", unique=True)
+    except Exception:
+        pass

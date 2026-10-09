@@ -17,7 +17,7 @@ services:
     container_name: facelessforge-app
     restart: unless-stopped
     ports:
-      - "7001:8080"
+      - "127.0.0.1:7001:8080"
     env_file:
       - /opt/facelessforge/deploy/.env.facelessforge
     depends_on:
