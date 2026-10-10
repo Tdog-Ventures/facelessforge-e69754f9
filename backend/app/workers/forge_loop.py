@@ -505,27 +505,31 @@ async def _autopost_shorts(project: dict, shorts: list[str]) -> list[dict]:
         pass
     # We don't have actual short files; simulate upload of each short as separate forge_run with #Shorts tag
     for i, short_url in enumerate(shorts, start=1):
-        title = f"{project.get('topic','')[:50]} #Shorts Part {i} | Faceless Forge"
-        # Insert a forge_runs shorts entry
-        doc = {
-            "id": str(uuid.uuid4()),
-            "project_id": project["id"],
-            "youtube_url": short_url,
-            "status": "short_uploaded",
-            "title": title,
-            "is_mock": False,
-            "short_index": i,
-            "created_at": _now(),
-            "updated_at": _now(),
-        }
         try:
-            await db.forge_runs.insert_one(doc)
-        except Exception:
-            pass
-        results.append(doc)
-        logger.info("Short %d uploaded %s", i, doc["youtube_video_id"])
-        # If real file existed, would call youtube upload with privacy public + #Shorts tags
-        # omitted for mock
+            title = f"{project.get('topic','')[:50]} #Shorts Part {i} | Faceless Forge"
+            # Insert a forge_runs shorts entry
+            doc = {
+                "id": str(uuid.uuid4()),
+                "project_id": project["id"],
+                "youtube_url": short_url,
+                "status": "short_uploaded",
+                "title": title,
+                "is_mock": False,
+                "short_index": i,
+                "created_at": _now(),
+                "updated_at": _now(),
+            }
+            try:
+                await db.forge_runs.insert_one(doc)
+            except Exception:
+                pass
+            results.append(doc)
+            logger.info("Short %d uploaded %s", i, doc["youtube_url"])
+            # If real file existed, would call youtube upload with privacy public + #Shorts tags
+            # omitted for mock
+        except Exception as e:
+            logger.warning("Short %d failed %s", i, e)
+            continue
     return results
 
 async def run_forge_once(user_id: Optional[str] = None, topic_override: Optional[str] = None, niche_override: Optional[str] = None) -> dict:

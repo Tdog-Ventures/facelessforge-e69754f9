@@ -181,7 +181,7 @@ MIN_VIDEO_WIDTH = 1280  # Reject files narrower than 1280px
 
 def _use_mock() -> bool:
     key = os.environ.get("PEXELS_API_KEY", "").strip()
-    flag = os.environ.get("USE_MOCK_PEXELS", "true").strip().lower() in ("1", "true", "yes")
+    flag = os.environ.get("USE_MOCK_PEXELS", "false").strip().lower() in ("1", "true", "yes")
     return flag or not key
 
 
@@ -196,7 +196,7 @@ def _has_any_stock_key() -> bool:
 
 def _should_use_mock_aggregated() -> bool:
     """Mock if flag set or no keys at all (all providers missing)."""
-    flag = os.environ.get("USE_MOCK_PEXELS", "true").strip().lower() in ("1", "true", "yes")
+    flag = os.environ.get("USE_MOCK_PEXELS", "false").strip().lower() in ("1", "true", "yes")
     if flag:
         return True
     return not _has_any_stock_key()

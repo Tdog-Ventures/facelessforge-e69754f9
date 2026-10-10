@@ -339,6 +339,7 @@ async def billing_success(tenant: str = "", token: str = "", email: str = "", pl
 
 @router.post("/webhook")
 async def paddle_webhook(request: Request):
+    raise HTTPException(status_code=410, detail="Paddle deprecated, use Dodo")
     raw = await request.body()
     text = raw.decode("utf-8", errors="ignore")
     sig = request.headers.get("paddle-signature", "")
@@ -516,6 +517,8 @@ async def paddle_webhook(request: Request):
 
 @router.post("/test-provision")
 async def test_provision(request: Request):
+    if os.getenv("ALLOW_TEST_PROVISION") != "true":
+        raise HTTPException(status_code=404, detail="Not found")
     body = await request.json()
     email = body.get("email")
     plan = body.get("plan", "single")

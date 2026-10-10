@@ -392,18 +392,23 @@ async def youtube_tenant_teaser(
         return {"video_url": last_url, "source": "redis", "tenant_id": tenant_id}
     # Fallback: find most recent teaser for this tenant in R2
     # Scan R2 for teasers matching tenant_id pattern
+    endpoint_url = os.environ.get("STORAGE_ENDPOINT") or None
+    access_key = os.environ.get("STORAGE_ACCESS_KEY") or None
+    secret_key = os.environ.get("STORAGE_SECRET_KEY") or None
+    bucket = os.environ.get("STORAGE_BUCKET") or None
+    if not endpoint_url or not access_key or not secret_key or not bucket:
+        raise HTTPException(status_code=500, detail="STORAGE_MISCONFIGURED")
     try:
         import boto3
         from botocore.config import Config
         s3 = boto3.client(
             "s3",
-            endpoint_url=os.environ.get("STORAGE_ENDPOINT", "https://9d1310958fd8b19bb31d13f6ebe66581.r2.cloudflarestorage.com"),
-            aws_access_key_id=os.environ.get("STORAGE_ACCESS_KEY", "d6140fee66412c90419a821299c4890a"),
-            aws_secret_access_key=os.environ.get("STORAGE_SECRET_KEY", "c90fe03d3b05b7b8a31ee263142065e06170c5d504d88be64603f54580ca1f26"),
+            endpoint_url=endpoint_url,
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
             region_name="auto",
             config=Config(signature_version="s3v4"),
         )
-        bucket = os.environ.get("STORAGE_BUCKET", "facelessforge-prod")
         resp = s3.list_objects_v2(Bucket=bucket, Prefix="teasers/", MaxKeys=100)
         items = sorted(
             (o for o in resp.get("Contents", []) if o["Key"].endswith(".mp4")),

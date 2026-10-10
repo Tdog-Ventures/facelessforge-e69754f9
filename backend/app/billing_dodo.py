@@ -203,6 +203,9 @@ async def dodo_webhook(
     - Grants FINITE credits to tenant:{tenant_id} Redis hash only for payment.succeeded and subscription.active
     - No JWT required for webhook (Dodo server-to-server), but credits grant is finite and audited
     """
+    secret = os.getenv("DODO_PAYMENTS_WEBHOOK_KEY") or os.getenv("DODO_WEBHOOK_SECRET") or os.getenv("DODO_PAYMENTS_WEBHOOK_SECRET") or ""
+    if not secret:
+        raise HTTPException(status_code=503, detail="DODO webhook secret not configured")
     body = await request.body()  # raw bytes for verification
 
     # Normalize headers for verify (case-insensitive)
@@ -222,20 +225,14 @@ async def dodo_webhook(
         "webhook-signature": webhook_signature or "",
     }
 
-    secret = os.getenv("DODO_PAYMENTS_WEBHOOK_KEY") or os.getenv("DODO_WEBHOOK_SECRET") or os.getenv("DODO_PAYMENTS_WEBHOOK_SECRET") or ""
+    # 1. Verify signature (Standard Webhooks) - REQUIRED
+    try:
+        from app.dodo_webhook_verify import verify_signature  # type: ignore
 
-    # 1. Verify signature (Standard Webhooks) - REQUIRED in prod, allow bypass only if secret not set and dev mode
-    # For security, if secret is set we must verify; if not set, log warning but continue for local testing
-    if secret:
-        try:
-            from app.dodo_webhook_verify import verify_signature  # type: ignore
-
-            verify_signature(body, headers_for_verify, secret)
-        except Exception as e:
-            logger.warning(f"Webhook signature failed id={webhook_id}: {e}")
-            raise HTTPException(status_code=401, detail=f"Invalid signature: {e}")
-    else:
-        logger.warning("DODO_PAYMENTS_WEBHOOK_KEY not set - skipping webhook signature verification (dev mode)")
+        verify_signature(body, headers_for_verify, secret)
+    except Exception as e:
+        logger.warning(f"Webhook signature failed id={webhook_id}: {e}")
+        raise HTTPException(status_code=401, detail=f"Invalid signature: {e}")
 
     # 2. Idempotency - check before processing
     # Use helper that does SET NX; also check legacy SISMEMBER
@@ -353,8 +350,15 @@ async def dodo_webhook(
         logger.warning(f"Tenant fallback to email={tenant_id} for event={event_type} - ensure checkout sets custom_data.tenant_id")
 
     if not tenant_id:
-        tenant_id = "default"
-        logger.warning(f"No tenant_id resolved for webhook {webhook_id} event={event_type}, using default")
+        try:
+            r.delete(f"dodo:webhooks:processed:{webhook_id}")
+        except Exception:
+            pass
+        try:
+            r.srem("dodo:webhooks:processed", webhook_id)
+        except Exception:
+            pass
+        raise HTTPException(status_code=400, detail="tenant_id not resolved, grant nothing")
 
     # Normalize tenant_id: if it looks like email, try to keep but Redis key will be tenant:{email} - still hash
     # Ensure finite credits from product_id if not from pending

@@ -29,7 +29,7 @@ STATIC_ROOT.mkdir(parents=True, exist_ok=True)
 
 def _use_mock() -> bool:
     key = os.environ.get("EMERGENT_LLM_KEY", "").strip() or os.environ.get("GEMINI_API_KEY", "").strip()
-    flag = os.environ.get("USE_MOCK_THUMBNAIL_IMAGES", "true").strip().lower() in ("1", "true", "yes")
+    flag = os.environ.get("USE_MOCK_THUMBNAIL_IMAGES", "false").strip().lower() in ("1", "true", "yes")
     return flag or not key
 
 
