@@ -28,9 +28,8 @@ STATIC_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 def _use_mock() -> bool:
-    key = os.environ.get("EMERGENT_LLM_KEY", "").strip() or os.environ.get("GEMINI_API_KEY", "").strip()
     flag = os.environ.get("USE_MOCK_THUMBNAIL_IMAGES", "false").strip().lower() in ("1", "true", "yes")
-    return flag or not key
+    return flag
 
 
 def is_mock_mode() -> bool:
@@ -182,8 +181,11 @@ async def generate_thumbnail_images(
                 ext = "png"
                 source = info["provider"]
             else:
-                image_bytes = _mock_svg(asset_id, project, brief)
-                logger.info("Gemini failed, falling back to mock SVG for %s variant %s", project_id, i)
+                logger.warning(
+                    "Gemini thumbnail generation failed for %s variant %s; mock fallback is disabled",
+                    project_id,
+                    i,
+                )
 
         if image_bytes is None:
             # No mock fallback — return real only, frontend shows skeleton/Retry

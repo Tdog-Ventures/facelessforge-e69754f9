@@ -129,7 +129,7 @@ def _style_key_for(voice_style: Optional[str], tone: Optional[str]) -> str:
     return os.environ.get("DEFAULT_VOICE_STYLE", "narrator").lower()
 def _use_mock() -> bool:
     flag = os.environ.get("USE_MOCK_TTS", "false").strip().lower() in ("1", "true", "yes")
-    return flag or not _elevenlabs_key()
+    return flag
 def is_mock_mode() -> bool: return _use_mock()
 def provider_info() -> dict:
     try:
@@ -183,6 +183,10 @@ async def generate_voiceover(text: str, voice_style: str = "narrator", tone: str
         logger.info("[tts] mock mode"); result = _mock_voiceover(text, asset_id, project_id, name_suffix)
         if scene_id: result["scene_id"] = scene_id
         return result
+    if not _elevenlabs_key():
+        raise RuntimeError(
+            "ElevenLabs is not configured; add a valid ELEVENLABS_API_KEY before generating voiceover."
+        )
     # Task spec voice resolver (ensures female-narrator -> Bella EXAVITQu4vr4xnSDxMaL)
     payload = {'voiceStyle': voice_style}
     voice_id = VOICE_MAP.get(payload.get('voiceStyle') if isinstance(payload,dict) else getattr(payload,'voiceStyle','female-narrator'), 'EXAVITQu4vr4xnSDxMaL')
@@ -204,9 +208,10 @@ async def generate_voiceover(text: str, voice_style: str = "narrator", tone: str
         if scene_id: result["scene_id"] = scene_id
         return result
     except Exception as exc:
-        logger.exception("[tts] ElevenLabs failed, falling back to mock: %s", exc); result = _mock_voiceover(text, asset_id, project_id, name_suffix)
-        if scene_id: result["scene_id"] = scene_id
-        return result
+        logger.exception("[tts] ElevenLabs voiceover generation failed: %s", exc)
+        raise RuntimeError(
+            "ElevenLabs voiceover generation failed; verify the API key, quota, and selected voice."
+        ) from exc
 def generate_tts_audio(text: str, voice_style: Optional[str] = None, tone: Optional[str] = None, model_id: str = "eleven_multilingual_v2") -> bytes:
     import asyncio
     async def _run(): return await _elevenlabs_tts(text, voice_style or "narrator", voice_id=_voice_id_for(voice_style), tone=tone)

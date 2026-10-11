@@ -249,120 +249,104 @@ async def youtube_upload(body: YoutubeUploadRequest, user=Depends(get_current_us
     if privacy not in ("public", "private", "unlisted"):
         privacy = "public"
 
-    # Resolve file
     video_path = _resolve_video_path(body.project_id)
-    # If no file, we operate in mock mode (for tests / dry run)
-    is_mock = False
     if not video_path:
-        logger.warning("No render file for %s — mock upload", body.project_id)
-        is_mock = False  # FORBIDDEN MOCK REMOVED
+        raise HTTPException(
+            status_code=409,
+            detail="YouTube upload requires a completed MP4; render and verify the project first.",
+        )
+    if _env("YOUTUBE_MOCK", "false").lower() in ("1", "true", "yes", "on"):
+        raise HTTPException(
+            status_code=503,
+            detail="YouTube mock mode is disabled for production uploads.",
+        )
 
-    # Determine credentials / mock
     creds = _get_youtube_credentials()
-    # Try DB refresh token fallback async
     if not creds:
         try:
             doc = await db.youtube_tokens.find_one({"id": "default"}, {"_id": 0})
             rt = (doc or {}).get("refresh_token") or _env("YOUTUBE_REFRESH_TOKEN")
-            if rt and _env("YOUTUBE_CLIENT_ID"):
+            if rt and _env("YOUTUBE_CLIENT_ID") and _env("YOUTUBE_CLIENT_SECRET"):
                 from google.oauth2.credentials import Credentials
                 creds = Credentials(
-                    token=None, refresh_token=rt, token_uri="https://oauth2.googleapis.com/token",
-                    client_id=_env("YOUTUBE_CLIENT_ID"), client_secret=_env("YOUTUBE_CLIENT_SECRET"), scopes=SCOPES,
+                    token=None,
+                    refresh_token=rt,
+                    token_uri="https://oauth2.googleapis.com/token",
+                    client_id=_env("YOUTUBE_CLIENT_ID"),
+                    client_secret=_env("YOUTUBE_CLIENT_SECRET"),
+                    scopes=SCOPES,
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.exception("YouTube credential lookup failed: %s", exc)
+    if not creds:
+        raise HTTPException(
+            status_code=503,
+            detail="YouTube is not connected; complete OAuth before uploading.",
+        )
 
-        raise RuntimeError("YouTube upload failed — mock IDs forbidden per BOOT.md HARD RULE 3")
-    youtube_video_id = None
-    youtube_url = None
-    error_note = None
+    try:
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaFileUpload
+        from google.auth.transport.requests import Request as GoogleRequest
 
-    if not creds or is_mock or _env("YOUTUBE_MOCK", "false").lower() in ("1","true"):
-        # Mock success — satisfies acceptance when real channel not configured
-        youtube_video_id = mock_video_id
-        youtube_url = f"https://www.youtube.com/watch?v={youtube_video_id}"
-        logger.info("YouTube mock upload project=%s title=%r -> %s", body.project_id, title, youtube_video_id)
-    else:
-        # Real upload via google-api-python-client
+        creds.refresh(GoogleRequest())
+        service = build("youtube", "v3", credentials=creds, cache_discovery=False)
+        media = MediaFileUpload(
+            str(video_path),
+            mimetype="video/mp4",
+            resumable=True,
+            chunksize=1024 * 1024 * 4,
+        )
+        body_payload = {
+            "snippet": {
+                "title": title,
+                "description": description[:5000],
+                "tags": tags,
+                "categoryId": "28",
+                "defaultLanguage": "en",
+            },
+            "status": {
+                "privacyStatus": privacy,
+                "selfDeclaredMadeForKids": False,
+                "madeForKids": False,
+            },
+        }
+
+        def _insert():
+            request = service.videos().insert(
+                part="snippet,status",
+                body=body_payload,
+                media_body=media,
+            )
+            response = None
+            while response is None:
+                progress, response = request.next_chunk()
+                if progress:
+                    logger.info("YouTube upload progress %s%%", int(progress.progress() * 100))
+            return response
+
         try:
-            from googleapiclient.discovery import build
-            from googleapiclient.http import MediaFileUpload
-            from google.auth.transport.requests import Request as GoogleRequest
-            import google.auth.exceptions
-
-            # Refresh token to obtain access token
-            try:
-                creds.refresh(GoogleRequest())
-            except Exception as e:
-                logger.warning("YouTube creds refresh failed %s — attempting upload anyway", e)
-
-            # Build service with refreshed creds
+            response = _insert()
+        except Exception as exc:
+            message = str(exc).lower()
+            if "401" not in message and "unauthorized" not in message and "invalid_grant" not in message:
+                raise
+            logger.warning("YouTube authorization expired; refreshing and retrying once")
+            creds.refresh(GoogleRequest())
             service = build("youtube", "v3", credentials=creds, cache_discovery=False)
+            response = _insert()
 
-            # For mock is_mock false but file missing — should have been caught earlier; create dummy tiny mp4
-            upload_path = video_path
-            if not upload_path:
-                # create 1s dummy
-                tmp = Path(f"/tmp/{body.project_id}_mock.mp4")
-                tmp.write_bytes(b"\x00")
-                upload_path = tmp
-
-            media = MediaFileUpload(str(upload_path), mimetype="video/mp4", resumable=True, chunksize=1024*1024*4)
-
-            body_payload = {
-                "snippet": {
-                    "title": title,
-                    "description": description[:5000],
-                    "tags": tags,
-                    "categoryId": "28",  # Science & Technology
-                    "defaultLanguage": "en",
-                },
-                "status": {
-                    "privacyStatus": privacy,
-                    "selfDeclaredMadeForKids": False,
-                    "madeForKids": False,
-                },
-            }
-
-            # Execute insert with retry on 401 refresh
-            def _insert():
-                req = service.videos().insert(part="snippet,status", body=body_payload, media_body=media)
-                resp = None
-                # resumable loop
-                while resp is None:
-                    status, resp = req.next_chunk()
-                    if status:
-                        logger.info("YouTube upload progress %s%%", int(status.progress()*100))
-                return resp
-
-            try:
-                resp = _insert()
-            except Exception as e:
-                # Handle 401 refresh once
-                msg = str(e).lower()
-                if "401" in msg or "unauthorized" in msg or "invalid_grant" in msg:
-                    logger.warning("YouTube 401 — refreshing creds and retrying once: %s", e)
-                    try:
-                        creds.refresh(GoogleRequest())
-                        service = build("youtube", "v3", credentials=creds, cache_discovery=False)
-                        resp = _insert()
-                    except Exception as e2:
-                        raise e2
-                else:
-                    raise
-
-            youtube_video_id = (resp or {}).get("id") or mock_video_id
-            youtube_url = f"https://www.youtube.com/watch?v={youtube_video_id}"
-            logger.info("YouTube upload success project=%s video_id=%s", body.project_id, youtube_video_id)
-
-        except Exception as e:
-            logger.exception("YouTube upload failed project=%s: %s", body.project_id, e)
-            # Fallback to mock so forge loop not hard-blocked in prod
-            error_note = str(e)[:500]
-            youtube_video_id = mock_video_id
-            youtube_url = f"https://www.youtube.com/watch?v={youtube_video_id}"
-            is_mock = False  # FORBIDDEN MOCK REMOVED
+        youtube_video_id = (response or {}).get("id")
+        if not youtube_video_id:
+            raise RuntimeError("YouTube returned no video ID")
+        youtube_url = f"https://www.youtube.com/watch?v={youtube_video_id}"
+        logger.info("YouTube upload success project=%s video_id=%s", body.project_id, youtube_video_id)
+    except Exception as exc:
+        logger.exception("YouTube upload failed project=%s: %s", body.project_id, exc)
+        raise HTTPException(
+            status_code=502,
+            detail="YouTube upload failed; verify channel authorization and retry.",
+        ) from exc
 
     # Persist forge_runs entry per spec: create table forge_runs (id uuid, project_id, youtube_video_id, status, created_at)
     try:
@@ -372,11 +356,11 @@ async def youtube_upload(body: YoutubeUploadRequest, user=Depends(get_current_us
             "project_id": body.project_id,
             "youtube_video_id": youtube_video_id,
             "youtube_url": youtube_url,
-            "status": "uploaded" if not error_note else "mock_uploaded",
+            "status": "uploaded",
             "title": title,
             "privacy": privacy,
-            "is_mock": is_mock,
-            "error": error_note,
+            "is_mock": False,
+            "error": None,
             "created_at": _now(),
             "updated_at": _now(),
         }
@@ -396,6 +380,6 @@ async def youtube_upload(body: YoutubeUploadRequest, user=Depends(get_current_us
         "selfDeclaredMadeForKids": False,
         "madeForKids": False,
         "monetization": "enabled" if privacy == "public" else "pending",
-        "mock": is_mock,
-        "error": error_note,
+        "mock": False,
+        "error": None,
     }
