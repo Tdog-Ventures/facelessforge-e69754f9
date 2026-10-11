@@ -216,7 +216,7 @@ export default function ThumbnailPanel({
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div className="font-mono text-[11px] text-zinc-500">
-          {autoGeneratingConcepts ? "Generating thumbnail concepts…" : `${briefs.length} concepts · Gemini Nano Banana`}
+          {autoGeneratingConcepts ? "Generating thumbnail concepts…" : `${briefs.length} concepts · ${meta.provider === "pexels_stock" ? "Pexels + local compositor" : "Gemini Nano Banana"}`}
         </div>
         <div className="flex items-center gap-3">
           {canEdit && (
@@ -231,7 +231,7 @@ export default function ThumbnailPanel({
             </label>
           )}
           <span className={`font-mono text-[10px] uppercase tracking-widest px-2 py-0.5 rounded-sm border ${meta.configured === false ? "text-[#FFB020] border-[#FFB020]/30 bg-[#FFB020]/10" : "text-[#00FF66] border-[#00FF66]/30 bg-[#00FF66]/10"}`}>
-            {meta.mock ? "Mock thumbnails" : meta.configured === false ? "Gemini · Setup required" : "Gemini · Live"}
+            {meta.mock ? "Mock thumbnails" : meta.configured === false ? "Image provider · Setup required" : meta.provider === "pexels_stock" ? "Pexels + local layout · Live" : "Gemini · Live"}
           </span>
         </div>
       </div>

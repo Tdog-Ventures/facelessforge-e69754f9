@@ -21,12 +21,26 @@ def test_tts_provider_info_reports_the_real_live_provider(monkeypatch):
 def test_thumbnail_provider_info_reports_missing_configuration(monkeypatch):
     monkeypatch.delenv("EMERGENT_LLM_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("PEXELS_API_KEY", raising=False)
     monkeypatch.setenv("USE_MOCK_THUMBNAIL_IMAGES", "false")
 
     info = thumbnail_images.provider_info()
 
     assert info["provider"] == "gemini_nano_banana"
     assert info["configured"] is False
+
+
+def test_thumbnail_provider_info_uses_real_stock_fallback(monkeypatch):
+    monkeypatch.delenv("EMERGENT_LLM_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("PEXELS_API_KEY", "configured")
+    monkeypatch.setenv("USE_MOCK_THUMBNAIL_IMAGES", "false")
+
+    info = thumbnail_images.provider_info()
+
+    assert info["provider"] == "pexels_stock"
+    assert info["model"] == "photo-search+local-compositor"
+    assert info["configured"] is True
 
 
 @pytest.mark.asyncio
