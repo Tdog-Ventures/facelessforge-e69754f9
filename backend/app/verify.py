@@ -37,6 +37,7 @@ SILENCE_MIN_DURATION = 2.0      # check b: minimum silence gap to flag
 SILENCE_SKIP_PCT = 0.05          # check b: ignore gaps before 5% runtime
 VOL_SEGMENT_SEC = 10.0           # check c: per-10s volume check
 MAX_VOL_DIFF_DB = 12.0           # check c: max segment-to-segment diff
+MIN_VOL_SEGMENT_SEC = 2.0        # check c: ignore trailing slivers shorter than this
 # check d: scene-change threshold. 0.3 (the classic "strong cut" heuristic)
 # under-detects real cuts in low-texture b-roll (e.g. uniform-sky aviation
 # footage scores 0.10-0.22 at hard cuts between distinct sources), failing
@@ -285,6 +286,10 @@ async def check_c_volume_consistency(video_path: str) -> dict[str, Any]:
     Constitution §6c:
     volumedetect per 10-second segment.
     No segment >12dB quieter than the loudest segment.
+
+    Trailing slivers shorter than MIN_VOL_SEGMENT_SEC are skipped: a 66ms
+    tail measures ~-91dB even on a healthy mix and would otherwise fail an
+    entire render (incident: 30.07s video failed with vol_diff=72.4dB).
     """
     video_dur = await ffprobe_video_duration(video_path)
     segment_count = max(1, int(video_dur // VOL_SEGMENT_SEC) + (1 if video_dur % VOL_SEGMENT_SEC else 0))
@@ -295,10 +300,26 @@ async def check_c_volume_consistency(video_path: str) -> dict[str, Any]:
         duration = min(VOL_SEGMENT_SEC, video_dur - start)
         if duration <= 0:
             break
+        if duration < MIN_VOL_SEGMENT_SEC:
+            continue
         stdout, stderr, rc = await _run_cmd(
             FFMPEG_BIN,
             "-hide_banner", "-nostats",
             "-ss", str(start), "-t", str(duration),
+            "-i", video_path,
+            "-af", "volumedetect",
+            "-f", "null", "-",
+        )
+        mean_db = _parse_volumedetect_mean(stderr)
+        if mean_db is not None:
+            segment_means.append(mean_db)
+
+    if not segment_means:
+        # Tiny clip (shorter than one usable segment): measure the whole file
+        # once rather than failing on an unmeasurable sliver.
+        stdout, stderr, rc = await _run_cmd(
+            FFMPEG_BIN,
+            "-hide_banner", "-nostats",
             "-i", video_path,
             "-af", "volumedetect",
             "-f", "null", "-",
