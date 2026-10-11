@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 # the root logger stays at WARNING and critical debugging context is dropped.
 import logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+scheduler_logger = logging.getLogger("facelessforge.scheduler")
 # ``app.routes`` is the canonical API router package.  Importing the small
 # compatibility ``fix_router`` here silently omitted authentication (and most
 # of the API) from the deployed application.
@@ -40,13 +41,16 @@ async def lifespan(app: FastAPI):
     try:
         import os as _os
         if _os.getenv("FORGE_SCHEDULER_ENABLED", "true").lower() not in ("1", "true"):
-            print("scheduler start skipped: FORGE_SCHEDULER_ENABLED is false")
+            scheduler_logger.info(
+                "scheduler: startup skipped — FORGE_SCHEDULER_ENABLED=false "
+                "(no scheduler, no job registered)"
+            )
         else:
             from app.workers.forge_loop import restore_scheduler_setting, ensure_niches
             await ensure_niches()
             await restore_scheduler_setting()
     except Exception as e:
-        print(f"scheduler start failed: {e}")
+        scheduler_logger.warning("scheduler: startup failed: %s", e)
     # recover orphaned render jobs from crashes/restarts
     try:
         from app.render import recover_stale_jobs

@@ -29,6 +29,42 @@ from typing import Optional
 from ..db import get_db
 
 logger = logging.getLogger("facelessforge.forge_loop")
+# Dedicated channel so scheduler lifecycle decisions are greppable in prod logs.
+scheduler_logger = logging.getLogger("facelessforge.scheduler")
+
+
+class PublishDisabledError(RuntimeError):
+    """Raised when a forge run is asked to publish while automation is OFF.
+
+    Fail-closed guard: RUN NOW (and the scheduled job) must never trigger a
+    YouTube upload/publish unless the durable automation switch is explicitly
+    enabled.
+    """
+
+
+async def is_auto_post_enabled(db=None) -> bool:
+    """Authoritative, fail-closed automation switch.
+
+    The durable ``forge_settings.default.auto_post_enabled`` choice wins; a
+    missing or non-boolean setting is treated as OFF so publishing can never be
+    enabled by omission.
+    """
+    if db is None:
+        db = get_db()
+    try:
+        setting = await db.forge_settings.find_one(
+            {"id": "default"},
+            {"_id": 0, "auto_post_enabled": 1},
+        )
+    except Exception:
+        scheduler_logger.warning(
+            "scheduler: unable to read auto_post_enabled from DB — treating as OFF"
+        )
+        return False
+    if setting and isinstance(setting.get("auto_post_enabled"), bool):
+        return setting["auto_post_enabled"]
+    return False
+
 
 NICHES_DEFAULT = ["AI side hustles", "Faceless automation"]
 TOPICS_BY_NICHE = {
@@ -537,8 +573,16 @@ async def _autopost_shorts(project: dict, shorts: list[str]) -> list[dict]:
 async def run_forge_once(user_id: Optional[str] = None, topic_override: Optional[str] = None, niche_override: Optional[str] = None) -> dict:
     """Execute full pipeline a)-h). Returns summary."""
     global _last_run
-    from ..db import get_db
     db = get_db()
+    # FAIL-CLOSED: never publish while automation is OFF. This covers both the
+    # RUN NOW button and the scheduled job so no path can upload to YouTube
+    # without an explicit, durable opt-in.
+    if not await is_auto_post_enabled(db):
+        raise PublishDisabledError(
+            "Automation is OFF (auto_post_enabled=false). RUN NOW is blocked to "
+            "prevent an unscheduled YouTube publish. Enable automation first: "
+            "POST /api/forge/toggle?enabled=true"
+        )
     if not user_id:
         # pick admin or first user as owner
         u = await db.users.find_one({"role": "admin"}, {"_id": 0})
@@ -616,12 +660,31 @@ async def run_forge_once(user_id: Optional[str] = None, topic_override: Optional
         _last_run = err_summary
         raise
 
+def _job_next_run(scheduler) -> Optional[str]:
+    """Return the ISO next_run_time for the forge job, or None."""
+    if scheduler is None:
+        return None
+    try:
+        job = scheduler.get_job("forge_daily_0900")
+    except Exception:
+        return None
+    if job is not None and getattr(job, "next_run_time", None):
+        return job.next_run_time.isoformat()
+    return None
+
+
 def start_scheduler():
     global _scheduler
     if _scheduler:
+        scheduler_logger.info(
+            "scheduler: start ignored — already running (job=forge_daily_0900 next_run_time=%s)",
+            _job_next_run(_scheduler),
+        )
         return _scheduler
     if os.environ.get("AUTO_POST_ENABLED", "false").lower() not in ("1","true","yes","on"):
-        logger.info("AUTO_POST_ENABLED != true — scheduler not started")
+        scheduler_logger.info(
+            "scheduler: start skipped — AUTO_POST_ENABLED is not true (auto-post OFF)"
+        )
         return None
     try:
         from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -632,10 +695,14 @@ def start_scheduler():
         scheduler.add_job(run_forge_once, trigger, id="forge_daily_0900", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.start()
         _scheduler = scheduler
+        scheduler_logger.info(
+            "scheduler: registered job forge_daily_0900 next_run_time=%s timezone=Australia/Adelaide",
+            _job_next_run(scheduler),
+        )
         logger.info("Forge scheduler started daily 09:00 Australia/Adelaide")
         return scheduler
     except Exception as e:
-        logger.warning("Scheduler start failed %s — fallback to dummy", e)
+        scheduler_logger.warning("scheduler: start failed %s — scheduler not running", e)
         return None
 
 def get_scheduler():
@@ -648,10 +715,16 @@ def stop_scheduler():
     scheduler = _scheduler
     _scheduler = None
     if scheduler:
+        scheduler_logger.info(
+            "scheduler: stopping — auto-post OFF, deregistering job forge_daily_0900"
+        )
         try:
             scheduler.shutdown(wait=False)
+            scheduler_logger.info("scheduler: stopped — no job registered")
         except Exception:
             logger.exception("Forge scheduler shutdown failed")
+    else:
+        scheduler_logger.info("scheduler: stop ignored — no scheduler was running")
 
 
 async def restore_scheduler_setting() -> bool:
@@ -663,15 +736,27 @@ async def restore_scheduler_setting() -> bool:
     )
     if setting and isinstance(setting.get("auto_post_enabled"), bool):
         enabled = setting["auto_post_enabled"]
+        scheduler_logger.info(
+            "scheduler: restored auto_post_enabled=%s from DB forge_settings.default",
+            enabled,
+        )
     else:
         # A missing durable choice is not consent to publish. Operators can
         # enable the loop explicitly through the authenticated UI.
         enabled = False
+        scheduler_logger.info(
+            "scheduler: no durable auto_post_enabled setting — defaulting OFF (fail-closed)"
+        )
     os.environ["AUTO_POST_ENABLED"] = "true" if enabled else "false"
     if enabled:
-        start_scheduler()
+        scheduler = start_scheduler()
+        scheduler_logger.info(
+            "scheduler: restored ON + job registered next_run_time=%s",
+            _job_next_run(scheduler),
+        )
     else:
         stop_scheduler()
+        scheduler_logger.info("scheduler: restored OFF from DB — no job registered")
     return enabled
 
 def get_last_run():
@@ -685,29 +770,43 @@ forge_router = APIRouter(prefix="/api/forge", tags=["forge"])
 
 @forge_router.post("/run-now")
 async def forge_run_now(topic: Optional[str] = None, niche: Optional[str] = None, user=Depends(get_current_user)):
-    """Button [RUN NOW - FORGE 1 VIDEO]"""
+    """Button [RUN NOW - FORGE 1 VIDEO].
+
+    Fail-closed: while automation is OFF this never publishes. Instead of
+    triggering a YouTube upload it refuses with HTTP 409 so an operator must
+    explicitly enable automation first.
+    """
     try:
         result = await run_forge_once(user_id=user["id"], topic_override=topic, niche_override=niche)
         return result
+    except PublishDisabledError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)[:800])
 
 @forge_router.get("/status")
 async def forge_status(user=Depends(get_current_user)):
-    from ..db import get_db
     db = get_db()
     sched = get_scheduler()
-    # Next run time from scheduler
-    next_run = None
-    if sched:
+    scheduler_exists = sched is not None
+    job_registered = False
+    next_run_time = None
+    if scheduler_exists:
         try:
             job = sched.get_job("forge_daily_0900")
-            if job and job.next_run_time:
-                next_run = job.next_run_time.isoformat()
+            if job is not None:
+                job_registered = True
+                if getattr(job, "next_run_time", None):
+                    next_run_time = job.next_run_time.isoformat()
         except Exception:
-            pass
+            scheduler_logger.warning(
+                "scheduler: status could not read job forge_daily_0900 from scheduler"
+            )
+    # next_run is a human-friendly display value (next 09:00 Adelaide). When the
+    # scheduler is intentionally OFF there is no real next run, so next_run_time
+    # stays None while next_run still drives the dashboard countdown.
+    next_run = next_run_time
     if not next_run:
-        # compute tomorrow 09:00 Adelaide
         try:
             from zoneinfo import ZoneInfo
             adl = ZoneInfo("Australia/Adelaide")
@@ -719,28 +818,38 @@ async def forge_status(user=Depends(get_current_user)):
         except Exception:
             next_run = (_now() + timedelta(days=1)).isoformat()
     last = get_last_run()
+    last_run_summary = None
     # also fetch last DB entry
     last_db = None
     try:
         last_db = await db.forge_runs.find_one({}, {"_id": 0}, sort=[("created_at", -1)])
+        if last_db:
+            last_run_summary = last_db.get("summary") or last_db
         if last_db and not last:
-            last = last_db.get("summary") or last_db
+            last = last_run_summary
     except Exception:
         pass
+    if last_run_summary is None:
+        last_run_summary = last
     recently = []
     try:
         recently = await db.forge_runs.find({}, {"_id": 0}).sort("created_at", -1).to_list(5)
     except Exception:
         pass
-    enabled = os.environ.get("AUTO_POST_ENABLED", "false").lower() in ("1","true","yes","on")
+    auto_post_enabled = await is_auto_post_enabled(db)
     return {
-        "enabled": enabled,
-        "auto_post_enabled": enabled,
+        "enabled": auto_post_enabled,
+        "auto_post_enabled": auto_post_enabled,
+        "scheduler_exists": scheduler_exists,
+        "job_registered": job_registered,
         "next_run": next_run,
+        "next_run_time": next_run_time,
         "next_run_countdown": next_run,
+        "timezone": "Australia/Adelaide",
         "last_run": last,
+        "last_run_summary": last_run_summary,
         "recent_runs": recently,
-        "scheduler_active": sched is not None,
+        "scheduler_active": scheduler_exists,
         "niches": NICHES_DEFAULT,
     }
 
