@@ -26,7 +26,7 @@ export default function AutomationPage() {
       if (s.data?.last_run?.niche) setSelectedNiche(s.data.last_run.niche);
     } catch (e) {
       // fallback
-      setStatus((prev) => prev || { enabled: true, next_run: new Date(Date.now()+86400000).toISOString(), niches: ["AI side hustles","Faceless automation"] });
+      setStatus((prev) => prev || { enabled: false, next_run: null, niches: ["AI side hustles","Faceless automation"] });
     } finally {
       setLoading(false);
     }
@@ -84,7 +84,7 @@ export default function AutomationPage() {
     return <AppShell><TopBar title="Automation" /><div className="p-8 text-sm text-zinc-500 font-mono">Loading automation…</div></AppShell>;
   }
 
-  const enabled = status?.enabled ?? status?.auto_post_enabled ?? true;
+  const enabled = status?.enabled ?? status?.auto_post_enabled ?? false;
   const lastRun = status?.last_run;
   const recent = status?.recent_runs || [];
 

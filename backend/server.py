@@ -42,9 +42,9 @@ async def lifespan(app: FastAPI):
         if _os.getenv("FORGE_SCHEDULER_ENABLED", "true").lower() not in ("1", "true"):
             print("scheduler start skipped: FORGE_SCHEDULER_ENABLED is false")
         else:
-            from app.workers.forge_loop import start_scheduler, ensure_niches
+            from app.workers.forge_loop import restore_scheduler_setting, ensure_niches
             await ensure_niches()
-            start_scheduler()
+            await restore_scheduler_setting()
     except Exception as e:
         print(f"scheduler start failed: {e}")
     # recover orphaned render jobs from crashes/restarts

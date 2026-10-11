@@ -26,6 +26,8 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
+from ..db import get_db
+
 logger = logging.getLogger("facelessforge.forge_loop")
 
 NICHES_DEFAULT = ["AI side hustles", "Faceless automation"]
@@ -396,7 +398,7 @@ async def _youtube_upload(project: dict) -> dict:
     import asyncio as _asyncio, tempfile as _tmp, urllib.request as _ur
     if os.environ.get("YOUTUBE_MOCK", "false").lower() == "true":
         raise RuntimeError("YOUTUBE_MOCK=true: mock uploads are disabled in the forge pipeline")
-    rj = await db.render_jobs.find_one({"project_id": project["id"], "status": "completed"}, {"_id": 0}, sort=[("created_at", -1)])
+    rj = await db.render_jobs.find_one({"project_id": project["id"], "status": {"$in": ["completed", "COMPLETED"]}}, {"_id": 0}, sort=[("created_at", -1)])
     if not rj:
         raise RuntimeError("no completed render job for project")
     video_path = None
@@ -618,7 +620,7 @@ def start_scheduler():
     global _scheduler
     if _scheduler:
         return _scheduler
-    if os.environ.get("AUTO_POST_ENABLED", "true").lower() not in ("1","true","yes","on"):
+    if os.environ.get("AUTO_POST_ENABLED", "false").lower() not in ("1","true","yes","on"):
         logger.info("AUTO_POST_ENABLED != true — scheduler not started")
         return None
     try:
@@ -638,6 +640,39 @@ def start_scheduler():
 
 def get_scheduler():
     return _scheduler
+
+
+def stop_scheduler():
+    """Stop and forget the scheduler so a later explicit enable starts cleanly."""
+    global _scheduler
+    scheduler = _scheduler
+    _scheduler = None
+    if scheduler:
+        try:
+            scheduler.shutdown(wait=False)
+        except Exception:
+            logger.exception("Forge scheduler shutdown failed")
+
+
+async def restore_scheduler_setting() -> bool:
+    """Restore the durable automation switch before deciding to schedule work."""
+    db = get_db()
+    setting = await db.forge_settings.find_one(
+        {"id": "default"},
+        {"_id": 0, "auto_post_enabled": 1},
+    )
+    if setting and isinstance(setting.get("auto_post_enabled"), bool):
+        enabled = setting["auto_post_enabled"]
+    else:
+        # A missing durable choice is not consent to publish. Operators can
+        # enable the loop explicitly through the authenticated UI.
+        enabled = False
+    os.environ["AUTO_POST_ENABLED"] = "true" if enabled else "false"
+    if enabled:
+        start_scheduler()
+    else:
+        stop_scheduler()
+    return enabled
 
 def get_last_run():
     return _last_run
@@ -697,7 +732,7 @@ async def forge_status(user=Depends(get_current_user)):
         recently = await db.forge_runs.find({}, {"_id": 0}).sort("created_at", -1).to_list(5)
     except Exception:
         pass
-    enabled = os.environ.get("AUTO_POST_ENABLED", "true").lower() in ("1","true","yes","on")
+    enabled = os.environ.get("AUTO_POST_ENABLED", "false").lower() in ("1","true","yes","on")
     return {
         "enabled": enabled,
         "auto_post_enabled": enabled,
@@ -726,12 +761,7 @@ async def forge_toggle(enabled: bool = True, user=Depends(get_current_user)):
     if enabled:
         start_scheduler()
     else:
-        s = get_scheduler()
-        if s:
-            try:
-                s.pause()
-            except Exception:
-                pass
+        stop_scheduler()
     return {"auto_post_enabled": enabled}
 
 # Topics endpoints (for step a)
