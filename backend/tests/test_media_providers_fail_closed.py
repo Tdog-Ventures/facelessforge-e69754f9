@@ -80,6 +80,7 @@ async def test_tts_provider_error_does_not_fall_back_to_mock(monkeypatch):
 async def test_thumbnail_provider_error_does_not_create_mock_svg(monkeypatch):
     monkeypatch.delenv("EMERGENT_LLM_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("PEXELS_API_KEY", raising=False)
     monkeypatch.setenv("USE_MOCK_THUMBNAIL_IMAGES", "false")
     monkeypatch.setattr(
         thumbnail_images,

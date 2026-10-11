@@ -166,29 +166,38 @@ async def _gemini_image(prompt: str, session_id: str) -> bytes | None:
 
 async def _pexels_stock_image(project: dict) -> tuple[bytes | None, dict | None]:
     """Return a real landscape stock photo when the image model is unavailable."""
-    if not os.environ.get("PEXELS_API_KEY", ""):
+    api_key = os.environ.get("PEXELS_API_KEY", "").strip()
+    if not api_key:
         return None, None
-    from .stock import search_stock
 
     location = (project.get("location") or "Australia").strip()
     niche = (project.get("niche") or "housing").strip()
     query = f"{location} {niche} home"
-    result = await search_stock(query, "photos", 8, orientation="landscape")
-    if result.get("mock"):
-        return None, None
-    for item in result.get("results") or []:
-        url = item.get("download_url") or item.get("preview_url")
-        if not url or item.get("media_type") != "stock_image":
-            continue
-        try:
-            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            search = await client.get(
+                "https://api.pexels.com/v1/search",
+                headers={"Authorization": api_key},
+                params={"query": query, "per_page": 8, "orientation": "landscape"},
+            )
+            search.raise_for_status()
+            for photo in search.json().get("photos") or []:
+                src = photo.get("src") or {}
+                url = src.get("large2x") or src.get("large") or src.get("original")
+                if not url:
+                    continue
                 response = await client.get(url)
                 response.raise_for_status()
-            if len(response.content) > 20 * 1024 * 1024:
-                continue
-            return response.content, item
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Pexels thumbnail download failed: %s", exc)
+                if len(response.content) > 20 * 1024 * 1024:
+                    continue
+                return response.content, {
+                    "external_id": str(photo.get("id") or ""),
+                    "source_url": photo.get("url"),
+                    "download_url": url,
+                    "photographer": photo.get("photographer"),
+                }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Pexels thumbnail search/download failed: %s", exc)
     return None, None
 
 
