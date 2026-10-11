@@ -603,6 +603,7 @@ async def generate_script_endpoint(project_id: str, user=Depends(get_current_use
         "id": str(uuid.uuid4()),
         "project_id": project_id,
         **data,
+        "source": "ai_generated",
         "created_at": _now(),
         "updated_at": _now(),
     }
@@ -854,13 +855,78 @@ async def update_script(project_id: str, body: ScriptUpdate, user=Depends(get_cu
     if user["role"] == "viewer":
         raise HTTPException(status_code=403, detail="Viewer cannot edit")
     patch = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
+    patch.pop("source", None)
+    source = (body.source or "").strip().lower() or None
+    if source not in (None, "manual", "ai_generated"):
+        raise HTTPException(status_code=422, detail="source must be 'manual' or 'ai_generated'")
     if "full_script" in patch:
         import re as _re
-        patch["word_count"] = len(_re.findall(r"\b\w+\b", patch["full_script"]))
-        patch["estimated_duration"] = int(patch["word_count"] / 2.5)
+        cleaned = (patch["full_script"] or "").replace("\x00", "").strip()
+        if len(cleaned) > 20000:
+            raise HTTPException(status_code=422, detail="Script exceeds 20000 characters")
+        words = len(_re.findall(r"\b\w+\b", cleaned))
+        existing = await db.scripts.find_one({"project_id": project_id}, {"_id": 0})
+        if not existing:
+            # Manual-save path: creating the project's first script without any LLM call.
+            if words < 20:
+                raise HTTPException(status_code=422, detail="Script needs at least 20 words")
+            if source is None:
+                source = "manual"
+        elif not cleaned:
+            raise HTTPException(status_code=422, detail="Script cannot be empty")
+        patch["full_script"] = cleaned
+        patch["word_count"] = words
+        patch["estimated_duration"] = int(words / 2.5)
+        try:
+            narration = float(project.get("target_duration") or 30) - (
+                0.0 if project.get("production_mode") == "commercial_ad" else 2.5
+            )
+            budget = gen.target_word_count(max(narration, 1.0))
+        except Exception:
+            budget = None
+        patch["word_budget"] = budget
+        patch["budget_coverage"] = round(words / budget, 3) if budget else None
+    if source is not None:
+        patch["source"] = source
     patch["updated_at"] = _now()
-    await db.scripts.update_one({"project_id": project_id}, {"$set": patch})
-    return await _attach_project_view(db, project)
+    invalidated: dict = {}
+    if "full_script" in patch:
+        existing = await db.scripts.find_one({"project_id": project_id}, {"_id": 0})
+        old_text = " ".join(str((existing or {}).get("full_script") or "").split())
+        new_text = " ".join(str(patch["full_script"] or "").split())
+        if existing and old_text != new_text:
+            # Material change: dependent drafts derived from the old script go
+            # stale (scenes, metadata, thumbnail briefs, voiceover audio).
+            # History is preserved: render_jobs / master MP4 rows are never touched.
+            scenes_res = await db.scenes.delete_many({"project_id": project_id})
+            meta_res = await db.metadata_packages.delete_many({"project_id": project_id})
+            assets_res = await db.assets.delete_many({
+                "project_id": project_id,
+                "asset_type": {"$in": ["stock_video", "stock_image", "thumbnail_concept", "voiceover_audio"]},
+            })
+            await db.projects.update_one(
+                {"id": project_id},
+                {"$set": {"selected_voiceover_asset_id": None, "updated_at": _now()}},
+            )
+            project["selected_voiceover_asset_id"] = None
+            invalidated = {
+                "scenes": getattr(scenes_res, "deleted_count", 0),
+                "metadata": getattr(meta_res, "deleted_count", 0),
+                "assets": getattr(assets_res, "deleted_count", 0),
+            }
+    await db.scripts.update_one(
+        {"project_id": project_id},
+        {"$set": patch, "$setOnInsert": {"id": str(uuid.uuid4()), "project_id": project_id, "created_at": _now()}},
+        upsert=True,
+    )
+    view = await _attach_project_view(db, project)
+    if invalidated and any(invalidated.values()):
+        view["script_invalidated"] = invalidated
+        view["script_notice"] = (
+            "Script updated — regenerate scenes, metadata, and voiceover. "
+            "Completed videos were kept."
+        )
+    return view
 
 
 @router.patch("/projects/{project_id}/metadata")

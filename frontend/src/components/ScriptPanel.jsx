@@ -1,12 +1,16 @@
 import React, { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Sparkles, Save, Loader2 } from "lucide-react";
+import { Sparkles, Save, Loader2, PenLine } from "lucide-react";
 import { api, formatApiError } from "../lib/api";
+import { invalidationNotice } from "../lib/scriptUtils";
 import CopyButton from "./CopyButton";
+import ManualScriptForm from "./ManualScriptForm";
 
 export default function ScriptPanel({ projectId, script, canEdit, onChange }) {
   const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [manualMode, setManualMode] = useState(false);
+  const [confirmOverwrite, setConfirmOverwrite] = useState(false);
   const [autoSelectFirst, setAutoSelectFirst] = useState(true);
   const [draft, setDraft] = useState(() => {
     // Persist script immediately: check localStorage first, don't init as '' if saved exists
@@ -88,12 +92,24 @@ export default function ScriptPanel({ projectId, script, canEdit, onChange }) {
     try {
       const { data } = await api.patch(`/projects/${projectId}/script`, draft);
       onChange(data);
+      const notice = invalidationNotice(data);
       toast.success("Script saved");
+      if (notice) toast.info("Downstream assets need regeneration", { description: notice, duration: 8000 });
     } catch (err) {
       toast.error("Save failed", { description: formatApiError(err.response?.data?.detail) || err.message });
     } finally {
       setSaving(false);
     }
+  };
+
+  const startGenerate = () => {
+    // Explicit user action only: never silently overwrite a manual script.
+    if (script?.source === "manual" && !confirmOverwrite) {
+      setConfirmOverwrite(true);
+      return;
+    }
+    setConfirmOverwrite(false);
+    generate();
   };
 
   const pickHook = (hook) => {
@@ -127,19 +143,42 @@ export default function ScriptPanel({ projectId, script, canEdit, onChange }) {
       );
     }
     return (
-      <div className="border border-zinc-800 border-dashed p-10 text-center rounded-sm">
-        <p className="text-sm text-zinc-400 mb-4">No script yet. Generate one to get started.</p>
-        {canEdit && (
-          <button
-            data-testid="generate-script-btn"
-            onClick={generate}
-            disabled={generating}
-            className="inline-flex items-center gap-2 bg-[#00E5FF] text-black font-semibold text-sm px-4 py-2 rounded-sm hover:bg-[#33EFFF] disabled:opacity-60 transition-colors"
-          >
-            <Loader2 size={14} className={generating ? "animate-spin" : "hidden"} />
-            <Sparkles size={14} strokeWidth={2} className={generating ? "hidden" : "block"} />
-            {generating ? "Generating…" : "Generate Script"}
-          </button>
+      <div className="border border-zinc-800 border-dashed p-10 text-center rounded-sm space-y-4">
+        <p className="text-sm text-zinc-400">No script yet. Generate one to get started.</p>
+        {canEdit && !manualMode && (
+          <div className="flex items-center justify-center gap-3 flex-wrap">
+            <button
+              data-testid="generate-script-btn"
+              onClick={generate}
+              disabled={generating}
+              className="inline-flex items-center gap-2 bg-[#00E5FF] text-black font-semibold text-sm px-4 py-2 rounded-sm hover:bg-[#33EFFF] disabled:opacity-60 transition-colors"
+            >
+              <Loader2 size={14} className={generating ? "animate-spin" : "hidden"} />
+              <Sparkles size={14} strokeWidth={2} className={generating ? "hidden" : "block"} />
+              {generating ? "Generating…" : "Generate Script with AI"}
+            </button>
+            <button
+              data-testid="manual-script-btn"
+              onClick={() => setManualMode(true)}
+              disabled={generating}
+              className="inline-flex items-center gap-2 border border-zinc-700 text-zinc-200 font-semibold text-sm px-4 py-2 rounded-sm hover:border-[#00E5FF] hover:text-[#00E5FF] disabled:opacity-60 transition-colors"
+            >
+              <PenLine size={14} strokeWidth={2} />
+              Write or Paste Script
+            </button>
+          </div>
+        )}
+        {canEdit && manualMode && (
+          <div className="text-left">
+            <ManualScriptForm
+              projectId={projectId}
+              onSaved={(data) => {
+                setManualMode(false);
+                onChange(data);
+              }}
+              onCancel={() => setManualMode(false)}
+            />
+          </div>
         )}
       </div>
     );
@@ -149,17 +188,54 @@ export default function ScriptPanel({ projectId, script, canEdit, onChange }) {
 
   return (
     <div className="space-y-6">
+      {confirmOverwrite && (
+        <div
+          data-testid="regenerate-confirm"
+          className="border border-amber-500/50 bg-amber-500/5 rounded-sm px-4 py-3 flex items-center gap-3 flex-wrap"
+        >
+          <p className="flex-1 text-sm text-amber-200 min-w-[200px]">
+            This script was written manually. Replace it with AI output?
+          </p>
+          <button
+            data-testid="confirm-overwrite-btn"
+            onClick={generate}
+            disabled={generating}
+            className="font-mono text-[10px] uppercase tracking-widest bg-amber-500 text-black px-3 py-1.5 rounded-sm hover:bg-amber-400 disabled:opacity-50"
+          >
+            Replace with AI
+          </button>
+          <button
+            data-testid="cancel-overwrite-btn"
+            onClick={() => setConfirmOverwrite(false)}
+            className="font-mono text-[10px] uppercase tracking-widest text-zinc-400 hover:text-white border border-zinc-700 px-3 py-1.5 rounded-sm"
+          >
+            Keep mine
+          </button>
+        </div>
+      )}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4 font-mono text-[11px] text-zinc-500">
           <span>{script?.word_count ?? 0} words</span>
           <span>·</span>
           <span>~{Math.floor(script.estimated_duration / 60)}:{String(script.estimated_duration % 60).padStart(2, "0")} narration</span>
+          {script?.source && (
+            <span
+              data-testid="script-source-badge"
+              className={`uppercase tracking-widest border px-1.5 py-0.5 rounded-sm ${
+                script.source === "manual"
+                  ? "text-[#00E5FF] border-[#00E5FF]/40"
+                  : "text-zinc-400 border-zinc-700"
+              }`}
+            >
+              {script.source === "manual" ? "Manual" : "AI"}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {canEdit && (
             <button
               data-testid="regenerate-script-btn"
-              onClick={generate}
+              onClick={startGenerate}
               disabled={generating}
               className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-400 hover:text-[#00E5FF] border border-zinc-800 hover:border-[#00E5FF] px-2 py-1 rounded-sm transition-colors disabled:opacity-50"
             >
