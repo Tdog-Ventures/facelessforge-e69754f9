@@ -358,6 +358,15 @@ def _finalize_script(out: dict, narration_duration: float = None) -> dict:
     words = len(re.findall(r"\b\w+\b", full))
     out["word_count"] = words
     out["estimated_duration"] = int(words / 2.5)
+    # Duration-awareness: record the word budget the narration called for so
+    # shortfalls are visible early instead of surfacing later as a render
+    # "rebuild" (e.g. a 48-word script against a 30s target).
+    try:
+        budget = target_word_count(float(narration_duration)) if narration_duration else None
+    except Exception:
+        budget = None
+    out["word_budget"] = budget
+    out["budget_coverage"] = round(words / budget, 3) if budget else None
     return out
 
 

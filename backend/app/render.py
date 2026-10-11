@@ -58,6 +58,10 @@ from .subtitles import write_srt, write_srt_from_cues, write_srt_from_words
 from .transcribe import transcribe_words
 from .visual_query import truncate_words
 from .timing import TimingContract, build_timing_status, normalize_scene_timeline
+from .timing import (
+    MIN_AUTOFIT_MOVE_SECONDS,
+    suggest_fitted_duration,
+)
 from . import stock as stock_service
 from .grounding import CLIENT_VISUAL_TYPES, validate_commercial_grounding
 from .scoring import commercial_scorecard
@@ -321,6 +325,9 @@ def validate_prerequisites(project: dict, script: dict | None,
         timing_status["voiceover_action"] in {"ready", "tempo_fit"},
         "Regenerate the script and voiceover; automatic tempo fitting is limited to 5%.",
     )
+    autofit_suggestion = suggest_duration_autofit(
+        project, voice_for_timing, timing_status
+    )
 
     # Report stored drift only. The selected duration remains authoritative and
     # stale scene timestamps are repaired before rendering.
@@ -369,7 +376,83 @@ def validate_prerequisites(project: dict, script: dict | None,
         "selected_voiceover_asset_id": (full_voice or {}).get("id"),
         "scene_voiceover_count": len(scene_voices),
         "timing": timing_status,
+        "autofit_suggestion": autofit_suggestion,
     }
+
+
+def suggest_duration_autofit(
+    project: dict,
+    voiceover: dict | None,
+    timing_status: dict | None = None,
+) -> dict | None:
+    """Propose a one-click duration fit when timing is the blocker.
+
+    Pure (no DB writes). Returns {"from": int, "to": int,
+    "voiceover_seconds": float} or None when timing already fits, no measured
+    voiceover exists, or no in-bounds fit is possible.
+    """
+    try:
+        status = timing_status or build_timing_status(
+            project=project, scenes=[], voiceover=voiceover
+        )
+    except Exception:
+        return None
+    if status.get("voiceover_action") in {"ready", "tempo_fit"}:
+        return None
+    measured = status.get("voiceover_seconds")
+    if not measured:
+        return None
+    try:
+        current = int(project.get("target_duration") or 0)
+    except (TypeError, ValueError):
+        return None
+    intro = 0.0 if (project or {}).get("production_mode") == "commercial_ad" else 2.5
+    fitted = suggest_fitted_duration(
+        voiceover_seconds=float(measured), intro_seconds=intro
+    )
+    if fitted is None or abs(fitted - current) < MIN_AUTOFIT_MOVE_SECONDS:
+        return None
+    return {"from": current, "to": fitted, "voiceover_seconds": float(measured)}
+
+
+async def autofit_project_duration(project_id: str) -> dict:
+    """Persist the suggested duration fit (VO is master) and return the move.
+
+    Raises RuntimeError with an actionable message when no fit applies —
+    callers must surface that instead of queueing.
+    """
+    db = get_db()
+    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    if not project:
+        raise RuntimeError(f"Project {project_id} not found for duration auto-fit.")
+    full_voice = await db.assets.find_one(
+        {
+            "project_id": project_id,
+            "asset_type": "voiceover_audio",
+            "id": project.get("selected_voiceover_asset_id"),
+        },
+        {"_id": 0},
+    )
+    if not full_voice or full_voice.get("scene_id"):
+        raise RuntimeError(
+            "Duration auto-fit needs the selected full-script voiceover."
+        )
+    suggestion = suggest_duration_autofit(project, full_voice)
+    if not suggestion:
+        raise RuntimeError(
+            "No in-bounds duration fits the measured narration; "
+            "regenerate the script and voiceover."
+        )
+    await db.projects.update_one(
+        {"id": project_id},
+        {"$set": {"target_duration": suggestion["to"], "updated_at": _now()}},
+    )
+    logger.info(
+        "duration autofit project=%s %ss -> %ss (VO %.2fs)",
+        project_id, suggestion["from"], suggestion["to"],
+        suggestion["voiceover_seconds"],
+    )
+    return suggestion
 
 
 # ============================ ASSET RESOLUTION ============================

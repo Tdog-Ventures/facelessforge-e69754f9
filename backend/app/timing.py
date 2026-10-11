@@ -17,6 +17,14 @@ DEFAULT_INTRO_SECONDS = Decimal("2.5")
 DEFAULT_FPS = 30
 DEFAULT_SAMPLE_RATE = 48_000
 
+# Auto-fit loop bounds — mirror the product rule enforced on project updates
+# (target_duration 30..3600s). The loop may only move the selected duration
+# inside these bounds; anything else needs a script/voiceover rebuild.
+MIN_AUTOFIT_TARGET_SECONDS = 30
+MAX_AUTOFIT_TARGET_SECONDS = 3600
+# A trailing fit is only worth applying when it actually moves the selection.
+MIN_AUTOFIT_MOVE_SECONDS = 1
+
 
 def _units(seconds: Decimal, rate: int) -> int:
     return int((seconds * rate).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
@@ -166,3 +174,35 @@ def build_timing_status(
         "voiceover_action": action,
         "ready": scenes_match and action in {"ready", "tempo_fit"},
     }
+
+
+def suggest_fitted_duration(
+    *,
+    voiceover_seconds: float,
+    intro_seconds: float = float(DEFAULT_INTRO_SECONDS),
+    minimum: int = MIN_AUTOFIT_TARGET_SECONDS,
+    maximum: int = MAX_AUTOFIT_TARGET_SECONDS,
+    max_tempo_delta: float = 0.05,
+) -> int | None:
+    """Suggest a target duration that fits measured narration (VO is master).
+
+    Returns the fitted whole-second target, or None when no in-bounds target
+    can bring the narration within tempo tolerance (caller must rebuild the
+    script/voiceover instead). Never raises on bad input — returns None.
+    """
+    try:
+        measured = float(voiceover_seconds or 0)
+        intro = float(intro_seconds or 0)
+    except (TypeError, ValueError):
+        return None
+    if measured <= 0 or intro < 0:
+        return None
+    fitted = int(round(measured + intro))
+    if fitted < minimum or fitted > maximum:
+        return None
+    narration = fitted - intro
+    if narration <= 0:
+        return None
+    if abs(measured / narration - 1.0) > max_tempo_delta:
+        return None
+    return fitted

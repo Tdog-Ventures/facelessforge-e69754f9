@@ -1826,6 +1826,23 @@ async def render_start(project_id: str,
     metadata = await db.metadata_packages.find_one({"project_id": project_id}, {"_id": 0})
     assets = await db.assets.find({"project_id": project_id}, {"_id": 0}).to_list(500)
     check = render_service.validate_prerequisites(project, script, scenes, metadata, assets)
+    duration_autofit = None
+    if not check["ok"] and check["issues"] == ["Voiceover fits selected duration"]:
+        # Auto-fit loop (VO is master): the user asked for a full render and
+        # the only blocker is a stale duration selection. Move the selection
+        # to fit the measured narration instead of forcing manual patching.
+        # Any other blocker — or an impossible fit — still fails closed.
+        try:
+            duration_autofit = await render_service.autofit_project_duration(project_id)
+            project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+            check = render_service.validate_prerequisites(project, script, scenes, metadata, assets)
+        except RuntimeError as e:
+            raise HTTPException(status_code=400, detail={
+                "message": "Render prerequisites not met",
+                "issues": check["issues"],
+                "checklist": check["checklist"],
+                "autofit_error": str(e)[:300],
+            })
     if not check["ok"]:
         raise HTTPException(status_code=400, detail={
             "message": "Render prerequisites not met",
@@ -1838,6 +1855,11 @@ async def render_start(project_id: str,
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=_scrub_email(str(e)))
     import logging as _logging
+    if duration_autofit:
+        job["duration_autofit"] = duration_autofit
+        _logging.getLogger("facelessforge.render").info(
+            "render start autofit project=%s %s -> %s", project_id,
+            duration_autofit["from"], duration_autofit["to"])
     _logging.getLogger("facelessforge.render").info("render start project=%s user=%s", project_id, _scrub_email(user.get("email","")))
     return _ser(job)
 
