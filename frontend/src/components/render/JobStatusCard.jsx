@@ -3,7 +3,7 @@ import {
   Loader2, AlertCircle, CheckCircle2, Download, RefreshCw, Square as StopIcon,
 } from "lucide-react";
 
-const ACTIVE_STATES = new Set(["queued", "validating", "preparing_assets", "rendering"]);
+const ACTIVE_STATES = new Set(["queued", "validating", "preparing_assets", "rendering", "verifying"]);
 
 function fmtBytes(n) {
   if (!n && n !== 0) return "—";
@@ -20,11 +20,12 @@ function fmtSec(s) {
 
 export default function JobStatusCard({
   job, project, selectedThumbnail, canEdit, cancelling, starting,
-  onCancel, onRetry,
+  onCancel, onRetry, downloadUrl,
 }) {
   const failed = job.status === "failed";
   const completed = job.status === "completed";
   const inProgress = ACTIVE_STATES.has(job.status);
+  const deliveryUrl = downloadUrl || job.delivery_url || job.output_url;
 
   return (
     <div
@@ -83,12 +84,12 @@ export default function JobStatusCard({
         />
       </div>
 
-      {completed && job.output_url && (
+      {completed && deliveryUrl && (
         <div data-testid="render-output" className="space-y-3 pt-2">
           <video
             data-testid="render-video-player"
             controls
-            src={job.output_url}
+            src={deliveryUrl}
             preload="metadata"
             poster={selectedThumbnail?.preview_url}
             className="w-full rounded-sm border border-zinc-800 bg-black aspect-video"
@@ -103,7 +104,7 @@ export default function JobStatusCard({
           <div className="flex flex-wrap items-center gap-2">
             <a
               data-testid="render-download-btn"
-              href={job.output_url}
+              href={deliveryUrl}
               download={`${(project.name || "facelessforge").replace(/[^a-z0-9_-]/gi, "_")}.mp4`}
               className="inline-flex items-center gap-2 bg-[#00FF66] text-black font-semibold text-sm px-4 py-2 rounded-sm hover:bg-[#33FF80] transition-colors"
             >

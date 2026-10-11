@@ -394,6 +394,24 @@ def get_storage() -> StorageBackend:
     return _BACKEND
 
 
+def resolve_delivery_url(job: Optional[dict]) -> Optional[str]:
+    """Return a currently usable URL for a persisted render job.
+
+    Object-storage URLs are signed when requested rather than trusting the
+    time-limited URL saved when the render originally completed. Local storage
+    keeps using its stable FastAPI preview path.
+    """
+    if not job:
+        return None
+    backend = get_storage()
+    key = job.get("output_storage_key")
+    if key and backend.mode == "object" and hasattr(backend, "get_presigned_url"):
+        return backend.get_presigned_url(key)
+    if backend.mode == "local" and job.get("output_relative_url"):
+        return job["output_relative_url"]
+    return job.get("output_url")
+
+
 def reset_for_tests() -> None:
     """Drop the cached singleton — only used by tests that flip STORAGE_MODE."""
     global _BACKEND

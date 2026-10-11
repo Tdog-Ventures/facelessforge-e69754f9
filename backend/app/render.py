@@ -84,6 +84,17 @@ DEFAULT_MUSIC_BED = STATIC_MUSIC_DIR / "default_bed.mp3"
 MAX_SUBCLIP_SECONDS = 5.0
 MIN_SUBCLIP_SECONDS = 3.0
 
+# A job remains active through QA verification. Keeping this list centralized
+# prevents duplicate renders from being queued while the first job is checking
+# its final MP4.
+ACTIVE_RENDER_STATUSES = (
+    "queued",
+    "validating",
+    "preparing_assets",
+    "rendering",
+    "verifying",
+)
+
 # FIX Visual mismatch blocklist (mirror stock.py) — discard attached asset if blocklisted
 _BLOCKLIST = ["split", "saldi", "slack", "2026", "sale", "umbrella", "tourist", "beach hut", "pink house", "bangles", "peeling orange", "orange peel", "pottery painting", "beach huts", "hand jewelry", "bracelet", "food closeup", "generic beach", "tourist beach"]
 _DATE_RE = re.compile(r"(?:^|[^0-9])(?:[4-9]\.9\.2026|4-9\.9\.2026)(?:[^0-9]|$)")
@@ -1377,7 +1388,7 @@ async def _set_job(job_id: str, **patch):
 async def is_render_active(project_id: str) -> bool:
     db = get_db()
     job = await db.render_jobs.find_one(
-        {"project_id": project_id, "status": {"$in": ["queued", "validating", "preparing_assets", "rendering"]}},
+        {"project_id": project_id, "status": {"$in": list(ACTIVE_RENDER_STATUSES)}},
         {"_id": 0, "id": 1},
     )
     return bool(job)
@@ -1450,11 +1461,13 @@ async def queue_render(project_id: str, *, requested_by: str, burn_subtitles: bo
     except HTTPException:
         raise
     except Exception as e:
-        # If billing not configured, log but don't block render (fail open for dev)
-        logger.warning("credit deduct failed for %s: %s", requested_by, e)
+        logger.exception("credit authorization failed for %s", requested_by)
+        raise RuntimeError(
+            "Unable to authorize render credits; render not queued."
+        ) from e
 
     # Queue limit: max 3 concurrent, rest stay queued (semaphore will block)
-    active = await db.render_jobs.count_documents({"status": {"$in": ["queued", "validating", "preparing_assets", "rendering"]}})
+    active = await db.render_jobs.count_documents({"status": {"$in": list(ACTIVE_RENDER_STATUSES)}})
     if active >= MAX_CONCURRENT_RENDERS:
         logger.info("queue limit hit active=%s max=%s — job %s will queue", active, MAX_CONCURRENT_RENDERS, project_id)
 
@@ -1494,7 +1507,7 @@ async def cancel_render(project_id: str, job_id: str) -> bool:
     job = await db.render_jobs.find_one({"id": job_id, "project_id": project_id}, {"_id": 0})
     if not job:
         return False
-    if job["status"] not in ("queued", "validating", "preparing_assets", "rendering"):
+    if job["status"] not in ACTIVE_RENDER_STATUSES:
         return False
     task = _ACTIVE_TASKS.get(project_id)
     if task and not task.done():
@@ -1518,6 +1531,11 @@ async def _run_render_safe(job_id: str, project_id: str):
             await _set_job(job_id, status="failed", current_step="failed",
                            error_message=f"{type(e).__name__}: {e}"[:240],
                            completed_at=_now(), release_eligible=False)
+            db = get_db()
+            await db.projects.update_one(
+                {"id": project_id},
+                {"$set": {"status": "FAILED"}, "$currentDate": {"updated_at": True}},
+            )
         finally:
             _ACTIVE_TASKS.pop(project_id, None)
 
@@ -1535,7 +1553,7 @@ async def recover_stale_jobs() -> int:
     """
     db = get_db()
     cutoff = _now() - timedelta(seconds=STALE_JOB_TIMEOUT_SECONDS)
-    active = ["queued", "validating", "preparing_assets", "rendering"]
+    active = list(ACTIVE_RENDER_STATUSES)
     cursor = db.render_jobs.find(
         {"status": {"$in": active}, "updated_at": {"$lt": cutoff}},
         {"_id": 0, "id": 1, "status": 1, "project_id": 1},

@@ -1,6 +1,6 @@
 import React from "react";
 
-export default function JobHistory({ jobs }) {
+export default function JobHistory({ jobs, projectId }) {
   if (!jobs || jobs.length === 0) return null;
   return (
     <div className="border border-zinc-800 bg-[#121212] rounded-sm overflow-hidden">
@@ -26,9 +26,9 @@ export default function JobHistory({ jobs }) {
               {new Date(j.created_at).toLocaleString('en-AU', {timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, hour12:true})}
             </span>
             <span className="flex-1" />
-            {j.output_url && (
+            {j.status === "completed" && (j.output_storage_key || j.output_url) && (
               <a
-                href={j.output_url}
+                href={`/api/projects/${projectId}/render/jobs/${j.id}/download`}
                 target="_blank"
                 rel="noreferrer"
                 className="font-mono text-[10px] uppercase tracking-widest text-[#00E5FF] hover:underline"

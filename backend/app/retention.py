@@ -151,7 +151,7 @@ async def run_cleanup_once() -> dict:
     one_hour_ago = datetime.fromtimestamp(time.time() - 3600, tz=timezone.utc)
     res = await db.render_jobs.update_many(
         {
-            "status": {"$in": ["queued", "validating", "preparing_assets", "rendering"]},
+            "status": {"$in": ["queued", "validating", "preparing_assets", "rendering", "verifying"]},
             "created_at": {"$lt": one_hour_ago},
         },
         {"$set": {"status": "failed", "current_step": "failed",

@@ -68,9 +68,10 @@ def quality_label(score: int) -> str:
 
 def compute_project_status(*, has_script: bool, has_scenes: bool, has_metadata: bool,
                            has_assets: bool, render_status: Optional[str]) -> str:
-    if render_status == "COMPLETED":
+    normalized_render_status = str(render_status or "").upper()
+    if normalized_render_status == "COMPLETED":
         return "COMPLETED"
-    if render_status == "FAILED":
+    if normalized_render_status == "FAILED":
         return "FAILED"
     if has_script and has_scenes and has_metadata and has_assets:
         return "READY_TO_RENDER"

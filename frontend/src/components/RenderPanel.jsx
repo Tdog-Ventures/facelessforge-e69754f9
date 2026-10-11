@@ -9,7 +9,7 @@ import LastTerminalNotice from "./render/LastTerminalNotice";
 import JobHistory from "./render/JobHistory";
 import VoiceStylePicker from "./voiceover/VoiceStylePicker";
 
-const ACTIVE_STATES = new Set(["queued", "validating", "preparing_assets", "rendering"]);
+const ACTIVE_STATES = new Set(["queued", "validating", "preparing_assets", "rendering", "verifying"]);
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 // Only completed jobs deserve the full status card (they show the player +
 // download). In-progress jobs also show it. Cancelled / failed get a calm
@@ -280,11 +280,17 @@ export default function RenderPanel({
           starting={starting}
           onCancel={cancel}
           onRetry={start}
+          downloadUrl={`${API}/projects/${projectId}/render/jobs/${activeJob.id}/download`}
         />
       )}
 
       {!activeJob && jobs[0] && (jobs[0].status === "cancelled" || jobs[0].status === "failed") && (
-        <LastTerminalNotice job={jobs[0]} />
+        <LastTerminalNotice
+          job={jobs[0]}
+          canEdit={canEdit}
+          starting={starting}
+          onRetry={start}
+        />
       )}
 
       {/* Action bar */}
@@ -310,7 +316,7 @@ export default function RenderPanel({
         </a>
       </div>
 
-      <JobHistory jobs={jobs} />
+      <JobHistory jobs={jobs} projectId={projectId} />
     </div>
   );
 }

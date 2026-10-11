@@ -1,5 +1,5 @@
 import React from "react";
-import { AlertCircle, Square as StopIcon } from "lucide-react";
+import { AlertCircle, Loader2, RefreshCw, Square as StopIcon } from "lucide-react";
 
 function timeAgo(iso) {
   if (!iso) return "";
@@ -20,7 +20,7 @@ function timeAgo(iso) {
  * job terminated as cancelled or failed. Replaces the frozen progress card
  * so the user is never confused into thinking the render is still running.
  */
-export default function LastTerminalNotice({ job }) {
+export default function LastTerminalNotice({ job, canEdit, starting, onRetry }) {
   if (!job) return null;
   if (job.status !== "cancelled" && job.status !== "failed") return null;
 
@@ -56,6 +56,18 @@ export default function LastTerminalNotice({ job }) {
           </div>
         )}
       </div>
+      {failed && canEdit && onRetry && (
+        <button
+          type="button"
+          data-testid="render-terminal-retry-btn"
+          onClick={onRetry}
+          disabled={starting}
+          className="inline-flex items-center gap-2 border border-zinc-700 text-zinc-300 hover:text-[#00E5FF] hover:border-[#00E5FF] font-mono text-[10px] uppercase tracking-widest px-3 py-2 rounded-sm transition-colors disabled:opacity-50"
+        >
+          {starting ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+          Retry render
+        </button>
+      )}
     </div>
   );
 }

@@ -13,7 +13,7 @@ from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, Body
-from fastapi.responses import StreamingResponse, PlainTextResponse
+from fastapi.responses import RedirectResponse, StreamingResponse, PlainTextResponse
 
 from ..auth import (
     hash_password, verify_password,
@@ -36,6 +36,7 @@ except Exception:
     check_credits = None  # fallback if billing not yet patched
 from ..scoring import quality_score, quality_label, compute_project_status, scenes_to_csv
 from ..timing import build_timing_status
+from ..storage import resolve_delivery_url
 from .. import generation as gen
 from .. import stock as stock_service
 from .. import thumbnail_images as thumb_images
@@ -1862,6 +1863,25 @@ async def render_get_job(project_id: str, job_id: str, user=Depends(get_current_
     return _ser(job)
 
 
+@router.get("/projects/{project_id}/render/jobs/{job_id}/download")
+async def download_render_job(project_id: str, job_id: str, user=Depends(get_current_user)):
+    """Redirect to a freshly resolved URL for one completed render job."""
+    db = get_db()
+    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    _ensure_project_access(project, user)
+    job = await db.render_jobs.find_one({
+        "id": job_id,
+        "project_id": project_id,
+        "status": "completed",
+    }, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Completed render not found")
+    delivery_url = resolve_delivery_url(job)
+    if not delivery_url:
+        raise HTTPException(status_code=404, detail="Render artifact is unavailable")
+    return RedirectResponse(url=delivery_url, status_code=302)
+
+
 @router.post("/projects/{project_id}/render/jobs/{job_id}/cancel")
 async def render_cancel_job(project_id: str, job_id: str, user=Depends(get_current_user)):
     db = get_db()
@@ -1980,7 +2000,7 @@ async def render_full(project_id: str, user=Depends(get_current_user)):
     db = get_db()
     project = await db.projects.find_one({"id": project_id}, {"_id": 0})
     _ensure_project_access(project, user, write=True)
-    active = await db.render_jobs.find_one({"project_id": project_id, "status": {"$in": ["queued","validating","preparing_assets","rendering"]}}, {"_id": 0})
+    active = await db.render_jobs.find_one({"project_id": project_id, "status": {"$in": list(render_service.ACTIVE_RENDER_STATUSES)}}, {"_id": 0})
     if active:
         return {"queued": True, "job": _ser(active), "idempotent": True}
     script = await db.scripts.find_one({"project_id": project_id}, {"_id": 0})
@@ -2099,7 +2119,7 @@ async def admin_diagnostics(_admin=Depends(require_roles("admin"))):
     project_count = await db.projects.count_documents({})
     user_count = await db.users.count_documents({})
     active_renders = await db.render_jobs.count_documents(
-        {"status": {"$in": ["queued", "validating", "preparing_assets", "rendering"]}}
+        {"status": {"$in": list(render_service.ACTIVE_RENDER_STATUSES)}}
     )
 
     # Live dependency probes: redis ping + mongo ping (system must be green).
@@ -2371,8 +2391,8 @@ async def analytics_overview(user=Depends(get_current_user)):
 
     # Queue info: max 3 concurrent, rest queued (for 135 ready, show 3 rendering, 132 queued)
     try:
-        active_jobs = await db.render_jobs.count_documents({"status": {"$in": ["queued", "validating", "preparing_assets", "rendering"]}})
-        rendering_jobs = await db.render_jobs.count_documents({"status": {"$in": ["validating", "preparing_assets", "rendering"]}})
+        active_jobs = await db.render_jobs.count_documents({"status": {"$in": list(render_service.ACTIVE_RENDER_STATUSES)}})
+        rendering_jobs = await db.render_jobs.count_documents({"status": {"$in": ["validating", "preparing_assets", "rendering", "verifying"]}})
         queued_jobs = await db.render_jobs.count_documents({"status": "queued"})
         # If many READY_TO_RENDER projects but not yet queued as jobs, estimate queued as READY count - active
         ready_projects = status_counts.get("READY_TO_RENDER", 0)
@@ -2730,18 +2750,20 @@ async def email_send(project_id: str, user=Depends(get_current_user)):
 @router.get("/projects/{project_id}/download")
 async def download_redirect(project_id: str, user=Depends(get_current_user)):
     """Redirect to MP4 download (R2/GCS mirror)."""
-    from fastapi.responses import RedirectResponse
     db = get_db()
     project = await db.projects.find_one({"id": project_id}, {"_id": 0})
     _ensure_project_access(project, user)
     final = await db.render_jobs.find_one(
-        {"project_id": project_id, "status": "completed", "output_url": {"$ne": None}},
+        {"project_id": project_id, "status": "completed"},
         {"_id": 0},
         sort=[("completed_at", -1)],
     )
-    if not final or not final.get("output_url"):
+    if not final:
         raise HTTPException(status_code=404, detail="No completed render for download")
-    return RedirectResponse(url=final["output_url"], status_code=302)
+    delivery_url = resolve_delivery_url(final)
+    if not delivery_url:
+        raise HTTPException(status_code=404, detail="Render artifact is unavailable")
+    return RedirectResponse(url=delivery_url, status_code=302)
 
 
 @router.get("/email/status")
