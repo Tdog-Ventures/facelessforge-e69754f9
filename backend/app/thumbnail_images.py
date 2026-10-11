@@ -37,8 +37,10 @@ def is_mock_mode() -> bool:
 
 
 def provider_info() -> dict:
+    mock = _use_mock()
     return {
-        "mock": _use_mock(),
+        "mock": mock,
+        "configured": mock or bool(os.environ.get("EMERGENT_LLM_KEY", "") or os.environ.get("GEMINI_API_KEY", "")),
         "provider": os.environ.get("THUMBNAIL_IMAGE_PROVIDER", "gemini_nano_banana"),
         "model": os.environ.get("THUMBNAIL_IMAGE_MODEL", "gemini-3.1-flash-image-preview"),
     }

@@ -133,10 +133,11 @@ def _use_mock() -> bool:
 def is_mock_mode() -> bool: return _use_mock()
 def provider_info() -> dict:
     try:
-        return {"mock": _use_mock(), "provider": "mock" if _use_mock() else "elevenlabs", "voice_id": _voice_id(), "voices": SUPPORTED_STYLES, "styles": [{"id": k, "label": k.title()} for k in VOICE_STYLE_MAP.keys()], "voice_presets": list(VOICE_MAP.keys()), "display_voices": DISPLAY_VOICES, "voice_map": VOICE_MAP, "style_map": VOICE_STYLE_MAP, "default_voice": os.environ.get("DEFAULT_VOICE", "NEUTRAL_MALE_NARRATOR"), "default_voice_style": os.environ.get("DEFAULT_VOICE_STYLE", "narrator"), "cloned_voice_id": DEFAULT_CLONED_ID}
+        mock = _use_mock()
+        return {"mock": mock, "configured": mock or bool(_elevenlabs_key()), "provider": "mock" if mock else "elevenlabs", "model": "mock" if mock else "eleven_multilingual_v2", "voice_id": _voice_id(), "voices": SUPPORTED_STYLES, "styles": [{"id": k, "label": k.title()} for k in VOICE_STYLE_MAP.keys()], "voice_presets": list(VOICE_MAP.keys()), "display_voices": DISPLAY_VOICES, "voice_map": VOICE_MAP, "style_map": VOICE_STYLE_MAP, "default_voice": os.environ.get("DEFAULT_VOICE", "NEUTRAL_MALE_NARRATOR"), "default_voice_style": os.environ.get("DEFAULT_VOICE_STYLE", "narrator"), "cloned_voice_id": DEFAULT_CLONED_ID}
     except Exception as e:
         logger.exception(f"provider_info error: {e}")
-        return {"mock": False, "provider": "elevenlabs", "voice_id": DEFAULT_CLONED_ID, "voices": SUPPORTED_STYLES, "voice_presets": list(VOICE_MAP.keys()), "display_voices": DISPLAY_VOICES, "voice_map": VOICE_MAP}
+        return {"mock": False, "configured": bool(_elevenlabs_key()), "provider": "elevenlabs", "model": "eleven_multilingual_v2", "voice_id": DEFAULT_CLONED_ID, "voices": SUPPORTED_STYLES, "voice_presets": list(VOICE_MAP.keys()), "display_voices": DISPLAY_VOICES, "voice_map": VOICE_MAP}
 def _estimate_duration_seconds(text: str) -> int:
     import re as _re; words = len(_re.findall(r"\b\w+\b", text or "")); return max(2, int(round(words / 2.5)))
 def _write_mock_wav(path: Path, duration_s: int) -> None:

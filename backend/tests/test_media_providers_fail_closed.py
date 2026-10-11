@@ -7,6 +7,28 @@ from app import thumbnail_images, tts
 from app.routes import youtube
 
 
+def test_tts_provider_info_reports_the_real_live_provider(monkeypatch):
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "configured")
+    monkeypatch.setenv("USE_MOCK_TTS", "false")
+
+    info = tts.provider_info()
+
+    assert info["provider"] == "elevenlabs"
+    assert info["model"] == "eleven_multilingual_v2"
+    assert info["configured"] is True
+
+
+def test_thumbnail_provider_info_reports_missing_configuration(monkeypatch):
+    monkeypatch.delenv("EMERGENT_LLM_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("USE_MOCK_THUMBNAIL_IMAGES", "false")
+
+    info = thumbnail_images.provider_info()
+
+    assert info["provider"] == "gemini_nano_banana"
+    assert info["configured"] is False
+
+
 @pytest.mark.asyncio
 async def test_tts_missing_key_does_not_create_mock_audio(monkeypatch):
     monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)

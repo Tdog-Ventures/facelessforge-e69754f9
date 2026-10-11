@@ -18,7 +18,7 @@ export default function ThumbnailPanel({
   const [working, setWorking] = useState(null); // asset id being acted on
   const [autoSelectFirst, setAutoSelectFirst] = useState(true);
   const [autoPendingBriefId, setAutoPendingBriefId] = useState(null);
-  const [meta, setMeta] = useState({ mock: false, provider: "gemini_nano_banana" });
+  const [meta, setMeta] = useState({ mock: false, configured: false, provider: "gemini_nano_banana" });
   const [metaLoading, setMetaLoading] = useState(true);
   const [metaError, setMetaError] = useState(null);
   const confirm = useConfirm();
@@ -36,7 +36,7 @@ export default function ThumbnailPanel({
     setMetaError(null);
     try {
       const { data } = await api.get("/thumbnails/meta");
-      setMeta(data || { mock: true, provider: "gemini_nano_banana" });
+      setMeta(data || { mock: false, configured: false, provider: "gemini_nano_banana" });
     } catch (err) {
       setMetaError(formatApiError(err.response?.data?.detail) || err.message);
     } finally {
@@ -230,8 +230,8 @@ export default function ThumbnailPanel({
               Auto-select first concept
             </label>
           )}
-          <span className="font-mono text-[10px] uppercase tracking-widest text-[#00FF66] border border-[#00FF66]/30 bg-[#00FF66]/10 px-2 py-0.5 rounded-sm">
-            Generated · Gemini
+          <span className={`font-mono text-[10px] uppercase tracking-widest px-2 py-0.5 rounded-sm border ${meta.configured === false ? "text-[#FFB020] border-[#FFB020]/30 bg-[#FFB020]/10" : "text-[#00FF66] border-[#00FF66]/30 bg-[#00FF66]/10"}`}>
+            {meta.mock ? "Mock thumbnails" : meta.configured === false ? "Gemini · Setup required" : "Gemini · Live"}
           </span>
         </div>
       </div>
