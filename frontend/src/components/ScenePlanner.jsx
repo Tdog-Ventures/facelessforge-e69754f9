@@ -57,7 +57,7 @@ function HumanParamsSidebar({ projectId, project, onChange, canEdit }) {
   };
 
   return (
-    <div className="sticky top-20 bg-[#1c2333] border border-[rgba(59,130,246,0.15)] rounded-lg p-5 space-y-5" style={{ boxShadow: "0 0 20px rgba(59,130,246,0.05)" }}>
+    <div className="bg-[#1c2333] border border-[rgba(59,130,246,0.15)] rounded-lg p-5 space-y-5" style={{ boxShadow: "0 0 20px rgba(59,130,246,0.05)" }}>
       <h3 className="font-mono text-[11px] uppercase tracking-widest text-slate-400">Project Goals</h3>
 
       <div className="space-y-1.5">
@@ -382,7 +382,7 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-6">
-      <div className="space-y-4">
+      <div className="space-y-4 self-start sticky top-20">
         <HumanParamsSidebar projectId={projectId} project={innerProject} onChange={onChange} canEdit={canEdit} />
         {canEdit && project?.production_mode !== "commercial_ad" && (
           <button
