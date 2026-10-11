@@ -15,6 +15,9 @@ const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 // download). In-progress jobs also show it. Cancelled / failed get a calm
 // banner instead (see LastTerminalNotice) and live in the history list.
 const PROMOTABLE = new Set([...ACTIVE_STATES, "completed"]);
+const normalizeJob = (job) => job
+  ? { ...job, status: String(job.status || "").toLowerCase() }
+  : job;
 
 export default function RenderPanel({
   projectId, project, script, scenes, metadata, assets, timing, canEdit, onChange,
@@ -42,10 +45,11 @@ export default function RenderPanel({
         api.get(`/projects/${projectId}/render/preflight`),
         api.get(`/projects/${projectId}/render/jobs`),
       ]);
+      const normalizedJobs = (jl.data || []).map(normalizeJob);
       setPreflight(pf.data);
-      setJobs(jl.data);
-      const active = jl.data.find((j) => ACTIVE_STATES.has(j.status));
-      const latest = jl.data[0] || null;
+      setJobs(normalizedJobs);
+      const active = normalizedJobs.find((j) => ACTIVE_STATES.has(j.status));
+      const latest = normalizedJobs[0] || null;
       // Only show the in-detail JobStatusCard for active or completed jobs.
       // Cancelled / failed jobs surface as a calm banner via LastTerminalNotice
       // and remain accessible in the JobHistory list below.
@@ -70,28 +74,29 @@ export default function RenderPanel({
     pollRef.current = setInterval(async () => {
       try {
         const { data } = await api.get(`/projects/${projectId}/render/jobs/${activeJob.id}`);
-        if (TERMINAL.has(data.status)) {
+        const normalizedJob = normalizeJob(data);
+        if (TERMINAL.has(normalizedJob.status)) {
           clearInterval(pollRef.current);
           // Only keep the active card for completed (player + download).
           // Cancelled/failed drop out so LastTerminalNotice + history take over.
-          setActiveJob(PROMOTABLE.has(data.status) ? data : null);
+          setActiveJob(PROMOTABLE.has(normalizedJob.status) ? normalizedJob : null);
           const [pf, jl, full] = await Promise.all([
             api.get(`/projects/${projectId}/render/preflight`),
             api.get(`/projects/${projectId}/render/jobs`),
             api.get(`/projects/${projectId}`),
           ]);
           setPreflight(pf.data);
-          setJobs(jl.data);
+          setJobs((jl.data || []).map(normalizeJob));
           onChange(full.data);
-          if (data.status === "completed") {
+          if (normalizedJob.status === "completed") {
             toast.success("Render complete", { description: "MP4 ready below." });
-          } else if (data.status === "failed") {
-            toast.error("Render failed", { description: data.error_message || "Unknown error" });
-          } else if (data.status === "cancelled") {
+          } else if (normalizedJob.status === "failed") {
+            toast.error("Render failed", { description: normalizedJob.error_message || "Unknown error" });
+          } else if (normalizedJob.status === "cancelled") {
             toast("Render cancelled");
           }
         } else {
-          setActiveJob(data);
+          setActiveJob(normalizedJob);
         }
       } catch {/* silent retry */}
     }, 2500);
@@ -151,10 +156,10 @@ export default function RenderPanel({
     }
     try {
       const { data } = await api.post(`/projects/${projectId}/render/start`, { voice_style: voiceStyle, voice_id: voiceStyle, burn_subtitles: burnSubtitles, aspect_ratio: aspect });
-      setActiveJob(data);
+      setActiveJob(normalizeJob(data));
       toast.success("Render queued");
       const jl = await api.get(`/projects/${projectId}/render/jobs`);
-      setJobs(jl.data);
+      setJobs((jl.data || []).map(normalizeJob));
       console.log("[Render] Queued", data);
     } catch (err) {
       const detail = err.response?.data?.detail;

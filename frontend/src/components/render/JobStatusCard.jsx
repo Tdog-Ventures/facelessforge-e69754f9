@@ -22,19 +22,20 @@ export default function JobStatusCard({
   job, project, selectedThumbnail, canEdit, cancelling, starting,
   onCancel, onRetry, downloadUrl,
 }) {
-  const failed = job.status === "failed";
-  const completed = job.status === "completed";
-  const inProgress = ACTIVE_STATES.has(job.status);
+  const status = String(job.status || "").toLowerCase();
+  const failed = status === "failed";
+  const completed = status === "completed";
+  const inProgress = ACTIVE_STATES.has(status);
   const deliveryUrl = downloadUrl || job.delivery_url || job.output_url;
 
   return (
     <div
-      data-testid={`render-job-${job.status}`}
+      data-testid={`render-job-${status}`}
       className="border p-5 rounded-sm space-y-3"
       style={{
         borderColor: failed ? "#FF336666"
                      : completed ? "#00FF6666"
-                     : job.status === "cancelled" ? "#52525B"
+                     : status === "cancelled" ? "#52525B"
                      : "#00E5FF66",
         background: failed ? "rgba(255,51,102,0.05)"
                      : completed ? "rgba(0,255,102,0.04)"
@@ -44,12 +45,12 @@ export default function JobStatusCard({
       <div className="flex items-start gap-3">
         {failed ? <AlertCircle size={18} className="text-[#FF3366] mt-0.5" />
           : completed ? <CheckCircle2 size={18} className="text-[#00FF66] mt-0.5" />
-          : job.status === "cancelled" ? <StopIcon size={18} className="text-zinc-500 mt-0.5" />
+          : status === "cancelled" ? <StopIcon size={18} className="text-zinc-500 mt-0.5" />
           : <Loader2 size={18} className="text-[#00E5FF] mt-0.5 animate-spin" />}
         <div className="flex-1 min-w-0">
           <div className="font-mono text-[11px] uppercase tracking-widest mb-1"
                style={{ color: failed ? "#FF3366" : completed ? "#00FF66" : "#00E5FF" }}>
-            Render · {job.status}
+            Render · {status}
           </div>
           <div className="text-sm text-zinc-300">
             Progress {job.progress}% · step{" "}

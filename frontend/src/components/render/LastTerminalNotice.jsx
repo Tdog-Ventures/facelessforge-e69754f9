@@ -22,16 +22,17 @@ function timeAgo(iso) {
  */
 export default function LastTerminalNotice({ job, canEdit, starting, onRetry }) {
   if (!job) return null;
-  if (job.status !== "cancelled" && job.status !== "failed") return null;
+  const status = String(job.status || "").toLowerCase();
+  if (status !== "cancelled" && status !== "failed") return null;
 
-  const failed = job.status === "failed";
+  const failed = status === "failed";
   const Icon = failed ? AlertCircle : StopIcon;
   const accent = failed ? "#FF3366" : "#71717A";
   const label = failed ? "Last render failed" : "Last render was cancelled";
 
   return (
     <div
-      data-testid={`render-last-${job.status}`}
+      data-testid={`render-last-${status}`}
       className="flex items-start gap-3 border rounded-sm px-4 py-3"
       style={{
         borderColor: `${accent}55`,

@@ -31,7 +31,7 @@ test("failed render notice exposes an explicit retry action", () => {
   const html = renderToStaticMarkup(
     <LastTerminalNotice
       job={{
-        status: "failed",
+        status: "FAILED",
         error_message: "Voiceover provider unavailable",
         completed_at: new Date().toISOString(),
       }}

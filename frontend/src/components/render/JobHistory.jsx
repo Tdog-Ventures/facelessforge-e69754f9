@@ -8,7 +8,9 @@ export default function JobHistory({ jobs, projectId }) {
         Render history · {jobs.length} jobs
       </div>
       <div className="divide-y divide-zinc-800">
-        {jobs.slice(0, 8).map((j) => (
+        {jobs.slice(0, 8).map((j) => {
+          const status = String(j.status || "").toLowerCase();
+          return (
           <div
             key={j.id}
             data-testid={`render-history-${j.id}`}
@@ -16,17 +18,17 @@ export default function JobHistory({ jobs, projectId }) {
           >
             <span className="font-mono text-[10px] uppercase tracking-widest"
                   style={{
-                    color: j.status === "completed" ? "#00FF66"
-                      : j.status === "failed" ? "#FF3366"
-                      : j.status === "cancelled" ? "#71717A" : "#00E5FF",
+                    color: status === "completed" ? "#00FF66"
+                      : status === "failed" ? "#FF3366"
+                      : status === "cancelled" ? "#71717A" : "#00E5FF",
                   }}>
-              {j.status}
+              {status}
             </span>
             <span className="font-mono text-[10px] text-zinc-500">
               {new Date(j.created_at).toLocaleString('en-AU', {timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, hour12:true})}
             </span>
             <span className="flex-1" />
-            {j.status === "completed" && (j.output_storage_key || j.output_url) && (
+            {status === "completed" && (j.output_storage_key || j.output_url) && (
               <a
                 href={`/api/projects/${projectId}/render/jobs/${j.id}/download`}
                 target="_blank"
@@ -37,7 +39,8 @@ export default function JobHistory({ jobs, projectId }) {
               </a>
             )}
           </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
