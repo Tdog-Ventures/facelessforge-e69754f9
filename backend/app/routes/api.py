@@ -1872,7 +1872,7 @@ async def download_render_job(project_id: str, job_id: str, user=Depends(get_cur
     job = await db.render_jobs.find_one({
         "id": job_id,
         "project_id": project_id,
-        "status": "completed",
+        "status": {"$in": list(render_service.COMPLETED_RENDER_STATUS_VALUES)},
     }, {"_id": 0})
     if not job:
         raise HTTPException(status_code=404, detail="Completed render not found")
@@ -2000,7 +2000,7 @@ async def render_full(project_id: str, user=Depends(get_current_user)):
     db = get_db()
     project = await db.projects.find_one({"id": project_id}, {"_id": 0})
     _ensure_project_access(project, user, write=True)
-    active = await db.render_jobs.find_one({"project_id": project_id, "status": {"$in": list(render_service.ACTIVE_RENDER_STATUSES)}}, {"_id": 0})
+    active = await db.render_jobs.find_one({"project_id": project_id, "status": {"$in": list(render_service.ACTIVE_RENDER_STATUS_VALUES)}}, {"_id": 0})
     if active:
         return {"queued": True, "job": _ser(active), "idempotent": True}
     script = await db.scripts.find_one({"project_id": project_id}, {"_id": 0})
@@ -2119,7 +2119,7 @@ async def admin_diagnostics(_admin=Depends(require_roles("admin"))):
     project_count = await db.projects.count_documents({})
     user_count = await db.users.count_documents({})
     active_renders = await db.render_jobs.count_documents(
-        {"status": {"$in": list(render_service.ACTIVE_RENDER_STATUSES)}}
+        {"status": {"$in": list(render_service.ACTIVE_RENDER_STATUS_VALUES)}}
     )
 
     # Live dependency probes: redis ping + mongo ping (system must be green).
@@ -2143,13 +2143,13 @@ async def admin_diagnostics(_admin=Depends(require_roles("admin"))):
         deps["mongo_error"] = str(exc)[:200]
 
     render_counts = {
-        "queued": await db.render_jobs.count_documents({"status": "queued"}),
-        "rendering": await db.render_jobs.count_documents({"status": "rendering"}),
-        "validating": await db.render_jobs.count_documents({"status": "validating"}),
-        "preparing_assets": await db.render_jobs.count_documents({"status": "preparing_assets"}),
-        "completed": await db.render_jobs.count_documents({"status": "completed"}),
+        "queued": await db.render_jobs.count_documents({"status": {"$in": ["queued", "QUEUED"]}}),
+        "rendering": await db.render_jobs.count_documents({"status": {"$in": ["rendering", "RENDERING"]}}),
+        "validating": await db.render_jobs.count_documents({"status": {"$in": ["validating", "VALIDATING"]}}),
+        "preparing_assets": await db.render_jobs.count_documents({"status": {"$in": ["preparing_assets", "PREPARING_ASSETS"]}}),
+        "completed": await db.render_jobs.count_documents({"status": {"$in": list(render_service.COMPLETED_RENDER_STATUS_VALUES)}}),
         "failed": await db.render_jobs.count_documents(
-            {"status": {"$in": ["failed", "error"]}}
+            {"status": {"$in": ["failed", "FAILED", "error", "ERROR"]}}
         ),
         "needs_render": await db.render_jobs.count_documents(
             {"status": {"$in": ["needs_render", "generated", "draft"]}}
@@ -2296,7 +2296,7 @@ async def export_package_zip(project_id: str, user=Depends(get_current_user)):
                 zf.writestr("voiceovers.json", json.dumps(summary, indent=2, default=str))
         # Final render metadata (latest completed) — never include internal file_path
         latest = await db.render_jobs.find_one(
-            {"project_id": project_id, "status": "completed", "output_url": {"$ne": None}},
+            {"project_id": project_id, "status": {"$in": list(render_service.COMPLETED_RENDER_STATUS_VALUES)}, "output_url": {"$ne": None}},
             {"_id": 0},
             sort=[("completed_at", -1)],
         )
@@ -2391,9 +2391,9 @@ async def analytics_overview(user=Depends(get_current_user)):
 
     # Queue info: max 3 concurrent, rest queued (for 135 ready, show 3 rendering, 132 queued)
     try:
-        active_jobs = await db.render_jobs.count_documents({"status": {"$in": list(render_service.ACTIVE_RENDER_STATUSES)}})
-        rendering_jobs = await db.render_jobs.count_documents({"status": {"$in": ["validating", "preparing_assets", "rendering", "verifying"]}})
-        queued_jobs = await db.render_jobs.count_documents({"status": "queued"})
+        active_jobs = await db.render_jobs.count_documents({"status": {"$in": list(render_service.ACTIVE_RENDER_STATUS_VALUES)}})
+        rendering_jobs = await db.render_jobs.count_documents({"status": {"$in": ["validating", "VALIDATING", "preparing_assets", "PREPARING_ASSETS", "rendering", "RENDERING", "verifying", "VERIFYING"]}})
+        queued_jobs = await db.render_jobs.count_documents({"status": {"$in": ["queued", "QUEUED"]}})
         # If many READY_TO_RENDER projects but not yet queued as jobs, estimate queued as READY count - active
         ready_projects = status_counts.get("READY_TO_RENDER", 0)
         # For display: Queue 3 rendering, X queued
@@ -2592,7 +2592,7 @@ async def public_share(token: str):
 
     # Latest completed render job (final video)
     final_render = await db.render_jobs.find_one(
-        {"project_id": project["id"], "status": "completed", "output_url": {"$ne": None}},
+        {"project_id": project["id"], "status": {"$in": list(render_service.COMPLETED_RENDER_STATUS_VALUES)}, "output_url": {"$ne": None}},
         {"_id": 0},
         sort=[("completed_at", -1)],
     )
@@ -2700,7 +2700,7 @@ async def email_preview(project_id: str, user=Depends(get_current_user)):
     project = await db.projects.find_one({"id": project_id}, {"_id": 0})
     _ensure_project_access(project, user)
     final = await db.render_jobs.find_one(
-        {"project_id": project_id, "status": "completed", "output_url": {"$ne": None}},
+        {"project_id": project_id, "status": {"$in": list(render_service.COMPLETED_RENDER_STATUS_VALUES)}, "output_url": {"$ne": None}},
         {"_id": 0},
         sort=[("completed_at", -1)],
     )
@@ -2730,7 +2730,7 @@ async def email_send(project_id: str, user=Depends(get_current_user)):
     project = await db.projects.find_one({"id": project_id}, {"_id": 0})
     _ensure_project_access(project, user, write=False)
     final = await db.render_jobs.find_one(
-        {"project_id": project_id, "status": "completed", "output_url": {"$ne": None}},
+        {"project_id": project_id, "status": {"$in": list(render_service.COMPLETED_RENDER_STATUS_VALUES)}, "output_url": {"$ne": None}},
         {"_id": 0},
         sort=[("completed_at", -1)],
     )
@@ -2754,7 +2754,7 @@ async def download_redirect(project_id: str, user=Depends(get_current_user)):
     project = await db.projects.find_one({"id": project_id}, {"_id": 0})
     _ensure_project_access(project, user)
     final = await db.render_jobs.find_one(
-        {"project_id": project_id, "status": "completed"},
+        {"project_id": project_id, "status": {"$in": list(render_service.COMPLETED_RENDER_STATUS_VALUES)}},
         {"_id": 0},
         sort=[("completed_at", -1)],
     )
@@ -2804,7 +2804,7 @@ async def get_production_receipt(project_id: str, user=Depends(get_current_user)
     db = get_db()
     project = await db.projects.find_one({"id": project_id}, {"_id": 0})
     _ensure_project_access(project, user)
-    job = await db.render_jobs.find_one({"project_id": project_id, "status": "completed"}, {"_id": 0}, sort=[("completed_at", -1)])
+    job = await db.render_jobs.find_one({"project_id": project_id, "status": {"$in": list(render_service.COMPLETED_RENDER_STATUS_VALUES)}}, {"_id": 0}, sort=[("completed_at", -1)])
     if not job:
         raise HTTPException(status_code=404, detail="No completed render")
     script = await db.scripts.find_one({"project_id": project_id}, {"_id": 0})

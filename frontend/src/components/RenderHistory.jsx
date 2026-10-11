@@ -8,14 +8,17 @@ export default function RenderHistory({ jobs }) {
         Render history · {jobs.length} jobs
       </div>
       <div className="divide-y divide-zinc-800">
-        {jobs.slice(0, 8).map((j) => (
+        {jobs.slice(0, 8).map((j) => {
+          const _s = String(j.status || "").toLowerCase();
+          return (
           <div key={j.id} data-testid={`render-history-${j.id}`} className="px-4 py-3 flex items-center gap-3 text-sm">
-            <span className="font-mono text-[10px] uppercase tracking-widest" style={{ color: j.status === "completed" ? "#00FF66" : j.status === "failed" ? "#FF3366" : j.status === "cancelled" ? "#71717A" : "#00E5FF" }}>{j.status}</span>
+            <span className="font-mono text-[10px] uppercase tracking-widest" style={{ color: _s === "completed" ? "#00FF66" : _s === "failed" ? "#FF3366" : _s === "cancelled" ? "#71717A" : "#00E5FF" }}>{_s}</span>
             <span className="font-mono text-[10px] text-zinc-500">{new Date(j.created_at).toLocaleString('en-AU', {timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, hour12:true})}</span>
             <span className="flex-1" />
             {j.output_url && <a href={j.output_url} target="_blank" rel="noreferrer" className="font-mono text-[10px] uppercase tracking-widest text-[#00E5FF] hover:underline">Open</a>}
           </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

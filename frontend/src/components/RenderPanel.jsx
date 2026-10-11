@@ -70,7 +70,7 @@ export default function RenderPanel({
   // Poll while a job is active
   useEffect(() => {
     clearInterval(pollRef.current);
-    if (!activeJob || !ACTIVE_STATES.has(activeJob.status)) return;
+    if (!activeJob || !ACTIVE_STATES.has(String(activeJob.status || "").toLowerCase())) return;
     pollRef.current = setInterval(async () => {
       try {
         const { data } = await api.get(`/projects/${projectId}/render/jobs/${activeJob.id}`);
@@ -202,9 +202,9 @@ export default function RenderPanel({
     );
   }
 
-  const canRender = preflight.ok && !ACTIVE_STATES.has(activeJob?.status || "");
-  const completed = activeJob?.status === "completed";
-  const inProgress = activeJob && ACTIVE_STATES.has(activeJob.status);
+  const canRender = preflight.ok && !ACTIVE_STATES.has(String(activeJob?.status || "").toLowerCase() || "");
+  const completed = String(activeJob?.status || "").toLowerCase() === "completed";
+  const inProgress = activeJob && ACTIVE_STATES.has(String(activeJob.status || "").toLowerCase());
 
   const selectedThumbnail = (assets || []).find(
     (a) => a.id === project.selected_thumbnail_asset_id && a.asset_type === "generated_thumbnail"
@@ -289,7 +289,7 @@ export default function RenderPanel({
         />
       )}
 
-      {!activeJob && jobs[0] && (jobs[0].status === "cancelled" || jobs[0].status === "failed") && (
+      {!activeJob && jobs[0] && (String(jobs[0].status || "").toLowerCase() === "cancelled" || String(jobs[0].status || "").toLowerCase() === "failed") && (
         <LastTerminalNotice
           job={jobs[0]}
           canEdit={canEdit}

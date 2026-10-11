@@ -252,17 +252,17 @@ export default function ProjectDetailPage() {
                 />
                 <OverviewTile
                   label="Final video"
-                  ready={!!render_job && render_job.status === "completed" && !!(render_job.output_storage_key || render_job.output_url)}
+                  ready={!!render_job && String(render_job.status || "").toLowerCase() === "completed" && !!(render_job.output_storage_key || render_job.output_url)}
                   sub={
-                    render_job && render_job.status === "completed" && (render_job.output_storage_key || render_job.output_url)
+                    render_job && String(render_job.status || "").toLowerCase() === "completed" && (render_job.output_storage_key || render_job.output_url)
                       ? `MP4 ready · ${render_job.duration ? `${Math.round(render_job.duration)}s` : ""}`
-                      : render_job && ["queued","validating","preparing_assets","rendering","verifying"].includes(render_job.status)
+                      : render_job && ["queued","validating","preparing_assets","rendering","verifying"].includes(String(render_job.status || "").toLowerCase())
                       ? `Rendering · ${render_job.progress || 0}%`
                       : "Not rendered"
                   }
                 />
               </div>
-              {render_job?.status === "completed" && (render_job.output_storage_key || render_job.output_url) && (
+              {String(render_job?.status || "").toLowerCase() === "completed" && (render_job.output_storage_key || render_job.output_url) && (
                 <div data-testid="overview-final-video" className="border border-[#00FF66]/30 bg-[#00FF66]/5 rounded-sm p-4 space-y-3">
                   <div className="font-mono text-[10px] uppercase tracking-widest text-[#00FF66]">
                     Final video · ready
