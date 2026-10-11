@@ -85,6 +85,70 @@ def _uniform_tone_video(dest: Path, duration_s: float = 30.07) -> Path:
     return dest
 
 
+def _single_side_dark_top_video(dest: Path) -> Path:
+    """Bright pattern with a black band ONLY at the top (dark-sky content).
+
+    Incident 2026-10-11: a real render carried a ~200px near-black top band
+    over bright content for ~2.5s (night-sky stock). check_f flagged it as
+    letterboxing (OR logic) and failed the whole job. Bars from aspect
+    conversion come in pairs — one dark edge + bright opposite edge is
+    content and must pass.
+    """
+    src = dest.parent / "src_bright.mp4"
+    _run([ffmpeg, "-y", "-f", "lavfi", "-i",
+          f"testsrc2=size={portrait_W}x{portrait_H - 200}:rate=30:duration=11",
+          "-c:v", "libx264", "-pix_fmt", "yuv420p", str(src)])
+    _run([ffmpeg, "-y", "-i", str(src),
+          "-vf", f"pad={portrait_W}:{portrait_H}:0:200:black",
+          "-c:v", "libx264", "-pix_fmt", "yuv420p", str(dest)])
+    return dest
+
+
+def _landscape_single_side_dark_video(dest: Path) -> Path:
+    """1920x1080 with a black band ONLY on the left — content, must pass."""
+    src = dest.parent / "src_land.mp4"
+    _run([ffmpeg, "-y", "-f", "lavfi", "-i",
+          "testsrc2=size=1720x1080:rate=30:duration=11",
+          "-c:v", "libx264", "-pix_fmt", "yuv420p", str(src)])
+    _run([ffmpeg, "-y", "-i", str(src),
+          "-vf", "pad=1920:1080:200:0:black",
+          "-c:v", "libx264", "-pix_fmt", "yuv420p", str(dest)])
+    return dest
+
+
+def _landscape_symmetric_bars_video(dest: Path) -> Path:
+    """1920x1080 with black bars left AND right — genuine pillarbox, must fail."""
+    src = dest.parent / "src_land2.mp4"
+    _run([ffmpeg, "-y", "-f", "lavfi", "-i",
+          "testsrc2=size=1520x1080:rate=30:duration=11",
+          "-c:v", "libx264", "-pix_fmt", "yuv420p", str(src)])
+    _run([ffmpeg, "-y", "-i", str(src),
+          "-vf", "pad=1920:1080:200:0:black",
+          "-c:v", "libx264", "-pix_fmt", "yuv420p", str(dest)])
+    return dest
+
+
+def test_check_f_passes_single_sided_dark_top_content(tmp_path: Path):
+    video = _single_side_dark_top_video(tmp_path / "single_top.mp4")
+    result = asyncio.run(verify.check_f_no_pillarbox(str(video), aspect="9:16"))
+    assert result["frames_checked"] > 0
+    assert result["passed"] is True, f"single-sided dark content flagged as bars: {result}"
+
+
+def test_check_f_passes_single_sided_dark_left_content(tmp_path: Path):
+    video = _landscape_single_side_dark_video(tmp_path / "single_left.mp4")
+    result = asyncio.run(verify.check_f_no_pillarbox(str(video), aspect="16:9"))
+    assert result["frames_checked"] > 0
+    assert result["passed"] is True, f"single-sided dark content flagged as bars: {result}"
+
+
+def test_check_f_still_rejects_symmetric_pillarbox_bars(tmp_path: Path):
+    video = _landscape_symmetric_bars_video(tmp_path / "sym_bars.mp4")
+    result = asyncio.run(verify.check_f_no_pillarbox(str(video), aspect="16:9"))
+    assert result["frames_checked"] > 0
+    assert result["passed"] is False, f"symmetric pillarbox not detected: {result}"
+
+
 def test_check_c_ignores_trailing_subsecond_sliver(tmp_path: Path):
     """Incident 2026-10-11: a 30.07s render with healthy uniform audio
     failed check_c with vol_diff=72.4dB because the trailing 66ms sliver

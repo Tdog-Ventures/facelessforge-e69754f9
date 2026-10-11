@@ -559,10 +559,14 @@ async def check_f_no_pillarbox(video_path: str, scene_count: Optional[int] = Non
                 bot_var = _image_variance(frame_path, bot_region)
                 top_lum = _image_luminance(frame_path, top_region)
                 bot_lum = _image_luminance(frame_path, bot_region)
-                edge_dark = (
-                    (top_var < EDGE_VAR_MAX and top_lum < BLACK_BAR_LUM_MAX)
-                    or (bot_var < EDGE_VAR_MAX and bot_lum < BLACK_BAR_LUM_MAX)
-                )
+                top_dark = top_var < EDGE_VAR_MAX and top_lum < BLACK_BAR_LUM_MAX
+                bot_dark = bot_var < EDGE_VAR_MAX and bot_lum < BLACK_BAR_LUM_MAX
+                # Letterbox bars come in pairs from aspect conversion — a
+                # single dark edge with a bright opposite edge is content
+                # (e.g. dark night sky over a bright street), not a bar.
+                # Incident 2026-10-11: a 200px near-black top band over bright
+                # content failed an entire 35s render (edge_failures=1).
+                edge_dark = top_dark and bot_dark
                 # A bar needs bright content behind it — a fully dark frame is
                 # a fade/leader, not letterboxing.
                 center_lum = None
@@ -594,10 +598,11 @@ async def check_f_no_pillarbox(video_path: str, scene_count: Optional[int] = Non
                 right_var = _image_variance(frame_path, right_region)
                 left_lum = _image_luminance(frame_path, left_region)
                 right_lum = _image_luminance(frame_path, right_region)
-                edge_dark = (
-                    (left_var < EDGE_VAR_MAX and left_lum < BLACK_BAR_LUM_MAX)
-                    or (right_var < EDGE_VAR_MAX and right_lum < BLACK_BAR_LUM_MAX)
-                )
+                left_dark = left_var < EDGE_VAR_MAX and left_lum < BLACK_BAR_LUM_MAX
+                right_dark = right_var < EDGE_VAR_MAX and right_lum < BLACK_BAR_LUM_MAX
+                # Pillarbox bars come in pairs — a single dark edge against a
+                # bright opposite edge is content (dark wall, shadow), not a bar.
+                edge_dark = left_dark and right_dark
                 # A bar needs bright content behind it — a fully dark frame is
                 # a fade/leader, not pillarboxing.
                 center_lum = None
