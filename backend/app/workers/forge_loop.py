@@ -657,6 +657,15 @@ async def run_forge_once(user_id: Optional[str] = None, topic_override: Optional
             await db.forge_runs.insert_one({"id": str(uuid.uuid4()), "project_id": (project or {}).get("id") or "unknown", "youtube_video_id": None, "status": "failed", "error": str(e)[:500], "created_at": _now(), "updated_at": _now(), "summary": err_summary})
         except Exception:
             pass
+        try:
+            from .. import alerts as _alerts
+            await _alerts.notify(
+                f"forge-run-failed-{(project or {}).get('id') or 'unknown'}",
+                "Scheduled Forge run failed",
+                f"project={(project or {}).get('id')} error={type(e).__name__}: {e}"[:500],
+                {"project_id": (project or {}).get("id")}, priority=6)
+        except Exception:  # noqa: BLE001 — alerting never fails the forge path
+            pass
         _last_run = err_summary
         raise
 

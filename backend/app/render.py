@@ -1638,6 +1638,14 @@ async def _run_render_safe(job_id: str, project_id: str):
             await _set_job(job_id, status="failed", current_step="failed",
                            error_message=f"{type(e).__name__}: {e}"[:240],
                            completed_at=_now(), release_eligible=False)
+            try:
+                from . import alerts as _alerts
+                await _alerts.notify(
+                    f"render-failed-{job_id}", "Render job failed",
+                    f"job={job_id} project={project_id} error={type(e).__name__}: {e}"[:500],
+                    {"job_id": job_id, "project_id": project_id}, priority=6)
+            except Exception:  # noqa: BLE001 — alerting never fails the job path
+                pass
             db = get_db()
             await db.projects.update_one(
                 {"id": project_id},

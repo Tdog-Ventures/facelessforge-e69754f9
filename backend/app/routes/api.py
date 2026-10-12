@@ -2631,6 +2631,30 @@ async def analytics_overview(user=Depends(get_current_user)):
     }
 
 
+# ============================ ALERTS ============================
+from .. import alerts as alerts_service
+
+
+@router.get("/alerts/evaluate")
+async def alerts_evaluate(user=Depends(get_current_user)):
+    """Evaluate alert rules without sending. Gatus polls this over HTTPS."""
+    db = get_db()
+    return await alerts_service.evaluate(db)
+
+
+@router.post("/alerts/test")
+async def alerts_test(confirm: bool = False, user=Depends(get_current_user)):
+    """Non-destructive Gotify test. Dry-run unless ?confirm=true."""
+    if not confirm:
+        return {"sent": False, "dry_run": True,
+                "message": "Dry run — re-issue with ?confirm=true to dispatch.",
+                "alerts_enabled": alerts_service.is_enabled()}
+    return await alerts_service.notify(
+        "manual-test", "FacelessForge test notification",
+        "Operator-initiated test from /api/alerts/test.", {"user_id": user.get("id")},
+        priority=3)
+
+
 # ============================ SETTINGS ============================
 
 @router.get("/settings")
