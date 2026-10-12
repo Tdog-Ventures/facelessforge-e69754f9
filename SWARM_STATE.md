@@ -31,6 +31,10 @@
 - P3 alerting: `backend/app/alerts.py` (disabled-by-default Gotify dispatch, cooldowns, fail-silent, pollable evaluate); hooks on render + forge failures; `/api/alerts/evaluate` + `/api/alerts/test`.
 - Deployed: d9a3e03 (P2) + 4fac42e (P3) + a4fd6fc (runbook) in one gated rebuild; bundle main.b872e044.js served locally + publicly.
 - Final acceptance 2026-10-12: manual 30s render 56de1eb7 (30.07s, QA 8/8, sha 509c121c) + AI 45s render f89b4065 (45.07s, QA 8/8 incl. live bounded correction, sha ddf7af20). Zero DB duration edits, zero preflight bypasses. Spend: 48 ledger entries, −52 credits (2× render −3, rest scene-attach metering).
+- P1 alerts proven 2026-10-12: Gotify DB reset had killed the Gatus token; recreated app, labelled synthetic failing endpoint → alert 13233 arrived, 1 message across 4+ min (dedup), resolved 13253 after flip to passing, endpoint removed. Token rotated twice (once after accidental partial print); final token never printed. Backlogged genuine alerts (revenue-loop etc.) resumed paging as designed.
+- P2 flags: completion flags derived from artifact probe + verification record; backfilled 417 jobs (271 audio, 399 captions fixed); 179 jobs reference missing R2 objects (evidence of prior deletions).
+- P3 storage: R2 renders 500/6.6GB vs 449 DB keys (179 missing, 230 unreferenced/4.36GB); local 3.04GB; orphan compose volumes exist. Nothing deleted.
+- P4 scheduler: dry_run plan + publish=False controlled invocation (no scheduler start, no publish). Guard defaults unchanged.
 
 ## Test evidence
 - See commit messages + `/root/ffbackups/` dirs. Full backend suite + frontend suite green before each deploy.

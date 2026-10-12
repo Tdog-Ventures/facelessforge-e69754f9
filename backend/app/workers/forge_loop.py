@@ -570,14 +570,21 @@ async def _autopost_shorts(project: dict, shorts: list[str]) -> list[dict]:
             continue
     return results
 
-async def run_forge_once(user_id: Optional[str] = None, topic_override: Optional[str] = None, niche_override: Optional[str] = None) -> dict:
-    """Execute full pipeline a)-h). Returns summary."""
+async def run_forge_once(user_id: Optional[str] = None, topic_override: Optional[str] = None, niche_override: Optional[str] = None, publish: bool = True, dry_run: bool = False) -> dict:
+    """Execute full pipeline a)-h). Returns summary.
+
+    publish=False runs every stage except YouTube upload / Shorts clipping /
+    auto-post, recording publish_skipped=true — the controlled-invocation path
+    for proving rendering and job status with publishing disabled.
+    dry_run=True performs zero writes and returns the execution plan only.
+    Default behavior (publish=True) is unchanged for the scheduled path.
+    """
     global _last_run
     db = get_db()
-    # FAIL-CLOSED: never publish while automation is OFF. This covers both the
-    # RUN NOW button and the scheduled job so no path can upload to YouTube
-    # without an explicit, durable opt-in.
-    if not await is_auto_post_enabled(db):
+    # FAIL-CLOSED: publishing invocations require automation ON. Dry runs and
+    # publish=False controlled invocations proceed — they cannot upload by
+    # construction (see dry_run plan and publish gate below).
+    if publish and not dry_run and not await is_auto_post_enabled(db):
         raise PublishDisabledError(
             "Automation is OFF (auto_post_enabled=false). RUN NOW is blocked to "
             "prevent an unscheduled YouTube publish. Enable automation first: "
@@ -597,6 +604,24 @@ async def run_forge_once(user_id: Optional[str] = None, topic_override: Optional
         topic = topic_override
     if niche_override:
         niche = niche_override
+
+    if dry_run:
+        # Orchestration proof with zero side effects: resolve everything the
+        # run would need, write nothing.
+        from .. import tts as _tts
+        from ..storage import get_storage as _get_storage
+        plan = {
+            "dry_run": True,
+            "topic": topic,
+            "niche": niche,
+            "owner_id": user_id,
+            "auto_post_enabled": await is_auto_post_enabled(db),
+            "would_publish": bool(publish),
+            "tts_mock": _tts.is_mock_mode(),
+            "storage_mode": _get_storage().mode,
+        }
+        logger.info("scheduler: dry run plan topic=%s publish=%s", topic, publish)
+        return plan
 
     started = _now()
     log: list[str] = []
@@ -621,6 +646,28 @@ async def run_forge_once(user_id: Optional[str] = None, topic_override: Optional
 
         await _generate_thumbnail(project)
         log.append("Thumbnail done")
+
+        if not publish:
+            log.append("Publish disabled for this invocation — skipping YouTube upload, clipping, auto-post")
+            summary = {
+                "id": str(uuid.uuid4()),
+                "project_id": project["id"],
+                "topic": topic,
+                "niche": niche,
+                "youtube_video_id": None,
+                "youtube_url": None,
+                "shorts": [],
+                "status": "completed",
+                "publish_skipped": True,
+                "log": log,
+                "started_at": started.isoformat(),
+                "finished_at": _now().isoformat(),
+            }
+            run_id = summary["id"]
+            await db.forge_runs.insert_one({"id": run_id, "project_id": project["id"], "youtube_video_id": None, "status": "completed", "created_at": _now(), "updated_at": _now(), "summary": summary})
+            _last_run = summary
+            logger.info("Forge once completed without publishing project=%s", project["id"])
+            return summary
 
         yt = await _youtube_upload(project)
         log.append(f"YouTube upload {yt['youtube_video_id']} (mock={yt.get('is_mock')})")
