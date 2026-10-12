@@ -26,9 +26,11 @@
 - Gotify/Gatus run on `ethinx-operations_default`; facelessforge-app is on `deploy_facelessforge_net` and published socket is 127.0.0.1-bound, so the app CANNOT reach Gotify directly. Alerting path: app exposes `/api/alerts/evaluate` (Gatus polls the public URL) + optional direct dispatch via env-configured URL. ALERTS_ENABLED defaults false.
 
 ## Changes (this delivery)
-- P1 manual script: PATCH upsert + source + validation + draft-only invalidation; dual-option Script tab; 7 backend + 10 frontend tests; 16/16 browser checks.
+- P1 manual script: PATCH upsert + source + validation + draft-only invalidation; dual-option Script tab; 7 backend + 10 frontend tests; 16/16 browser checks + offline-failure check.
 - P2 voice fit: measured VO duration; silent target overwrite removed; bounded AI correction (initial + 2); manual never rewritten; explicit autofit endpoint; voice_fit provenance persisted.
 - P3 alerting: `backend/app/alerts.py` (disabled-by-default Gotify dispatch, cooldowns, fail-silent, pollable evaluate); hooks on render + forge failures; `/api/alerts/evaluate` + `/api/alerts/test`.
+- Deployed: d9a3e03 (P2) + 4fac42e (P3) + a4fd6fc (runbook) in one gated rebuild; bundle main.b872e044.js served locally + publicly.
+- Final acceptance 2026-10-12: manual 30s render 56de1eb7 (30.07s, QA 8/8, sha 509c121c) + AI 45s render f89b4065 (45.07s, QA 8/8 incl. live bounded correction, sha ddf7af20). Zero DB duration edits, zero preflight bypasses. Spend: 48 ledger entries, −52 credits (2× render −3, rest scene-attach metering).
 
 ## Test evidence
 - See commit messages + `/root/ffbackups/` dirs. Full backend suite + frontend suite green before each deploy.
