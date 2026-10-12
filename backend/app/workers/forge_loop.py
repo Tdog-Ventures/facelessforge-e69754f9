@@ -368,6 +368,22 @@ async def _ensure_assets_and_render(project: dict) -> dict:
         logger.error("voiceover failed: %s", e)
         raise RuntimeError(f"Voiceover failed - mock voiceover forbidden per BOOT.md HARD RULE 3: {e}"[:190]) from e
 
+    # Pre-queue fit gate: refuse to spend render credits/compute on narration
+    # that the render gate would reject. Uses the MEASURED voiceover duration.
+    try:
+        from ..timing import build_timing_status as _timing_status
+        _fit = _timing_status(project=project, scenes=scenes,
+                              voiceover={"duration": float(vo_payload.get("duration") or 0)})
+        if _fit.get("voiceover_action") not in ("ready", "tempo_fit"):
+            raise RuntimeError(
+                f"Voiceover is {_fit.get('voiceover_seconds') or 0:.2f}s but the narration "
+                f"budget is {_fit.get('narration_seconds') or 0:.2f}s. "
+                f"Regenerate the script and voiceover before rendering.")
+    except RuntimeError:
+        raise
+    except Exception as _e:  # noqa: BLE001 — gate must never mask deeper failures
+        logger.warning("Forge fit gate skipped: %s", _e)
+
     # Queue render — POST /render/full/{id} equivalent
     try:
         job = await render_service.queue_render(pid, requested_by=project["user_id"])
