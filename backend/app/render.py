@@ -178,6 +178,44 @@ async def _probe_duration_seconds(path: Path) -> Optional[float]:
         return None
 
 
+def _verification_check_passed(verification_result, check_name: str) -> Optional[bool]:
+    """Read one constitution check from a persisted verification result.
+
+    Returns None when the record (or the check) is absent — callers must fall
+    back explicitly rather than treat missing evidence as failure or success.
+    """
+    try:
+        checks = (verification_result or {}).get("checks") or []
+        for check in checks:
+            if check.get("name") == check_name:
+                return True if check.get("passed") else False
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+async def _final_has_audio_stream(path: Optional[Path]) -> Optional[bool]:
+    """Probe the finished artifact for an audio stream (ground truth).
+
+    Must run BEFORE workdir cleanup — paths below the workdir vanish after.
+    Returns None when unmeasurable (no file / no ffprobe).
+    """
+    bin_ = _resolve_ffprobe_bin()
+    if not bin_ or path is None or not path.exists():
+        return None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            bin_, "-v", "error", "-select_streams", "a",
+            "-show_entries", "stream=codec_name",
+            "-of", "default=noprint_wrappers=1:nokey=1", str(path),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await proc.communicate()
+        return bool((out or b"").decode().strip())
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _build_subclip_plan(scenes: list[dict], timeline_duration: Optional[float]) -> list[dict]:
     """Return a per-scene plan describing how many sub-clips to render and
     each sub-clip's duration. ``timeline_duration`` is derived from the
@@ -2317,6 +2355,17 @@ async def _run_render(job_id: str, project_id: str):
             except Exception:
                 pass
 
+        # Derive completion flags from verified evidence BEFORE workdir cleanup:
+        # audio_path lives under work_dir (deleted below), so the old
+        # exists()-after-cleanup check always read False. Probe the finished
+        # artifact instead; fall back to the probed narration duration.
+        probe_target = None
+        if verify_local is not None and verify_local.exists():
+            probe_target = verify_local
+        elif final.exists():
+            probe_target = final
+        final_has_audio = await _final_has_audio_stream(probe_target)
+        captions_present = _verification_check_passed(verification_result, "captions_present")
         await _set_job(job_id, status="completed", current_step="completed", progress=100,
             output_path=str(saved.file_path) if saved.file_path else None, output_url=saved.url,
             output_relative_url=saved.preview_path, output_storage_mode=store.mode, output_storage_key=saved.key,
@@ -2325,8 +2374,10 @@ async def _run_render(job_id: str, project_id: str):
             video_qa=qa_result, commercial_report_path=str(report_path) if commercial else None,
             timestamped_scene_review=scene_review if commercial else None,
             scorecard=scorecard,
-            has_audio=bool(audio_path and audio_path.exists()),
-            captions_burned=bool(burn_enabled and burned_out != silent_out),
+            has_audio=final_has_audio if final_has_audio is not None else bool(audio_duration),
+            captions_burned=captions_present if captions_present is not None else bool(burn_enabled and burned_out != silent_out),
+            flags_derived_from="final_artifact_probe+verification",
+            flags_derived_at=_now(),
             release_eligible=not commercial)
         await db.projects.update_one({"id": project_id}, {"$set": {"status": "COMPLETED", "rendered_video_asset_id": job_id, "updated_at": _now()}})
 
