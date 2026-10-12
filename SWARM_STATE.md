@@ -35,6 +35,7 @@
 - P2 flags: completion flags derived from artifact probe + verification record; backfilled 417 jobs (271 audio, 399 captions fixed); 179 jobs reference missing R2 objects (evidence of prior deletions).
 - P3 storage: R2 renders 500/6.6GB vs 449 DB keys (179 missing, 230 unreferenced/4.36GB); local 3.04GB; orphan compose volumes exist. Nothing deleted.
 - P4 scheduler: dry_run plan + publish=False controlled invocation (no scheduler start, no publish). Guard defaults unchanged.
+- P4 gate: forge path refuses to queue drifting VO (measured) pre-queue; controlled run proved failure handling end-to-end (failed forge_runs + job rows, no publish, alert hook fired). Session spend −3 (single queue deduction, no duplicates).
 
 ## Test evidence
 - See commit messages + `/root/ffbackups/` dirs. Full backend suite + frontend suite green before each deploy.
