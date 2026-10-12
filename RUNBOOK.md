@@ -19,3 +19,16 @@
 
 5. **Rollback:** If app is unhealthy after recreate, restore `.env.facelessforge.pre-fix` and recreate app only.
 
+6. **Code rollback (scoped, preserves later work):** never use `git reset --hard`.
+   ```bash
+   cd /opt/facelessforge/deploy
+   git log --oneline -5                       # identify the bad commit
+   git revert <bad-commit-sha>                # newest first if several
+   docker compose -f docker-compose.facelessforge.yml up -d --build --no-deps facelessforge-app
+   docker inspect facelessforge-app --format '{{.State.Health.Status}}'
+   curl -s http://127.0.0.1:7001/api/health
+   ```
+   File-level priors for recent slices live under `/root/ffbackups/<timestamp>-<slice>/`
+   (each with `changed-files.txt`, `PRIOR_SHA.txt`, `rollback.txt`). Confirm zero
+   active renders in the last 90 minutes before any rebuild (see SWARM_STATE.md).
+
