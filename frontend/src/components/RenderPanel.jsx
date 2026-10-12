@@ -27,6 +27,7 @@ export default function RenderPanel({
   const [activeJob, setActiveJob] = useState(null);
   const [starting, setStarting] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [fitting, setFitting] = useState(false);
   const [voiceStyle, setVoiceStyle] = useState(project?.voice_style || project?.voice_id || "narrator");
   const [burnSubtitles, setBurnSubtitles] = useState(false);
   // was: aspect_ratio: "9:16"
@@ -240,6 +241,36 @@ export default function RenderPanel({
         </div>
       )}
       <PrereqChecklist preflight={preflight} onRefresh={refreshAll} />
+
+      {canEdit && preflight.autofit_suggestion && (
+        <div className="border border-[#00E5FF]/30 bg-[#00E5FF]/5 rounded-sm px-4 py-3 flex items-center gap-3 flex-wrap">
+          <p className="flex-1 text-sm text-zinc-300 min-w-[220px]">
+            Narration runs {preflight.autofit_suggestion.voiceover_seconds?.toFixed(1)}s — apply a{" "}
+            {preflight.autofit_suggestion.from}s → {preflight.autofit_suggestion.to}s duration fit?
+          </p>
+          <button
+            data-testid="autofit-duration-btn"
+            disabled={fitting}
+            onClick={async () => {
+              setFitting(true);
+              try {
+                const { data } = await api.post(`/projects/${projectId}/render/autofit-duration`);
+                toast.success(`Duration fitted to ${data.autofit.to}s`);
+                await refreshAll();
+                const full = await api.get(`/projects/${projectId}`);
+                onChange(full.data);
+              } catch (err) {
+                toast.error("Auto-fit failed", { description: formatApiError(err.response?.data?.detail) || err.message });
+              } finally {
+                setFitting(false);
+              }
+            }}
+            className="font-mono text-[10px] uppercase tracking-widest bg-[#00E5FF] text-black px-3 py-2 rounded-sm hover:bg-[#33EFFF] disabled:opacity-50"
+          >
+            {fitting ? "Fitting…" : `Fit to ${preflight.autofit_suggestion.to}s`}
+          </button>
+        </div>
+      )}
 
       {canEdit && (
         <div className="border border-zinc-800 bg-[#121212] rounded-sm p-4 space-y-4">

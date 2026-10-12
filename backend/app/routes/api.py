@@ -906,7 +906,8 @@ async def update_script(project_id: str, body: ScriptUpdate, user=Depends(get_cu
             })
             await db.projects.update_one(
                 {"id": project_id},
-                {"$set": {"selected_voiceover_asset_id": None, "updated_at": _now()}},
+                {"$set": {"selected_voiceover_asset_id": None, "updated_at": _now()},
+                 "$unset": {"voice_fit": ""}},
             )
             project["selected_voiceover_asset_id"] = None
             invalidated = {
@@ -1581,6 +1582,28 @@ def _voice_style_for(project: dict, override: Optional[str]) -> str:
     return os.environ.get("DEFAULT_VOICE_STYLE", "narrator")
 
 
+async def _record_voice_fit(db, project_id: str, script_version: str, attempts: int,
+                          tts_calls: int, llm_calls: int, measured: float, actions: list) -> None:
+    """Persist fitting provenance. Never raises — observability only."""
+    try:
+        project = await db.projects.find_one({"id": project_id}, {"_id": 0}) or {}
+        await db.projects.update_one(
+            {"id": project_id},
+            {"$set": {"voice_fit": {
+                "script_version": script_version,
+                "attempts": attempts,
+                "tts_calls": tts_calls,
+                "llm_calls": llm_calls,
+                "measured_seconds": round(float(measured or 0), 2),
+                "target_seconds": project.get("target_duration"),
+                "actions": list(actions or []),
+                "updated_at": _now().isoformat(),
+            }, "updated_at": _now()}},
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 @router.post("/projects/{project_id}/voiceover/generate-script")
 async def generate_full_voiceover(
     project_id: str,
@@ -1600,15 +1623,96 @@ async def generate_full_voiceover(
     voice = _voice_style_for(project, body.voice_style)
 
     asset_id = str(uuid.uuid4())
-    try:
-        payload = await tts_service.generate_voiceover(
-            text=text, voice_style=voice, tone=body.tone, project_id=project_id,
-            asset_id=asset_id, scene_id=None, name_suffix="(Full script)",
+    script_source = (script.get("source") or "ai_generated").lower()
+    narration_budget = float(project.get("target_duration") or 30) - (
+        0.0 if project.get("production_mode") == "commercial_ad" else 2.5
+    )
+    fit = project.get("voice_fit") or {}
+    script_version = f"{script.get('id')}:{script.get('updated_at')}"
+    if fit.get("script_version") == script_version:
+        attempts_used = int(fit.get("attempts") or 0)
+    else:
+        attempts_used = 0
+    if attempts_used >= 3:
+        raise HTTPException(status_code=409, detail={
+            "code": "voice_correction_exhausted",
+            "message": "Voiceover correction budget exhausted for this script (initial + 2 corrections). Edit the script or apply an explicit duration fit.",
+            "attempts": attempts_used,
+        })
+    actions: list = []
+    llm_calls = 0
+    current_text = text
+    current_script_id = script.get("id")
+    payload = None
+    while True:
+        attempts_used += 1
+        try:
+            payload = await tts_service.generate_voiceover(
+                text=current_text, voice_style=voice, tone=body.tone, project_id=project_id,
+                asset_id=asset_id if attempts_used == 1 else str(uuid.uuid4()),
+                scene_id=None, name_suffix="(Full script)",
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"Voiceover generation failed: {e}")
+        measured = float(payload.get("duration") or 0)
+        if measured <= 0:
+            raise HTTPException(status_code=502, detail="Voiceover provider returned invalid audio (no measurable duration).")
+        drift_ratio = measured / narration_budget if narration_budget > 0 else 1.0
+        if abs(drift_ratio - 1.0) <= 0.05:
+            actions.append(f"attempt {attempts_used}: measured {measured:.2f}s fits {narration_budget:.2f}s budget")
+            break
+        # Outside tolerance: manual scripts are never rewritten — stop with numbers.
+        if script_source == "manual":
+            actions.append(f"attempt {attempts_used}: measured {measured:.2f}s outside 5% of {narration_budget:.2f}s budget (manual script kept)")
+            await _record_voice_fit(db, project_id, script_version, attempts_used, 1, llm_calls, measured, actions)
+            suggestion = render_service.suggest_duration_autofit(
+                project, {"duration": measured})
+            raise HTTPException(status_code=400, detail={
+                "code": "voiceover_length_mismatch",
+                "message": f" narration is {measured:.1f}s but the {float(project.get('target_duration') or 30):.0f}s target allows {narration_budget:.1f}s: shorten/lengthen the script, or apply an explicit duration fit.",
+                "measured_seconds": round(measured, 2),
+                "narration_budget_seconds": round(narration_budget, 2),
+                "autofit_suggestion": suggestion,
+            })
+        if attempts_used >= 3:
+            actions.append(f"attempt {attempts_used}: still outside tolerance after 2 corrections")
+            await _record_voice_fit(db, project_id, script_version, attempts_used, attempts_used, llm_calls, measured, actions)
+            raise HTTPException(status_code=400, detail={
+                "code": "voiceover_fit_exhausted",
+                "message": f"Voiceover still outside 5% after 2 corrections ({measured:.1f}s vs {narration_budget:.1f}s budget). Edit the script or apply an explicit duration fit.",
+                "measured_seconds": round(measured, 2),
+                "narration_budget_seconds": round(narration_budget, 2),
+                "autofit_suggestion": render_service.suggest_duration_autofit(project, {"duration": measured}),
+            })
+        # Bounded AI correction: same generator, length instruction scaled to the
+        # measured shortfall/overrun. Meaning preserved; full new text is spoken
+        # (never truncated to fit). attempts_used counts this correction.
+        factor = narration_budget / measured
+        current_words = len(current_text.split())
+        corrected_target = max(30.0, min(3600.0, round((current_words * factor) / 2.5 + 2.5)))
+        actions.append(
+            f"attempt {attempts_used}: measured {measured:.2f}s vs {narration_budget:.2f}s budget — "
+            f"regenerating AI script at {corrected_target:.0f}s budget"
         )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"Voiceover generation failed: {e}")
+        regen_project = dict(project, target_duration=corrected_target)
+        corrected = await gen.generate_script(regen_project)
+        llm_calls += 1
+        current_text = (corrected.get("full_script") or "").strip()
+        if not current_text:
+            raise HTTPException(status_code=502, detail="Script correction produced empty text.")
+        new_script_doc = {
+            "id": str(uuid.uuid4()),
+            "project_id": project_id,
+            **corrected,
+            "source": "ai_generated",
+            "created_at": _now(),
+            "updated_at": _now(),
+        }
+        await db.scripts.replace_one({"project_id": project_id}, dict(new_script_doc), upsert=True)
+        current_script_id = new_script_doc["id"]
+        script_version = f"{current_script_id}:{new_script_doc['updated_at']}"
 
     payload["text_excerpt"] = text[:240]
     payload["created_at"] = _now()
@@ -1627,15 +1731,12 @@ async def generate_full_voiceover(
         {"$set": {"status": "generated", "updated_at": _now()}},
     )
     await db.assets.insert_one(dict(payload))
-    # VO is master timeline: update project target_duration to voDuration
-    try:
-        vo_duration = float(payload.get("duration") or 0)
-        if vo_duration > 0:
-            await db.projects.update_one({"id": project_id}, {"$set": {"target_duration": int(vo_duration + 0.5), "updated_at": _now()}})
-    except Exception as e:
-        import logging
-        logging.getLogger("facelessforge.routes").warning("Failed to update project duration from full VO: %s", e)
-    project_set = {"selected_voiceover_asset_id": asset_id, "updated_at": _now()}
+    # Requested target stays authoritative: never move it here (the previous
+    # silent target_duration overwrite from the byte-size estimate caused the
+    # preflight mismatch loop). Record the fit instead.
+    await _record_voice_fit(db, project_id, script_version, attempts_used, attempts_used, llm_calls,
+                            float(payload.get("duration") or 0), actions)
+    project_set = {"selected_voiceover_asset_id": payload["id"], "updated_at": _now()}
 
     if not payload.get("mock"):
         cost = float(payload.get("cost_estimate") or 0)
@@ -1838,6 +1939,42 @@ async def render_preflight(project_id: str, user=Depends(get_current_user)):
     return render_service.validate_prerequisites(project, script, scenes, metadata, assets)
 
 
+@router.post("/projects/{project_id}/render/autofit-duration")
+async def render_autofit_duration(project_id: str, user=Depends(get_current_user)):
+    """Explicit user action: move the selected duration to fit measured narration.
+
+    Idempotent — already-fitting selections return ok without writing.
+    This is the only path that changes target_duration besides direct project
+    edits; render/start never moves it.
+    """
+    db = get_db()
+    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    _ensure_project_access(project, user, write=True)
+    if user["role"] == "viewer":
+        raise HTTPException(status_code=403, detail="Viewer cannot change duration")
+    try:
+        suggestion = await render_service.autofit_project_duration(project_id)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e)[:300])
+    try:
+        project_after = await db.projects.find_one({"id": project_id}, {"_id": 0}) or {}
+        fit = dict(project_after.get("voice_fit") or {})
+        fit["actions"] = list(fit.get("actions") or []) + [
+            f"explicit duration fit {suggestion['from']}s -> {suggestion['to']}s"]
+        await db.projects.update_one(
+            {"id": project_id}, {"$set": {"voice_fit": fit, "updated_at": _now()}})
+    except Exception:  # noqa: BLE001
+        pass
+    script = await db.scripts.find_one({"project_id": project_id}, {"_id": 0})
+    scenes = await db.scenes.find({"project_id": project_id}).sort("scene_number", 1).to_list(500)
+    metadata = await db.metadata_packages.find_one({"project_id": project_id}, {"_id": 0})
+    assets = await db.assets.find({"project_id": project_id}, {"_id": 0}).to_list(500)
+    return {
+        "autofit": suggestion,
+        "preflight": render_service.validate_prerequisites(project, script, scenes, metadata, assets),
+    }
+
+
 @router.post("/projects/{project_id}/render/start")
 async def render_start(project_id: str,
                        body: RenderStartRequest = Body(default=None),
@@ -1892,40 +2029,25 @@ async def render_start(project_id: str,
     metadata = await db.metadata_packages.find_one({"project_id": project_id}, {"_id": 0})
     assets = await db.assets.find({"project_id": project_id}, {"_id": 0}).to_list(500)
     check = render_service.validate_prerequisites(project, script, scenes, metadata, assets)
-    duration_autofit = None
-    if not check["ok"] and check["issues"] == ["Voiceover fits selected duration"]:
-        # Auto-fit loop (VO is master): the user asked for a full render and
-        # the only blocker is a stale duration selection. Move the selection
-        # to fit the measured narration instead of forcing manual patching.
-        # Any other blocker — or an impossible fit — still fails closed.
-        try:
-            duration_autofit = await render_service.autofit_project_duration(project_id)
-            project = await db.projects.find_one({"id": project_id}, {"_id": 0})
-            check = render_service.validate_prerequisites(project, script, scenes, metadata, assets)
-        except RuntimeError as e:
-            raise HTTPException(status_code=400, detail={
-                "message": "Render prerequisites not met",
-                "issues": check["issues"],
-                "checklist": check["checklist"],
-                "autofit_error": str(e)[:300],
-            })
     if not check["ok"]:
-        raise HTTPException(status_code=400, detail={
+        detail: dict = {
             "message": "Render prerequisites not met",
             "issues": check["issues"],
             "checklist": check["checklist"],
-        })
+        }
+        # The requested target is authoritative: render/start never moves it.
+        # Surface the explicit-fit option so the user can apply it deliberately.
+        suggestion = check.get("autofit_suggestion")
+        if suggestion and check["issues"] == ["Voiceover fits selected duration"]:
+            detail["autofit_suggestion"] = suggestion
+            detail["autofit_endpoint"] = f"/api/projects/{project_id}/render/autofit-duration"
+        raise HTTPException(status_code=400, detail=detail)
     # Pass burn_subtitles and aspect to queue (burn defaults False as per user request — not during production)
     try:
         job = await render_service.queue_render(project_id, requested_by=user["id"], burn_subtitles=bool(body.burn_subtitles), aspect_ratio=body.aspect_ratio)
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=_scrub_email(str(e)))
     import logging as _logging
-    if duration_autofit:
-        job["duration_autofit"] = duration_autofit
-        _logging.getLogger("facelessforge.render").info(
-            "render start autofit project=%s %s -> %s", project_id,
-            duration_autofit["from"], duration_autofit["to"])
     _logging.getLogger("facelessforge.render").info("render start project=%s user=%s", project_id, _scrub_email(user.get("email","")))
     return _ser(job)
 
