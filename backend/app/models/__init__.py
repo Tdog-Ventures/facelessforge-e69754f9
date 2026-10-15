@@ -186,6 +186,13 @@ class ScriptUpdate(BaseModel):
     source: Optional[str] = None  # "manual" | "ai_generated"; explicit wins, else preserved
 
 
+class MusicSelectRequest(BaseModel):
+    music_gain_db: Optional[float] = None
+    music_ducking_enabled: Optional[bool] = None
+    rights_confirmed: Optional[bool] = None
+    rights_note: Optional[str] = None
+
+
 class MetadataUpdate(BaseModel):
     selected_title: Optional[str] = None
     description: Optional[str] = None

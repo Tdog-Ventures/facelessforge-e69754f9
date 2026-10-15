@@ -10,9 +10,10 @@ import os
 import uuid
 import zipfile
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, Body
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, Body, UploadFile, File, Form
 from fastapi.responses import RedirectResponse, StreamingResponse, PlainTextResponse
 
 from ..auth import (
@@ -28,7 +29,7 @@ from ..models import (
     ScriptUpdate, MetadataUpdate, ProviderSettingsUpdate, AssetCreate,
     ShareUpdate, ForgotPasswordRequest, ResetPasswordRequest,
     StockAttachRequest, FindAssetsRequest, AssetStatusUpdate,
-    AutoAttachRequest, GenerateThumbnailImagesRequest,
+    AutoAttachRequest, GenerateThumbnailImagesRequest, MusicSelectRequest,
 )
 try:
     from ..billing import check_credits
@@ -410,6 +411,11 @@ async def _attach_project_view(db, project: dict) -> dict:
         if asset.get("id") == project.get("selected_voiceover_asset_id")
         and asset.get("asset_type") == "voiceover_audio"
     ), None)
+    selected_music = next((
+        asset for asset in assets
+        if asset.get("id") == project.get("selected_music_asset_id")
+        and asset.get("asset_type") == "music_audio"
+    ), None)
     timing = build_timing_status(
         project=project,
         scenes=scenes,
@@ -422,6 +428,7 @@ async def _attach_project_view(db, project: dict) -> dict:
         "metadata": _ser(metadata) if metadata else None,
         "assets": [_ser(a) for a in assets],
         "render_job": _render_job_payload(render_job),
+        "music_asset": _ser(selected_music) if selected_music else None,
         "share": _share_payload(project),
         "timing": timing,
     }
@@ -1933,6 +1940,148 @@ async def delete_voiceover(project_id: str, asset_id: str, user=Depends(get_curr
             {"id": project_id},
             {"$set": {"selected_voiceover_asset_id": None, "updated_at": _now()}},
         )
+    return await _attach_project_view(db, await db.projects.find_one({"id": project_id}, {"_id": 0}))
+
+
+# ============================ MUSIC (per-project background tracks) ============================
+from .. import audio_mix as audio_mix_service
+
+MUSIC_ALLOWED_EXTS = {".mp3", ".wav", ".m4a", ".ogg", ".flac"}
+MUSIC_MAX_BYTES = 20 * 1024 * 1024
+MUSIC_MAX_SECONDS = 600.0
+MUSIC_GAIN_MIN_DB = -30.0
+MUSIC_GAIN_MAX_DB = -6.0
+MUSIC_GAIN_DEFAULT_DB = -14.0
+
+
+@router.post("/projects/{project_id}/music/upload")
+async def upload_music(project_id: str, file: UploadFile = File(...),
+                       rights_confirmed: bool = Form(False),
+                       rights_note: str = Form(""),
+                       user=Depends(get_current_user)):
+    """Tenant-owned music upload. Never becomes audible without selection + rights."""
+    import tempfile
+    db = get_db()
+    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    _ensure_project_access(project, user, write=True)
+    if user["role"] == "viewer":
+        raise HTTPException(status_code=403, detail="Viewer cannot upload music")
+    ext = (Path(file.filename or "").suffix or "").lower()
+    if ext not in MUSIC_ALLOWED_EXTS:
+        raise HTTPException(status_code=422, detail=f"Unsupported audio type {ext or 'unknown'}")
+    raw = await file.read()
+    if len(raw) > MUSIC_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="Music file exceeds 20 MB")
+    if len(raw) < 1024:
+        raise HTTPException(status_code=422, detail="Music file is empty")
+    tmp = Path(tempfile.gettempdir()) / f"music-upload-{uuid.uuid4().hex}{ext}"
+    tmp.write_bytes(raw)
+    try:
+        info = await asyncio.to_thread(audio_mix_service.probe_audio, tmp)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
+    if not info.get("sample_rate") or not info.get("duration"):
+        raise HTTPException(status_code=422, detail="File is not decodable audio")
+    if info["duration"] > MUSIC_MAX_SECONDS:
+        raise HTTPException(status_code=422, detail="Music track exceeds 600 seconds")
+    from ..storage import get_storage as _gs
+    asset_id = str(uuid.uuid4())
+    key = f"music/{project_id}/{asset_id}{ext}"
+    saved = _gs().save_file(_stage_upload_copy(raw, key, ext), key, "audio/mpeg")
+    doc = {
+        "id": asset_id,
+        "project_id": project_id,
+        "name": file.filename or "music track",
+        "asset_type": "music_audio",
+        "file_path": None,
+        "storage_key": saved.key,
+        "preview_url": saved.preview_path or saved.url,
+        "source": "upload",
+        "duration": info["duration"],
+        "rights_confirmed": bool(rights_confirmed),
+        "rights_note": (rights_note or "")[:200],
+        "mock": False,
+        "created_at": _now(),
+        "updated_at": _now(),
+    }
+    await db.assets.insert_one(dict(doc))
+    if rights_confirmed:
+        await db.projects.update_one(
+            {"id": project_id},
+            {"$set": {"music_enabled": True, "selected_music_asset_id": asset_id,
+                      "music_gain_db": MUSIC_GAIN_DEFAULT_DB,
+                      "music_ducking_enabled": True,
+                      "music_rights_confirmed": True, "updated_at": _now()}},
+        )
+    return await _attach_project_view(db, await db.projects.find_one({"id": project_id}, {"_id": 0}))
+
+
+def _stage_upload_copy(raw: bytes, key: str, ext: str):
+    """Persist upload bytes to a temp path for the storage backend."""
+    import tempfile
+    tmp = Path(tempfile.gettempdir()) / f"music-store-{uuid.uuid4().hex}{ext}"
+    tmp.write_bytes(raw)
+    return tmp
+
+
+@router.post("/projects/{project_id}/music/{asset_id}/select")
+async def select_music(project_id: str, asset_id: str, body: MusicSelectRequest,
+                       user=Depends(get_current_user)):
+    db = get_db()
+    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    _ensure_project_access(project, user, write=True)
+    if user["role"] == "viewer":
+        raise HTTPException(status_code=403, detail="Viewer cannot select music")
+    asset = await db.assets.find_one(
+        {"id": asset_id, "project_id": project_id, "asset_type": "music_audio"},
+        {"_id": 0},
+    )
+    if not asset:
+        raise HTTPException(status_code=404, detail="Music asset not found for this project")
+    gain = body.music_gain_db
+    if gain is None:
+        gain = project.get("music_gain_db", MUSIC_GAIN_DEFAULT_DB)
+    try:
+        gain = float(gain)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="music_gain_db must be a number")
+    if not (MUSIC_GAIN_MIN_DB <= gain <= MUSIC_GAIN_MAX_DB):
+        raise HTTPException(status_code=422, detail="music_gain_db must be between -30 and -6 dB")
+    ducking = body.music_ducking_enabled
+    if ducking is None:
+        ducking = project.get("music_ducking_enabled", True)
+    rights = bool(body.rights_confirmed or asset.get("rights_confirmed")
+                  or project.get("music_rights_confirmed"))
+    if not rights:
+        raise HTTPException(status_code=422, detail="Rights confirmation is required before music can be selected")
+    patch_asset: dict = {"rights_confirmed": True, "updated_at": _now()}
+    if body.rights_note is not None:
+        patch_asset["rights_note"] = body.rights_note[:200]
+    await db.assets.update_one({"id": asset_id, "project_id": project_id}, {"$set": patch_asset})
+    await db.projects.update_one(
+        {"id": project_id},
+        {"$set": {"music_enabled": True, "selected_music_asset_id": asset_id,
+                  "music_gain_db": gain, "music_ducking_enabled": bool(ducking),
+                  "music_rights_confirmed": True, "updated_at": _now()}},
+    )
+    return await _attach_project_view(db, await db.projects.find_one({"id": project_id}, {"_id": 0}))
+
+
+@router.delete("/projects/{project_id}/music")
+async def disable_music(project_id: str, user=Depends(get_current_user)):
+    db = get_db()
+    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    _ensure_project_access(project, user, write=True)
+    if user["role"] == "viewer":
+        raise HTTPException(status_code=403, detail="Viewer cannot change music")
+    await db.projects.update_one(
+        {"id": project_id},
+        {"$set": {"music_enabled": False, "selected_music_asset_id": None,
+                  "updated_at": _now()}},
+    )
     return await _attach_project_view(db, await db.projects.find_one({"id": project_id}, {"_id": 0}))
 
 

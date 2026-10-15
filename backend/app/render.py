@@ -62,6 +62,7 @@ from .timing import (
     MIN_AUTOFIT_MOVE_SECONDS,
     suggest_fitted_duration,
 )
+from . import audio_mix as audio_mix
 from . import stock as stock_service
 from .grounding import CLIENT_VISUAL_TYPES, validate_commercial_grounding
 from .scoring import commercial_scorecard
@@ -289,6 +290,48 @@ def _resolve_music_bed(*, for_voiceover: bool = False) -> Optional[Path]:
     return None
 
 
+async def _resolve_selected_music(project: dict, assets: list[dict],
+                                  work_dir: Path) -> Optional[dict]:
+    """Resolve the tenant-selected music track, or None when music is off.
+
+    Returns {"path", "gain_db", "ducking", "asset_id"}. Raises with an
+    actionable message when music is enabled but the selection is missing,
+    cross-tenant, unlicensed, or undecodable. Never falls back to the
+    bundled bed (its bass loop reads as electrical hum under narration).
+    """
+    if not project.get("music_enabled"):
+        return None
+    sel_id = project.get("selected_music_asset_id")
+    asset = next((a for a in assets
+                  if a.get("id") == sel_id
+                  and a.get("asset_type") == "music_audio"
+                  and a.get("project_id") == project.get("id")), None)
+    if asset is None:
+        raise RuntimeError(
+            "music enabled but no valid selected music asset: "
+            "select a track or disable music before rendering.")
+    if not (asset.get("rights_confirmed") or project.get("music_rights_confirmed")):
+        raise RuntimeError(
+            "selected music asset lacks rights confirmation: "
+            "confirm rights before rendering.")
+    local = await _ensure_audio_local(asset, work_dir, "music_selected")
+    if not local:
+        raise RuntimeError(
+            "selected music asset is inaccessible: re-upload the track.")
+    info = await asyncio.to_thread(audio_mix.probe_audio, local)
+    if not info.get("sample_rate") or not info.get("duration"):
+        raise RuntimeError(
+            "selected music asset is not decodable audio: re-upload a supported file.")
+    try:
+        gain = float(project.get("music_gain_db", audio_mix.MUSIC_GAIN_DB_DEFAULT))
+    except (TypeError, ValueError):
+        gain = audio_mix.MUSIC_GAIN_DB_DEFAULT
+    gain = min(audio_mix.MUSIC_GAIN_DB_MAX, max(audio_mix.MUSIC_GAIN_DB_MIN, gain))
+    return {"path": local, "gain_db": gain,
+            "ducking": project.get("music_ducking_enabled", True) is not False,
+            "asset_id": asset.get("id")}
+
+
 FFMPEG_BIN = _resolve_ffmpeg_bin()
 FFPROBE_BIN = _resolve_ffprobe_bin()
 
@@ -370,6 +413,16 @@ def validate_prerequisites(project: dict, script: dict | None,
     _add("voiceover", "Voiceover ready (full or per-scene)", has_voice,
          "Generate a full-script voiceover, or scene voiceovers.")
 
+    music_enabled = bool(project.get("music_enabled"))
+    sel_music = next((a for a in assets
+                      if a.get("id") == project.get("selected_music_asset_id")
+                      and a.get("asset_type") == "music_audio"
+                      and a.get("project_id") == project.get("id")), None) if music_enabled else None
+    music_ok = (not music_enabled) or bool(
+        sel_music and (sel_music.get("rights_confirmed") or project.get("music_rights_confirmed")))
+    _add("music", "Background music", music_ok,
+         "Select a rights-confirmed music track in the Audio section, or disable music.")
+
     voice_for_timing = full_voice
     if not voice_for_timing and scene_voices:
         latest_by_scene: dict[str, dict] = {}
@@ -435,6 +488,16 @@ def validate_prerequisites(project: dict, script: dict | None,
         "selected_thumbnail_asset_id": (sel_thumb or {}).get("id"),
         "selected_voiceover_asset_id": (full_voice or {}).get("id"),
         "scene_voiceover_count": len(scene_voices),
+        "selected_music_asset_id": (sel_music or {}).get("id"),
+        "music_state": {
+            "enabled": music_enabled,
+            "asset_id": (sel_music or {}).get("id"),
+            "gain_db": project.get("music_gain_db", -14.0),
+            "ducking_enabled": project.get("music_ducking_enabled", True) is not False,
+            "rights_confirmed": bool(
+                (sel_music or {}).get("rights_confirmed")
+                or project.get("music_rights_confirmed")),
+        },
         "timing": timing_status,
         "autofit_suggestion": autofit_suggestion,
     }
@@ -2070,6 +2133,21 @@ async def _run_render(job_id: str, project_id: str):
                 audio_path = normed_vo
                 audio_duration = await _probe_duration_seconds(audio_path) or audio_duration
 
+        # Caption-sync artifact: fit narration to the EXACT budget BEFORE any
+        # transcription. The mux must not time-stretch afterwards, so caption
+        # timestamps describe the final audio bit-for-bit.
+        fitted_vo: Optional[Path] = None
+        if audio_path and audio_path.exists():
+            await _set_job(job_id, current_step="fitting_narration", progress=90)
+            try:
+                fitted_vo = await audio_mix.fit_narration_to_budget(
+                    audio_path, budget_seconds=timing.narration_seconds,
+                    sample_rate=timing.sample_rate, work_dir=work_dir)
+            except RuntimeError as e:
+                raise RuntimeError(f"narration fit failed: {e}")
+            audio_path = fitted_vo
+            audio_duration = timing.narration_seconds
+
         # ---- subtitle burn-in: word-synchronised from Whisper STT + ASS karaoke ----
         # FIX 2: SRT is generated ONLY after final audio duration is locked (after concat + VO normalize).
         # No trim/pad/concat or audio filter may run after this point — burn is the last video filter before mux.
@@ -2081,6 +2159,11 @@ async def _run_render(job_id: str, project_id: str):
         if audio_path and audio_path.exists():
             await _set_job(job_id, current_step="transcribing_audio", progress=91)
             words = await transcribe_words(audio_path, language="en")
+            if burn_enabled and not words:
+                raise RuntimeError(
+                    "caption alignment failed: transcription produced no word "
+                    "timestamps for burned captions. Regenerate the voiceover or "
+                    "disable burned captions.")
             srt_path = work_dir / "captions.srt"
             ass_path = work_dir / "captions.ass"
             try:
@@ -2119,14 +2202,26 @@ async def _run_render(job_id: str, project_id: str):
                         t += scene_dur
                     if cues:
                         write_srt_from_cues(cues, srt_path)
-                        write_ass_from_cues(cues, ass_path)
+                        write_ass_from_cues(
+                            cues,
+                            ass_path,
+                            play_res_x=W,
+                            play_res_y=H,
+                        )
                     else:
                         write_srt(scenes, srt_path,
                                   intro_offset_seconds=intro_duration)
                         from .subtitles import build_ass_from_cues
                         fallback_cues = [{"start": float(s.get("start_time") or 0) + intro_duration, "end": float(s.get("end_time") or 0) + intro_duration, "text": s.get("caption_text") or s.get("narration_text") or ""} for s in ordered_scenes]
-                        write_ass_from_cues(fallback_cues, ass_path)
+                        write_ass_from_cues(
+                            fallback_cues,
+                            ass_path,
+                            play_res_x=W,
+                            play_res_y=H,
+                        )
             except Exception as e:  # noqa: BLE001
+                if burn_enabled:
+                    raise RuntimeError(f"caption file generation failed: {e}")
                 logger.warning("SRT/ASS generation failed (%s) — skipping burn-in", e)
                 srt_path = None
                 ass_path = None
@@ -2170,106 +2265,73 @@ async def _run_render(job_id: str, project_id: str):
         out_dir.mkdir(parents=True, exist_ok=True)
         final = out_dir / f"{job_id}.mp4"
 
-        music_path = _resolve_music_bed()
-        use_music = bool(music_path and music_path.exists()
-                         and os.environ.get("RENDER_MUSIC_BED", "true").lower() in ("1", "true", "yes"))
+        has_voiceover = bool(audio_path and audio_path.exists())
+        # Per-project music selection wins; the bundled bed is never mixed
+        # underneath narration (its bass loop reads as electrical hum).
+        selected_music = await _resolve_selected_music(project, assets, work_dir)
+        use_music = selected_music is not None
         final_duration = timing.target_seconds
         narration_duration = timing.narration_seconds
-        intro_delay_ms = round(timing.intro_seconds * 1000)
-        tempo_ratio = (audio_duration / narration_duration) if audio_duration else 1.0
+        intro_seconds = timing.intro_seconds
+        # The narration reaching this point is already fitted to the exact
+        # budget (see fitting step above); the mux must not time-stretch it.
+        tempo_ratio = 1.0
         if audio_duration and abs(tempo_ratio - 1.0) > 0.05:
             raise RuntimeError(
                 f"Voiceover is {audio_duration:.2f}s but the narration budget is "
                 f"{narration_duration:.2f}s. Regenerate the script and voiceover before rendering."
             )
-        voice_fade_start = max(0.0, narration_duration - 2.0)
-        final_fade_start = max(0.0, final_duration - 2.0)
 
-        # FIX MUX FAILED 2e9 — 2026-08-25: simplify audio to avoid 2GB aloop buffer + 1-pass loudnorm
-        # Previous: [1:a]loudnorm + [2:a]aloop:size=2e9 + afeade + sidechaincompress + amix:duration=first + loudnorm
-        # caused mux queue overflow (size=2e9) and 1-pass loudnorm needing 2-pass. New: volume duck + shortest.
-        # Requirements:
-        # 1. Simplify to volume duck (no sidechain) with aformat normalization
-        # 2. Remove loudnorm from filter_complex; run as separate post-pass via _loudnorm_two_pass
-        # 3. Add -max_muxing_queue_size 4096, -shortest, trim via amix shortest, -fs 1900M
-        # 4. Hard limit total duration <600s (checked above)
-        if audio_path and audio_path.exists() and use_music:
-            vo_dur = audio_duration or (await _probe_duration_seconds(audio_path)) or 0.0
-            # Vol duck: bg at 0.126 (~ -18dB sidechain) while VO active, passthrough after. Filter removes aloop/size=2e9 entirely;
-            # -stream_loop on input already loops bg, amix shortest trims to video length.
-            # Spec: Music must duck under voice - not drown it. Fix: -18dB sidechain when voice plays (0.126 = -18dB)
-            cmd = [
-                FFMPEG_BIN, "-y",
-                "-i", str(burned_out),
-                "-i", str(audio_path),
-                "-stream_loop", "-1", "-i", str(music_path),
-                "-filter_complex",
-                f"[1:a]atempo={tempo_ratio:.8f},atrim=duration={narration_duration:.6f},afade=t=out:st={voice_fade_start:.6f}:d=2,adelay={intro_delay_ms}:all=1,apad,atrim=duration={final_duration:.6f},aformat=sample_fmts=fltp:channel_layouts=stereo[voa];"
-                f"[2:a]atrim=duration={final_duration:.6f},aformat=sample_fmts=fltp:channel_layouts=stereo,volume=0.126,afade=t=out:st={final_fade_start:.6f}:d=2[bgduck];"
-                f"[bgduck][voa]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,atrim=duration={final_duration:.6f}[aout]",
-                "-map", "0:v", "-map", "[aout]",
-                "-c:v", "copy",
-                "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
-                "-max_muxing_queue_size", "4096",
-                "-t", f"{final_duration:.6f}",
-                "-fs", "1900M",
-                "-movflags", "+faststart",
-                str(final),
-            ]
-        elif audio_path and audio_path.exists():
-            # Voiceover only — no loudnorm in filter (already normalized via _normalize_vo_track); add fade only
-            cmd = [
-                FFMPEG_BIN, "-y",
-                "-i", str(burned_out),
-                "-i", str(audio_path),
-                "-filter_complex",
-                f"[1:a]atempo={tempo_ratio:.8f},atrim=duration={narration_duration:.6f},afade=t=out:st={voice_fade_start:.6f}:d=2,adelay={intro_delay_ms}:all=1,apad,atrim=duration={final_duration:.6f},aformat=sample_fmts=fltp:channel_layouts=stereo[aout]",
-                "-map", "0:v", "-map", "[aout]",
-                "-c:v", "copy",
-                "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
-                "-max_muxing_queue_size", "4096",
-                "-t", f"{final_duration:.6f}",
-                "-fs", "1900M",
-                "-movflags", "+faststart",
-                str(final),
-            ]
+        # Build the final timeline audio FIRST (exact duration, no tempo ops):
+        # fitted narration placed at the intro offset, genuinely ducked music
+        # underneath — or music-only / silence when narration is absent.
+        await _set_job(job_id, current_step="mixing_audio", progress=93)
+        final_mix: Optional[Path] = None
+        if has_voiceover and use_music:
+            if selected_music["ducking"]:
+                final_mix = await audio_mix.mix_with_ducking(
+                    narration=audio_path, music=selected_music["path"],
+                    intro_seconds=intro_seconds, final_seconds=final_duration,
+                    music_gain_db=selected_music["gain_db"], work_dir=work_dir)
+            else:
+                final_mix = await audio_mix.mix_without_ducking(
+                    narration=audio_path, music=selected_music["path"],
+                    intro_seconds=intro_seconds, final_seconds=final_duration,
+                    music_gain_db=selected_music["gain_db"], work_dir=work_dir)
+        elif has_voiceover:
+            final_mix = await audio_mix.place_narration(
+                audio_path, intro_seconds=intro_seconds,
+                final_seconds=final_duration, work_dir=work_dir)
         elif use_music:
-            # Music only — volume 0.126 constant (-18dB), no loudnorm in graph (post-pass will handle)
-            cmd = [
-                FFMPEG_BIN, "-y",
-                "-i", str(burned_out),
-                "-stream_loop", "-1", "-i", str(music_path),
-                "-filter_complex",
-                f"[1:a]atrim=duration={final_duration:.6f},aformat=sample_fmts=fltp:channel_layouts=stereo,volume=0.126,afade=t=out:st={final_fade_start:.6f}:d=2[aout]",
-                "-map", "0:v", "-map", "[aout]",
-                "-c:v", "copy",
-                "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
-                "-max_muxing_queue_size", "4096",
-                "-t", f"{final_duration:.6f}",
-                "-fs", "1900M",
-                "-movflags", "+faststart",
-                str(final),
-            ]
-        else:
-            # CONSTITUTION §7: Silent fallbacks must log WARNING.
+            final_mix = await audio_mix.loop_music_only(
+                selected_music["path"], final_seconds=final_duration,
+                music_gain_db=selected_music["gain_db"], work_dir=work_dir)
+
+        if final_mix is None:
+            # CONSTITUTION \u00a76: Silent fallbacks must log WARNING.
             logger.warning(
                 "RENDER_SILENT_FALLBACK: No voiceover or music available. "
                 "Video will have silent audio track. "
-                "Consider adding voiceover or music to meet §6 silence-gap requirements."
+                "Consider adding voiceover or music to meet silence-gap requirements."
             )
-            cmd = [
-                FFMPEG_BIN, "-y",
-                "-i", str(burned_out),
-                "-f", "lavfi", "-i", "anullsrc=cl=stereo:r=48000",
-                "-map", "0:v", "-map", "1:a",
-                "-c:v", "copy",
-                "-c:a", "aac", "-b:a", "128k",
-                "-max_muxing_queue_size", "4096",
-                "-t", f"{final_duration:.6f}",
-                "-fs", "1900M",
-                "-movflags", "+faststart",
-                str(final),
-            ]
+            mux_audio_inputs = ["-f", "lavfi", "-i", "anullsrc=cl=stereo:r=48000"]
+            mux_abr = "128k"
+        else:
+            mux_audio_inputs = ["-i", str(final_mix)]
+            mux_abr = "192k"
+        cmd = [
+            FFMPEG_BIN, "-y",
+            "-i", str(burned_out),
+            *mux_audio_inputs,
+            "-map", "0:v", "-map", "1:a",
+            "-c:v", "copy",
+            "-c:a", "aac", "-b:a", mux_abr, "-ar", "48000", "-ac", "2",
+            "-max_muxing_queue_size", "4096",
+            "-t", f"{final_duration:.6f}",
+            "-fs", "1900M",
+            "-movflags", "+faststart",
+            str(final),
+        ]
         ok, err = await _run_ffmpeg(cmd)
         if not ok:
             logger.error("mux failed: %s", err[-800:])

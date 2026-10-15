@@ -8,6 +8,7 @@ import JobStatusCard from "./render/JobStatusCard";
 import LastTerminalNotice from "./render/LastTerminalNotice";
 import JobHistory from "./render/JobHistory";
 import VoiceStylePicker from "./voiceover/VoiceStylePicker";
+import MusicPanel from "./MusicPanel";
 
 const ACTIVE_STATES = new Set(["queued", "validating", "preparing_assets", "rendering", "verifying"]);
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
@@ -279,6 +280,13 @@ export default function RenderPanel({
             <VoiceStylePicker value={voiceStyle} onChange={setVoiceStyle} />
             <p className="font-mono text-[10px] text-zinc-600 mt-2">Voice selector stays enabled right up to the Render button, not locked after Part generation.</p>
           </div>
+          <MusicPanel
+            projectId={projectId}
+            project={project}
+            assets={assets}
+            canEdit={canEdit}
+            onProjectChange={async (view) => { await refreshAll(); onChange(view); }}
+          />
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-4 border-t border-zinc-800">
             <div>
               <div className="font-mono text-[10px] uppercase tracking-widest text-zinc-500 mb-2">Aspect ratio</div>
