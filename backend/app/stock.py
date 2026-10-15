@@ -410,8 +410,13 @@ async def _llm_visual_query(sentence: str) -> str:
     return _strip_pexels_abstract(sentence)
 
 async def semantic_pexels_query(sentence: str) -> str:
-    q=await _llm_visual_query(sentence)
-    return q or _strip_pexels_abstract(sentence)
+    deterministic = _strip_pexels_abstract(sentence)
+    if os.getenv("STOCK_LLM_QUERY_ENABLED", "false").strip().lower() not in {
+        "1", "true", "yes", "on",
+    }:
+        return deterministic
+    q = await _llm_visual_query(sentence)
+    return q or deterministic
 
 async def _search_pexels(
     query: str,
@@ -900,10 +905,11 @@ async def search_stock_videos(query: str, per_page: int = 30) -> list[dict]:
     if _use_mock():
         logger.info("search_stock_videos query=%r skipped (mock mode)", query[:60])
         return []
-    # FIX 3: use LLM semantic query for B-roll when sentence-like input
+    # Use deterministic semantic cleanup by default. The optional LLM path is
+    # explicitly opt-in so unavailable providers cannot stall a render.
     if len(query.split()) > 2 or any(w in query.lower() for w in PEXELS_ABSTRACT_BLOCKLIST):
         try:
-            semantic = await _llm_visual_query(query)
+            semantic = await semantic_pexels_query(query)
             if semantic and semantic != _strip_pexels_abstract(query):
                 logger.info("semantic_pexels query=%r -> %r", query[:60], semantic)
                 query = semantic
@@ -974,10 +980,10 @@ async def search_stock(
             "query": query,
         }
 
-    # FIX 3: semantic LLM query for sentence-like inputs
+    # Deterministic by default; optional LLM enrichment is explicitly opt-in.
     if not _use_mock() and (len(query.split())>2 or any(w in query.lower() for w in PEXELS_ABSTRACT_BLOCKLIST)):
         try:
-            sem=await _llm_visual_query(query)
+            sem=await semantic_pexels_query(query)
             if sem: query=sem
         except Exception:
             query=_strip_pexels_abstract(query)

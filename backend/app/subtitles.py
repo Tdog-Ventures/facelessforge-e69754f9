@@ -29,25 +29,38 @@ FFMPEG_SUBTITLE_STYLE = (
     "Shadow=0"
 )
 
-ASS_KARAOKE_STYLE = (
-    "Style: Default,Arial,60,16777215,16777215,0,0,-1,0,0,0,100,100,0,0,1,3,0,2,460,460,280,1\n"
-    "Style: Karaoke,Arial,60,16777215,16777215,0,0,-1,0,0,0,100,100,0,0,1,3,0,2,460,460,280,1"
-)
+def _ass_layout(play_res_x: int, play_res_y: int) -> tuple[int, int, int, int]:
+    """Return font and safe-zone margins for the actual output canvas."""
+    if play_res_y > play_res_x:  # 9:16 vertical
+        return 64, 96, 96, 300
+    if play_res_x == play_res_y:  # 1:1 square
+        return 56, 120, 120, 180
+    return 60, 460, 460, 280  # 16:9 landscape
 
-ASS_HEADER = """[Script Info]
+
+def build_ass_header(play_res_x: int = 1920, play_res_y: int = 1080) -> str:
+    font_size, margin_l, margin_r, margin_v = _ass_layout(play_res_x, play_res_y)
+    style = (
+        f"Style: Default,Arial,{font_size},16777215,16777215,0,0,-1,0,0,0,"
+        f"100,100,0,0,1,3,0,2,{margin_l},{margin_r},{margin_v},1"
+    )
+    return f"""[Script Info]
 Title: FacelessForge Karaoke
 ScriptType: v4.00+
-PlayResX: 1920
-PlayResY: 1080
-WrapStyle: 2
+PlayResX: {play_res_x}
+PlayResY: {play_res_y}
+WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,60,16777215,16777215,0,0,-1,0,0,0,100,100,0,0,1,3,0,2,460,460,280,1
+{style}
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
+
+
+ASS_HEADER = build_ass_header()
 
 # Tighter caption defaults per the Quality Constitution.
 DEFAULT_WORDS_PER_CUE = 7        # CONSTITUTION §5: 6-8 word chunks
@@ -311,10 +324,12 @@ def build_ass_karaoke(
     *,
     intro_offset_seconds: float = 0.0,
     words_per_cue: int = DEFAULT_WORDS_PER_CUE,
+    play_res_x: int = 1920,
+    play_res_y: int = 1080,
 ) -> str:
     """Generate ASS karaoke subtitles: 62px white bold black stroke, karaoke effect."""
     if not words:
-        return ASS_HEADER
+        return build_ass_header(play_res_x, play_res_y)
     cues: list[tuple[float, float, str, list[dict]]] = []
     bucket: list[dict] = []
     bucket_start: float | None = None
@@ -344,7 +359,7 @@ def build_ass_karaoke(
             _flush(w["end"])
     _flush(last_end)
 
-    lines = [ASS_HEADER.strip()]
+    lines = [build_ass_header(play_res_x, play_res_y).strip()]
     for start, end, text, wlist in cues:
         s = start + intro_offset_seconds
         e = max(end, start + 0.5) + intro_offset_seconds
@@ -363,18 +378,31 @@ def write_ass_karaoke(
     *,
     intro_offset_seconds: float = 0.0,
     words_per_cue: int = DEFAULT_WORDS_PER_CUE,
+    play_res_x: int = 1920,
+    play_res_y: int = 1080,
 ) -> Path:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(
-        build_ass_karaoke(words, intro_offset_seconds=intro_offset_seconds, words_per_cue=words_per_cue),
+        build_ass_karaoke(
+            words,
+            intro_offset_seconds=intro_offset_seconds,
+            words_per_cue=words_per_cue,
+            play_res_x=play_res_x,
+            play_res_y=play_res_y,
+        ),
         encoding="utf-8",
     )
     return out_path
 
 
-def build_ass_from_cues(cues: list[dict]) -> str:
+def build_ass_from_cues(
+    cues: list[dict],
+    *,
+    play_res_x: int = 1920,
+    play_res_y: int = 1080,
+) -> str:
     """Fallback ASS when no word timestamps."""
-    lines = [ASS_HEADER.strip()]
+    lines = [build_ass_header(play_res_x, play_res_y).strip()]
     for c in cues:
         text = _clean_caption(str(c.get("text") or ""))
         if not text:
@@ -387,7 +415,20 @@ def build_ass_from_cues(cues: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write_ass_from_cues(cues: list[dict], out_path: Path) -> Path:
+def write_ass_from_cues(
+    cues: list[dict],
+    out_path: Path,
+    *,
+    play_res_x: int = 1920,
+    play_res_y: int = 1080,
+) -> Path:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(build_ass_from_cues(cues), encoding="utf-8")
+    out_path.write_text(
+        build_ass_from_cues(
+            cues,
+            play_res_x=play_res_x,
+            play_res_y=play_res_y,
+        ),
+        encoding="utf-8",
+    )
     return out_path

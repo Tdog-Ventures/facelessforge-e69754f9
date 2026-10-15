@@ -1,9 +1,39 @@
+import io
+import json
+import zipfile
+
 import pytest
 
 from app import render, storage
 from app.routes import api as api_routes
 from app.scoring import compute_project_status
 from app.workers import forge_loop
+
+
+class _AsyncCursor:
+    def __init__(self, documents=None):
+        self.documents = documents or []
+
+    def sort(self, *_args, **_kwargs):
+        return self
+
+    async def to_list(self, *_args, **_kwargs):
+        return [dict(document) for document in self.documents]
+
+
+class _FakeCollection:
+    def __init__(self, document=None, documents=None):
+        self.document = document
+        self.documents = documents or []
+
+    async def find_one(self, *_args, **_kwargs):
+        return dict(self.document) if self.document is not None else None
+
+    def find(self, *_args, **_kwargs):
+        return _AsyncCursor(self.documents)
+
+    async def update_one(self, *_args, **_kwargs):
+        return None
 
 
 def test_completed_render_status_is_case_insensitive():
@@ -61,6 +91,28 @@ def test_delivery_url_keeps_stable_local_preview(monkeypatch):
     }) == "/api/static/renders/project/job.mp4"
 
 
+def test_render_job_payload_replaces_expired_persisted_url(monkeypatch):
+    monkeypatch.setattr(
+        api_routes,
+        "resolve_delivery_url",
+        lambda _job: "fresh://signed-url",
+    )
+    serializer = getattr(api_routes, "_render_job_payload", None)
+
+    assert callable(serializer), "render API responses must refresh delivery URLs"
+    original = {
+        "id": "job-1",
+        "status": "completed",
+        "output_storage_key": "renders/project-1/job-1.mp4",
+        "output_url": "expired://signed-url",
+    }
+
+    payload = serializer(original)
+
+    assert payload["output_url"] == "fresh://signed-url"
+    assert original["output_url"] == "expired://signed-url"
+
+
 @pytest.mark.asyncio
 async def test_job_download_endpoint_refreshes_the_delivery_url(monkeypatch):
     class FakeCollection:
@@ -93,6 +145,144 @@ async def test_job_download_endpoint_refreshes_the_delivery_url(monkeypatch):
 
     assert response.status_code == 302
     assert response.headers["location"] == "fresh://signed-url"
+
+
+@pytest.mark.asyncio
+async def test_public_share_refreshes_video_and_download_urls(monkeypatch):
+    project = {
+        "id": "project-1",
+        "user_id": "user-1",
+        "name": "Project One",
+        "niche": "testing",
+        "status": "COMPLETED",
+        "share_enabled": True,
+        "share_token": "share-token-1",
+    }
+    final = {
+        "id": "job-1",
+        "project_id": "project-1",
+        "status": "completed",
+        "output_storage_key": "renders/project-1/job-1.mp4",
+        "output_url": "expired://signed-url",
+    }
+
+    class FakeDB:
+        projects = _FakeCollection(project)
+        metadata_packages = _FakeCollection()
+        assets = _FakeCollection()
+        render_jobs = _FakeCollection(final)
+        provider_settings = _FakeCollection()
+
+    monkeypatch.setattr(api_routes, "get_db", lambda: FakeDB())
+    monkeypatch.setattr(api_routes, "resolve_delivery_url", lambda _job: "fresh://signed-url")
+
+    payload = await api_routes.public_share("share-token-1")
+
+    assert payload["final_video"]["url"] == "fresh://signed-url"
+    assert payload["final_video"]["download_url"] == "fresh://signed-url"
+    assert payload["download"]["mp4"] == "fresh://signed-url"
+
+
+@pytest.mark.asyncio
+async def test_export_package_refreshes_render_manifest_url(monkeypatch):
+    project = {
+        "id": "project-1",
+        "user_id": "user-1",
+        "name": "Project One",
+        "niche": "testing",
+        "topic": "delivery",
+        "target_duration": 60,
+    }
+    final = {
+        "id": "job-1",
+        "status": "completed",
+        "output_storage_key": "renders/project-1/job-1.mp4",
+        "output_url": "expired://signed-url",
+    }
+
+    class FakeDB:
+        projects = _FakeCollection(project)
+        scripts = _FakeCollection()
+        scenes = _FakeCollection()
+        metadata_packages = _FakeCollection()
+        assets = _FakeCollection()
+        render_jobs = _FakeCollection(final)
+
+    monkeypatch.setattr(api_routes, "get_db", lambda: FakeDB())
+    monkeypatch.setattr(api_routes, "resolve_delivery_url", lambda _job: "fresh://signed-url")
+
+    response = await api_routes.export_package_zip(
+        "project-1", user={"id": "user-1", "role": "creator"}
+    )
+    body = b"".join([chunk async for chunk in response.body_iterator])
+    with zipfile.ZipFile(io.BytesIO(body)) as package:
+        manifest = json.loads(package.read("render.json"))
+
+    assert manifest["url"] == "fresh://signed-url"
+
+
+@pytest.mark.asyncio
+async def test_email_preview_refreshes_render_url(monkeypatch):
+    from app import email as email_module
+
+    project = {"id": "project-1", "user_id": "user-1", "name": "Project One"}
+    final = {
+        "id": "job-1",
+        "status": "completed",
+        "output_storage_key": "renders/project-1/job-1.mp4",
+        "output_url": "expired://signed-url",
+    }
+
+    class FakeDB:
+        projects = _FakeCollection(project)
+        render_jobs = _FakeCollection(final)
+
+    monkeypatch.setattr(api_routes, "get_db", lambda: FakeDB())
+    monkeypatch.setattr(api_routes, "resolve_delivery_url", lambda _job: "fresh://signed-url")
+    monkeypatch.setattr(email_module, "get_email_service_status", lambda: {"configured": True})
+    monkeypatch.setattr(
+        email_module,
+        "render_video_ready_email",
+        lambda **kwargs: {"text": "ready", "mp4_url": kwargs["mp4_url"]},
+    )
+
+    payload = await api_routes.email_preview(
+        "project-1", user={"id": "user-1", "role": "creator"}
+    )
+
+    assert payload["mp4_url"] == "fresh://signed-url"
+    assert payload["email"]["mp4_url"] == "fresh://signed-url"
+
+
+@pytest.mark.asyncio
+async def test_email_send_refreshes_render_url(monkeypatch):
+    from app import email as email_module
+
+    project = {"id": "project-1", "user_id": "owner-1", "name": "Project One"}
+    final = {
+        "id": "job-1",
+        "status": "completed",
+        "output_storage_key": "renders/project-1/job-1.mp4",
+        "output_url": "expired://signed-url",
+    }
+
+    class FakeDB:
+        projects = _FakeCollection(project)
+        render_jobs = _FakeCollection(final)
+        users = _FakeCollection({"id": "owner-1", "email": "owner@example.test"})
+
+    async def fake_send_video_ready_email(**kwargs):
+        return {"sent": True, "mp4_url": kwargs["mp4_url"]}
+
+    monkeypatch.setattr(api_routes, "get_db", lambda: FakeDB())
+    monkeypatch.setattr(api_routes, "resolve_delivery_url", lambda _job: "fresh://signed-url")
+    monkeypatch.setattr(email_module, "send_video_ready_email", fake_send_video_ready_email)
+
+    payload = await api_routes.email_send(
+        "project-1", user={"id": "owner-1", "role": "creator"}
+    )
+
+    assert payload["mp4_url"] == "fresh://signed-url"
 
 
 @pytest.mark.asyncio

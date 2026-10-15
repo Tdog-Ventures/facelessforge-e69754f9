@@ -185,6 +185,21 @@ def _ser(doc: dict) -> dict:
     return doc
 
 
+def _render_job_payload(job: dict | None) -> dict | None:
+    """Serialize a render job with a URL that is usable right now.
+
+    Object-storage URLs saved at render completion expire. API consumers must
+    receive a newly signed URL rather than the stale value persisted in Mongo.
+    """
+    if not job:
+        return None
+    payload = _ser(job)
+    delivery_url = resolve_delivery_url(job)
+    if delivery_url:
+        payload["output_url"] = delivery_url
+    return payload
+
+
 def _ensure_project_access(project: dict, user: dict, *, write: bool = False):
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -406,7 +421,7 @@ async def _attach_project_view(db, project: dict) -> dict:
         "scenes": sorted([_ser(s) for s in scenes], key=lambda s: s.get("scene_number", 0)),
         "metadata": _ser(metadata) if metadata else None,
         "assets": [_ser(a) for a in assets],
-        "render_job": _ser(render_job) if render_job else None,
+        "render_job": _render_job_payload(render_job),
         "share": _share_payload(project),
         "timing": timing,
     }
@@ -2049,7 +2064,7 @@ async def render_start(project_id: str,
         raise HTTPException(status_code=409, detail=_scrub_email(str(e)))
     import logging as _logging
     _logging.getLogger("facelessforge.render").info("render start project=%s user=%s", project_id, _scrub_email(user.get("email","")))
-    return _ser(job)
+    return _render_job_payload(job)
 
 
 @router.get("/projects/{project_id}/render/jobs")
@@ -2059,7 +2074,7 @@ async def render_list_jobs(project_id: str, user=Depends(get_current_user)):
     _ensure_project_access(project, user)
     jobs = await db.render_jobs.find({"project_id": project_id}, {"_id": 0})\
         .sort("created_at", -1).to_list(50)
-    return [_ser(j) for j in jobs]
+    return [_render_job_payload(j) for j in jobs]
 
 
 @router.get("/projects/{project_id}/render/jobs/{job_id}")
@@ -2070,7 +2085,7 @@ async def render_get_job(project_id: str, job_id: str, user=Depends(get_current_
     job = await db.render_jobs.find_one({"id": job_id, "project_id": project_id}, {"_id": 0})
     if not job:
         raise HTTPException(status_code=404, detail="Render job not found")
-    return _ser(job)
+    return _render_job_payload(job)
 
 
 @router.get("/projects/{project_id}/render/jobs/{job_id}/download")
@@ -2511,12 +2526,13 @@ async def export_package_zip(project_id: str, user=Depends(get_current_user)):
             sort=[("completed_at", -1)],
         )
         if latest:
+            latest_payload = _render_job_payload(latest)
             zf.writestr("render.json", json.dumps({
                 "job_id": latest.get("id"),
                 "status": latest.get("status"),
                 "duration": latest.get("duration"),
                 "file_size": latest.get("file_size"),
-                "url": latest.get("output_url"),
+                "url": latest_payload.get("output_url"),
                 "completed_at": (latest.get("completed_at").isoformat()
                     if isinstance(latest.get("completed_at"), datetime) else latest.get("completed_at")),
                 "width": 1920,
@@ -2830,6 +2846,7 @@ async def public_share(token: str):
         {"_id": 0},
         sort=[("completed_at", -1)],
     )
+    final_render_payload = _render_job_payload(final_render)
 
     # Increment view count and update last viewed
     await db.projects.update_one(
@@ -2887,14 +2904,14 @@ async def public_share(token: str):
             "voice_style": selected_voice.get("voice_style"),
         } if selected_voice else None),
         "final_video": ({
-            "url": final_render.get("output_url"),
+            "url": final_render_payload.get("output_url"),
             "duration": final_render.get("duration"),
             "width": 1920,
             "height": 1080,
-            "download_url": final_render.get("output_url"),
-            "gcs_mirror": final_render.get("output_url"),
-            "r2_mirror": final_render.get("output_url"),
-        } if final_render else None),
+            "download_url": final_render_payload.get("output_url"),
+            "gcs_mirror": final_render_payload.get("output_url"),
+            "r2_mirror": final_render_payload.get("output_url"),
+        } if final_render_payload else None),
         "posting_guidance": {
             "youtube_title": (metadata or {}).get("selected_title"),
             "description": (metadata or {}).get("description"),
@@ -2912,11 +2929,11 @@ async def public_share(token: str):
             "cta": "Need help? Reply — support@ethinx.solutions — ABN 60 578 933 517",
         },
         "download": ({
-            "mp4": final_render.get("output_url"),
-            "gcs_mirror": final_render.get("output_url"),
-            "r2_url": final_render.get("output_url"),
+            "mp4": final_render_payload.get("output_url"),
+            "gcs_mirror": final_render_payload.get("output_url"),
+            "r2_url": final_render_payload.get("output_url"),
             "filename": f"{(project.get('name') or 'facelessforge').replace(' ', '_')}.mp4",
-        } if final_render else None),
+        } if final_render_payload else None),
         "shared_at": project.get("updated_at").isoformat()
             if isinstance(project.get("updated_at"), datetime) else project.get("updated_at"),
         "branding": branding,
@@ -2938,7 +2955,7 @@ async def email_preview(project_id: str, user=Depends(get_current_user)):
         {"_id": 0},
         sort=[("completed_at", -1)],
     )
-    mp4_url = (final or {}).get("output_url") or f"/api/projects/{project_id}/download"
+    mp4_url = resolve_delivery_url(final) or f"/api/projects/{project_id}/download"
     share_url = None
     if project.get("share_enabled") and project.get("share_token"):
         base = os.environ.get("FRONTEND_URL", "https://facelessforge.ethinx.solutions").rstrip("/")
@@ -2968,7 +2985,8 @@ async def email_send(project_id: str, user=Depends(get_current_user)):
         {"_id": 0},
         sort=[("completed_at", -1)],
     )
-    if not final or not final.get("output_url"):
+    mp4_url = resolve_delivery_url(final)
+    if not mp4_url:
         raise HTTPException(status_code=400, detail="No completed render — MP4 not ready yet")
     owner = await db.users.find_one({"id": project["user_id"]}, {"_id": 0})
     if not owner:
@@ -2977,7 +2995,7 @@ async def email_send(project_id: str, user=Depends(get_current_user)):
     if project.get("share_enabled") and project.get("share_token"):
         base = os.environ.get("FRONTEND_URL", "https://facelessforge.ethinx.solutions").rstrip("/")
         share_url = f"{base}/s/{project['share_token']}"
-    result = await send_video_ready_email(user=owner, project=project, mp4_url=final["output_url"], share_url=share_url)
+    result = await send_video_ready_email(user=owner, project=project, mp4_url=mp4_url, share_url=share_url)
     return result
 
 

@@ -123,6 +123,22 @@ def normalize_job_status(status) -> str:
 def is_active_job_status(status) -> bool:
     return normalize_job_status(status) in {s.lower() for s in ACTIVE_RENDER_STATUSES}
 
+
+def release_eligible_after_qa(
+    *,
+    commercial: bool,
+    deterministic_blocked: list[str],
+    video_qa: dict | None,
+    verification_passed: bool,
+) -> bool:
+    """A render is releasable only when every independent QA gate passes."""
+    return bool(
+        not commercial
+        and not deterministic_blocked
+        and (video_qa or {}).get("release_eligible") is True
+        and verification_passed
+    )
+
 # FIX Visual mismatch blocklist (mirror stock.py) — discard attached asset if blocklisted
 _BLOCKLIST = ["split", "saldi", "slack", "2026", "sale", "umbrella", "tourist", "beach hut", "pink house", "bangles", "peeling orange", "orange peel", "pottery painting", "beach huts", "hand jewelry", "bracelet", "food closeup", "generic beach", "tourist beach"]
 _DATE_RE = re.compile(r"(?:^|[^0-9])(?:[4-9]\.9\.2026|4-9\.9\.2026)(?:[^0-9]|$)")
@@ -251,17 +267,23 @@ def _build_subclip_plan(scenes: list[dict], timeline_duration: Optional[float]) 
     return plan
 
 
-def _resolve_music_bed() -> Optional[Path]:
+def _resolve_music_bed(*, for_voiceover: bool = False) -> Optional[Path]:
     """Return a local music bed file path, or None if disabled / missing.
 
     Resolution order:
       1. RENDER_MUSIC_BED_PATH env override (absolute path)
-      2. Bundled default at static/music/default_bed.mp3
+      2. Bundled default at static/music/default_bed.mp3 for music-only renders
+
+    The bundled fallback is a bass-led loop and must not be mixed underneath
+    narration, where its sustained low notes are perceived as electrical hum.
+    An explicitly configured music bed is still honoured for narrated renders.
     """
     override = os.environ.get("RENDER_MUSIC_BED_PATH", "").strip()
     if override:
         p = Path(override)
         return p if p.exists() and p.is_file() else None
+    if for_voiceover:
+        return None
     if DEFAULT_MUSIC_BED.exists() and DEFAULT_MUSIC_BED.is_file():
         return DEFAULT_MUSIC_BED
     return None
@@ -538,6 +560,59 @@ def _wrap_text(text: str, max_chars: int = 30) -> str:
     return "\n".join(lines)
 
 
+def _intro_title_layout(text: str, *, width: int, height: int) -> tuple[str, int]:
+    """Wrap an intro title using measured pixels for the actual canvas."""
+    safe_width = max(1, width - 160)
+    safe_height = max(1, height - 160)
+    start_size = 64 if height > width else 72
+    words = " ".join((text or "").split()).split()
+    if not words:
+        return "", start_size
+
+    def wrap_at(font: ImageFont.ImageFont) -> list[str]:
+        lines: list[str] = []
+        current = ""
+        for word in words:
+            candidate = f"{current} {word}".strip()
+            if current and font.getlength(candidate) > safe_width:
+                lines.append(current)
+                current = word
+            else:
+                current = candidate
+        if current:
+            lines.append(current)
+        return lines
+
+    for font_size in range(start_size, 35, -4):
+        font = _try_load_font(font_size)
+        lines = wrap_at(font)
+        line_height = font_size + 8
+        if (
+            all(font.getlength(line) <= safe_width for line in lines)
+            and len(lines) * line_height <= safe_height
+        ):
+            return "\n".join(lines), font_size
+
+    font_size = 36
+    font = _try_load_font(font_size)
+    lines = wrap_at(font)
+    max_lines = max(1, safe_height // (font_size + 8))
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        last = lines[-1]
+        while last and font.getlength(last + "…") > safe_width:
+            last = last[:-1].rstrip()
+        lines[-1] = last + "…"
+    return "\n".join(lines), font_size
+
+
+def _intro_title_text(raw_title: str) -> str:
+    """Return a complete audience-facing title without spilling into script copy."""
+    clean = " ".join(str(raw_title or "").split())
+    first_sentence = re.split(r"(?<=[.!?])\s+", clean, maxsplit=1)[0]
+    return truncate_words(first_sentence.rstrip(" .!?"), 120).upper()
+
+
 def _pil_caption_frame(out_path: Path, *, title: str, subtitle: str = "",
                        footer: str = "", palette: tuple[str, str] = ("#0A0A0A", "#00E5FF"),
                        size: tuple[int, int] = (WIDTH, HEIGHT)) -> Path:
@@ -693,6 +768,11 @@ async def _resolve_thumbnail(asset: dict, project: dict, work_dir: Path) -> Path
     )
 
 
+def _freezedetect_reports_freeze(ffmpeg_stderr: str) -> bool:
+    """Return whether ffmpeg reported a freeze meeting the configured duration."""
+    return "lavfi.freezedetect.freeze_duration" in (ffmpeg_stderr or "")
+
+
 async def _video_has_motion(path: Path) -> bool:
     """Return True iff the file is a real video with multiple frames.
 
@@ -743,6 +823,22 @@ async def _video_has_motion(path: Path) -> bool:
         if dur < 1.0:
             return False
         if fps and dur and fps * dur < 2:
+            return False
+
+        # A multi-frame file can still be an effectively static camera hold.
+        # Probe the first rendered window using the same strict threshold as
+        # final QA so unusable clips are rejected before composition.
+        motion_probe = await asyncio.create_subprocess_exec(
+            FFMPEG_BIN, "-hide_banner", "-v", "info", "-i", str(path),
+            "-t", "4", "-vf", "freezedetect=n=0.003:d=1",
+            "-an", "-f", "null", "-",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, motion_stderr = await motion_probe.communicate()
+        if motion_probe.returncode != 0:
+            return False
+        if _freezedetect_reports_freeze(motion_stderr.decode(errors="ignore")):
             return False
         return True
     except Exception:  # noqa: BLE001
@@ -972,7 +1068,7 @@ async def _resolve_scene_visuals(scene: dict, attached_assets: list[dict],
     (stock_image/unsplash/jpg/png) visuals are kept — images are rendered
     with Ken Burns via apply_ken_burns_effect() so they are not static holds.
     """
-    from .visual_query import build_scene_query, extract_visual_keywords, generate_broll_keywords
+    from .visual_query import build_scene_query, extract_visual_keywords
     if used_ext_ids is None:
         used_ext_ids = set()
     visuals: list[tuple[Path, str]] = []
@@ -1013,13 +1109,9 @@ async def _resolve_scene_visuals(scene: dict, attached_assets: list[dict],
                 queries.append(q)
         # B-roll keywords come from the LLM (caption NEVER used verbatim — it is
         # only context for visual-keyword generation).
-        generated = await generate_broll_keywords(
-            caption=str(scene.get("caption_text") or ""),
-            title=str(project.get("title") or project.get("topic") or ""),
-            narration=str(scene.get("narration_text") or ""),
-            top_n=5,
-        )
-        kws = generated or extract_visual_keywords(str(scene.get("narration_text") or ""), top_n=6)
+        # Keep render-critical stock selection deterministic. Optional LLM
+        # providers must not add a timeout before a usable Pexels query.
+        kws = extract_visual_keywords(str(scene.get("narration_text") or ""), top_n=6)
         for n in (3, 2, 1):
             q = " ".join(kws[:n]).strip()
             if q and q not in queries:
@@ -1154,7 +1246,7 @@ async def _run_ffmpeg(cmd: list[str], *, timeout: int = HARD_TIMEOUT_SECONDS) ->
 async def _normalize_vo_track(vo_path: Path, work_dir: Path) -> Optional[Path]:
     """Normalize VO track with loudnorm + dynaudnorm before mux.
 
-    Implements: ffmpeg -i vo_raw.wav -af loudnorm=I=-16:TP=-1.5:LRA=11,dynaudnorm=f=150:g=15 vo_norm.wav
+    Removes sub-bass and narrow 60 Hz hum before loudness normalisation.
     Fixes Part 1 0:21/6:14 VO dips by leveling volume fluctuations.
     """
     if not vo_path or not vo_path.exists():
@@ -1162,7 +1254,13 @@ async def _normalize_vo_track(vo_path: Path, work_dir: Path) -> Optional[Path]:
     vo_norm = work_dir / f"{vo_path.stem}_norm{vo_path.suffix}"
     cmd = [
         FFMPEG_BIN, "-y", "-i", str(vo_path),
-        "-af", "loudnorm=I=-16:TP=-1.5:LRA=11,dynaudnorm=f=150:g=15",
+        "-af", (
+            "highpass=f=80:p=2,"
+            "bandreject=f=60:width_type=h:w=12,"
+            "bandreject=f=120:width_type=h:w=12,"
+            "loudnorm=I=-16:TP=-1.5:LRA=11,"
+            "dynaudnorm=f=150:g=15"
+        ),
         "-ar", "48000", "-ac", "2",
         str(vo_norm),
     ]
@@ -1465,7 +1563,7 @@ def _ffmpeg_intro_from_video(src: Path, duration: float, out: Path, title: str, 
     """Create intro clip from video hook footage with dark overlay and title."""
     W = w or WIDTH
     H = h or HEIGHT
-    wrapped = _wrap_text(title, max_chars=30)
+    wrapped, font_size = _intro_title_layout(title, width=W, height=H)
     text_file = work_dir / "intro_title.txt"
     text_file.write_text(wrapped, encoding="utf-8")
     font_path = _resolve_font_path()
@@ -1478,7 +1576,7 @@ def _ffmpeg_intro_from_video(src: Path, duration: float, out: Path, title: str, 
             f",format=yuv420p,fps={FPS},"
             f"drawbox=y=0:color=black@0.3:w=iw:h=ih:t=fill,"
             f"drawtext=fontfile='{font_path}':"
-            f"textfile='{text_file.as_posix()}':fontcolor=white:fontsize=72:"
+            f"textfile='{text_file.as_posix()}':fontcolor=white:fontsize={font_size}:"
             f"x=(w-text_w)/2:y=(h-text_h)/2:line_spacing=8"
         ),
         "-r", str(FPS),
@@ -1493,7 +1591,7 @@ def _ffmpeg_intro_from_image(src: Path, duration: float, out: Path, title: str, 
     Used only when no video hook footage is available."""
     W = w or WIDTH
     H = h or HEIGHT
-    wrapped = _wrap_text(title, max_chars=30)
+    wrapped, font_size = _intro_title_layout(title, width=W, height=H)
     text_file = work_dir / "intro_title.txt"
     text_file.write_text(wrapped, encoding="utf-8")
     font_path = _resolve_font_path()
@@ -1506,7 +1604,7 @@ def _ffmpeg_intro_from_image(src: Path, duration: float, out: Path, title: str, 
             ",format=yuv420p,"
             f"drawbox=y=0:color=black@0.3:w=iw:h=ih:t=fill,"
             f"drawtext=fontfile='{font_path}':"
-            f"textfile='{text_file.as_posix()}':fontcolor=white:fontsize=72:"
+            f"textfile='{text_file.as_posix()}':fontcolor=white:fontsize={font_size}:"
             f"x=(w-text_w)/2:y=(h-text_h)/2:line_spacing=8"
         ),
         "-r", str(FPS),
@@ -1864,7 +1962,7 @@ async def _run_render(job_id: str, project_id: str):
         topic_low = (project.get("topic") or project.get("name") or "").lower()
         script_low = ((script or {}).get("full_script") or "").lower()
         use_roman_hook = any(k in topic_low for k in ["roman","morning ritual","productivity"]) or "roman" in script_low or "salutatio" in script_low
-        intro_title = HOOK_TEXT if use_roman_hook else truncate_words(str(raw_title).upper(), 48)
+        intro_title = HOOK_TEXT if use_roman_hook else _intro_title_text(str(raw_title))
         # For roman template, also ensure retention beats include roman hook beats
         if use_roman_hook:
             logger.info("HOOK_TEMPLATE roman_longform active -> intro_title=%r", intro_title)
@@ -1997,6 +2095,8 @@ async def _run_render(job_id: str, project_id: str):
                         words, ass_path,
                         intro_offset_seconds=intro_duration,
                         words_per_cue=7,
+                        play_res_x=W,
+                        play_res_y=H,
                     )
                 else:
                     cues: list[dict] = []
@@ -2203,6 +2303,8 @@ async def _run_render(job_id: str, project_id: str):
                 f"Final duration mismatch: selected {timing.target_seconds:.2f}s, encoded {duration:.2f}s"
             )
 
+        deterministic_qa_blocked: list[str] = ["qa_not_run"]
+
         # v6.2 Release Manifest + Deterministic QA Gate (Research G) — fail-closed, after muxing, before QA
         try:
             from .release_manifest import build_manifest
@@ -2222,6 +2324,7 @@ async def _run_render(job_id: str, project_id: str):
             manifest = build_manifest(project, {"id": job_id, "duration": duration}, final, thumb_path, metadata, project.get("disclosure_decision"))
             # Deterministic checks
             qa = run_checks(final, manifest, duration)
+            deterministic_qa_blocked = list(qa.get("blocked") or [])
             # Store in db
             await db.release_manifests.insert_one({**manifest, "created_at": _now()})
             await db.qa_reports.insert_one({"project_id": project_id, "job_id": job_id, "version": "v1", "checks": qa["checks"], "blocked": qa["blocked"], "created_at": _now()})
@@ -2231,6 +2334,7 @@ async def _run_render(job_id: str, project_id: str):
                 # Store blocked but don't fail render — render completes as QA_PENDING, publish will be blocked by approval check
                 await _set_job(job_id, status="verifying", current_step="qa_blocked", progress=96)
         except Exception as e:
+            deterministic_qa_blocked = ["qa_gate_error"]
             logger.warning("v6.2 manifest/QA failed %s: %s", job_id, e)
 
         # Agentic Video QA release gate.  This always runs on the final local
@@ -2366,7 +2470,14 @@ async def _run_render(job_id: str, project_id: str):
             probe_target = final
         final_has_audio = await _final_has_audio_stream(probe_target)
         captions_present = _verification_check_passed(verification_result, "captions_present")
-        await _set_job(job_id, status="completed", current_step="completed", progress=100,
+        release_eligible = release_eligible_after_qa(
+            commercial=commercial,
+            deterministic_blocked=deterministic_qa_blocked,
+            video_qa=qa_result,
+            verification_passed=verification_passed,
+        )
+        final_step = "completed" if release_eligible else "qa_blocked"
+        await _set_job(job_id, status="completed", current_step=final_step, progress=100,
             output_path=str(saved.file_path) if saved.file_path else None, output_url=saved.url,
             output_relative_url=saved.preview_path, output_storage_mode=store.mode, output_storage_key=saved.key,
             file_size=(saved.file_path.stat().st_size if saved.file_path and saved.file_path.exists() else final.stat().st_size if final.exists() else None),
@@ -2378,13 +2489,15 @@ async def _run_render(job_id: str, project_id: str):
             captions_burned=captions_present if captions_present is not None else bool(burn_enabled and burned_out != silent_out),
             flags_derived_from="final_artifact_probe+verification",
             flags_derived_at=_now(),
-            release_eligible=not commercial)
-        await db.projects.update_one({"id": project_id}, {"$set": {"status": "COMPLETED", "rendered_video_asset_id": job_id, "updated_at": _now()}})
+            release_eligible=release_eligible,
+            deterministic_qa_blocked=deterministic_qa_blocked)
+        project_status = "COMPLETED" if release_eligible else "QA_PENDING"
+        await db.projects.update_one({"id": project_id}, {"$set": {"status": project_status, "rendered_video_asset_id": job_id, "updated_at": _now()}})
 
         # ── Auto-post engine: if project.auto_post=true, post to platform of choice (no manual prep) ──
         try:
             proj_for_post = await db.projects.find_one({"id": project_id}, {"_id":0})
-            if not commercial and proj_for_post and proj_for_post.get("auto_post"):
+            if release_eligible and not commercial and proj_for_post and proj_for_post.get("auto_post"):
                 # fetch metadata for title/description
                 meta_for_post = await db.metadata_packages.find_one({"project_id": project_id}, {"_id":0}) or {}
                 meta_for_post["duration"] = duration
@@ -2406,7 +2519,7 @@ async def _run_render(job_id: str, project_id: str):
         try:
             from .email import send_video_ready_email
             project = await db.projects.find_one({"id": project_id}, {"_id": 0})
-            if project and not commercial:
+            if release_eligible and project and not commercial:
                 user = await db.users.find_one({"id": project.get("user_id")}, {"_id": 0})
                 if user and user.get("email"):
                     share_token = project.get("share_token")
