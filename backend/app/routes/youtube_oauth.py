@@ -38,6 +38,8 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 
+from ..youtube_policy import resolve_youtube_privacy
+
 logger = logging.getLogger("facelessforge.youtube_oauth")
 
 router = APIRouter(prefix="/api/youtube-oauth", tags=["youtube-oauth"])
@@ -530,7 +532,7 @@ async def youtube_auto_publish(body: AutoPublishRequest):
                 "defaultLanguage": "en",
             },
             "status": {
-                "privacyStatus": body.privacy or "public",
+                "privacyStatus": resolve_youtube_privacy(body.privacy),
                 "selfDeclaredMadeForKids": False,
             },
         }

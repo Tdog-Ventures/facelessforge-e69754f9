@@ -6,7 +6,7 @@ Steps per spec:
   c) POST /api/projects/{id}/generate-script
   d) POST /render/full/{id} (existing - wait for done webhook /api/render/callback)
   e) Thumbnail: POST /api/thumbnails/generate/{id}
-  f) YouTube upload: POST /api/youtube/upload {project_id, title, description, tags, privacy: "public"} -> uses YOUTUBE_REFRESH_TOKEN
+  f) YouTube upload using YOUTUBE_REFRESH_TOKEN and the deployment privacy policy
   g) VideoForge clip: POST /api/videoforge/clip {youtube_url, clip to 3 shorts}
   h) Auto-post shorts to YT Shorts via same youtube upload with #Shorts
 
@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..db import get_db
+from ..youtube_policy import resolve_youtube_privacy
 
 logger = logging.getLogger("facelessforge.forge_loop")
 # Dedicated channel so scheduler lifecycle decisions are greppable in prod logs.
@@ -170,7 +171,8 @@ async def _create_project(topic: str, niche: str, user_id: str) -> dict:
         "cta_goal": "Sell my product",
         "goal": "Sell my product",
         "platforms": ["youtube"],
-        "auto_post": True,
+        # Forge owns publication after rendering and the invocation's publish gate.
+        "auto_post": False,
         "status": "DRAFT",
         "quality_score": 0,
         "estimated_cost": 0.0,
@@ -478,7 +480,7 @@ async def _youtube_upload(project: dict) -> dict:
         service = build("youtube", "v3", credentials=creds, cache_discovery=False)
         media = MediaFileUpload(str(video_path), mimetype="video/mp4", resumable=True)
         body = {"snippet": {"title": title, "description": description[:5000], "tags": tags[:15], "categoryId": "28"},
-                "status": {"privacyStatus": os.environ.get("YOUTUBE_PRIVACY", "private"), "selfDeclaredMadeForKids": False}}
+                "status": {"privacyStatus": resolve_youtube_privacy(), "selfDeclaredMadeForKids": False}}
         req = service.videos().insert(part="snippet,status", body=body, media_body=media)
         resp = None
         while resp is None:

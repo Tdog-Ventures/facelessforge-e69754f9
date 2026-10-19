@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 
 from ..auth import get_current_user
 from ..db import get_db
+from ..youtube_policy import resolve_youtube_privacy
 
 logger = logging.getLogger("facelessforge.longform")
 
@@ -268,7 +269,7 @@ def _upload_to_youtube(path: Path, title: str, description: str, tags: List[str]
                 "categoryId": "28",
             },
             "status": {
-                "privacyStatus": privacy if privacy in ("public", "private", "unlisted") else "public",
+                "privacyStatus": resolve_youtube_privacy(privacy),
                 "selfDeclaredMadeForKids": made_for_kids,
             },
         }
@@ -324,7 +325,8 @@ async def longform_generate(req: LongformRequest, request: Request, user=Depends
     out_path = _render_longform(jobId, companyName, industry, script, clip_paths, target_seconds=target_seconds)
 
     # 4. Upload to YouTube (or mock)
-    yt = _upload_to_youtube(out_path, title, description, tags, privacy=req.privacy)
+    privacy = resolve_youtube_privacy(req.privacy)
+    yt = _upload_to_youtube(out_path, title, description, tags, privacy=privacy)
 
     # 5. Persist project
     public_path = str(out_path)
@@ -344,7 +346,7 @@ async def longform_generate(req: LongformRequest, request: Request, user=Depends
         "videoPath": public_path,
         "publicUrl": public_url,
         "youtube": yt,
-        "privacy": req.privacy,
+        "privacy": privacy,
         "duration": target_seconds,
         "size": out_path.stat().st_size if out_path.exists() else 0,
         "created_at": _now().isoformat(),

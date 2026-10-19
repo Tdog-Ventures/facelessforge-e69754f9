@@ -1,5 +1,6 @@
 """YouTube adapter - uses existing youtube route logic, vault YOUTUBE_REFRESH_TOKEN"""
 from .base import PlatformPoster, compliance_check, rate_limit_check, log_analytics
+from ...youtube_policy import resolve_youtube_privacy
 import os, uuid, logging
 from datetime import datetime, timezone
 logger = logging.getLogger("autopost.youtube")
@@ -35,7 +36,7 @@ class YoutubePoster(PlatformPoster):
             if not video_path:
                 raise RuntimeError("video_path not found")
             media = MediaFileUpload(str(video_path), mimetype="video/mp4", resumable=True)
-            body = {"snippet":{"title":title,"description":description[:5000],"tags": metadata.get("tags",[])[:15],"categoryId":"28"},"status":{"privacyStatus":"public","selfDeclaredMadeForKids":False}}
+            body = {"snippet":{"title":title,"description":description[:5000],"tags": metadata.get("tags",[])[:15],"categoryId":"28"},"status":{"privacyStatus":resolve_youtube_privacy(),"selfDeclaredMadeForKids":False}}
             req = service.videos().insert(part="snippet,status", body=body, media_body=media)
             resp=None
             while resp is None:
