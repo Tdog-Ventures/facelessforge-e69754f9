@@ -30,6 +30,7 @@ from . import thumbnail_images as thumb_images
 from . import tts as tts_service
 from .db import get_db
 from .visual_query import truncate_words
+from .youtube_policy import resolve_youtube_privacy
 
 logger = logging.getLogger("facelessforge.external")
 
@@ -488,7 +489,7 @@ async def external_render_video(
                                 _media = MediaFileUpload(str(_video_path), mimetype="video/mp4", resumable=True, chunksize=1024 * 1024 * 4)
                                 _body = {
                                     "snippet": {"title": _title[:100], "description": ((_meta or {}).get("description") or body.script)[:5000] + "\n\nCreate your own faceless videos at https://facelessforge.ethinx.solutions", "tags": ((_meta or {}).get("tags") or ["faceless"])[:15], "categoryId": "28"},
-                                    "status": {"privacyStatus": "public", "selfDeclaredMadeForKids": False},
+                                    "status": {"privacyStatus": resolve_youtube_privacy(), "selfDeclaredMadeForKids": False},
                                 }
                                 _req2 = _svc.videos().insert(part="snippet,status", body=_body, media_body=_media)
                                 _resp = None

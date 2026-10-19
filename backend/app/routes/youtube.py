@@ -23,6 +23,7 @@ from pydantic import BaseModel
 
 from ..auth import get_current_user
 from ..db import get_db
+from ..youtube_policy import resolve_youtube_privacy
 
 logger = logging.getLogger("facelessforge.youtube")
 
@@ -245,9 +246,7 @@ async def youtube_upload(body: YoutubeUploadRequest, user=Depends(get_current_us
         description = f"{description}\n\nCreate your own faceless videos at {forge_link} — FacelessForge by EthinX Solutions (ABN 60 578 933 517) Adelaide, South Australia.".strip()
     tags = body.tags or (meta or {}).get("tags") or ["faceless", "automation", "AI"]
     tags = [str(t)[:30] for t in tags[:15] if str(t).strip()]
-    privacy = (body.privacy or "public").lower()
-    if privacy not in ("public", "private", "unlisted"):
-        privacy = "public"
+    privacy = resolve_youtube_privacy(body.privacy)
 
     video_path = _resolve_video_path(body.project_id)
     if not video_path:
