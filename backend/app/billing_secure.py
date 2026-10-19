@@ -62,6 +62,7 @@ async def get_provider():
 
 @router.post("/webhook/paypal")
 async def paypal_webhook(request: Request, paypal_transmission_sig: Optional[str] = Header(None)):
+    raise HTTPException(status_code=410, detail="disabled")
     provider = (os.getenv("PAYMENT_PROVIDER") or PAYMENT_PROVIDER).strip().lower()
     if provider not in ("paypal","both"):
         # When PAYMENT_PROVIDER=dodo, PayPal webhook is dormant but still ack for probes

@@ -3,7 +3,7 @@ import {
   Loader2, AlertCircle, CheckCircle2, Download, RefreshCw, Square as StopIcon,
 } from "lucide-react";
 
-const ACTIVE_STATES = new Set(["queued", "validating", "preparing_assets", "rendering"]);
+const ACTIVE_STATES = new Set(["queued", "validating", "preparing_assets", "rendering", "verifying"]);
 
 function fmtBytes(n) {
   if (!n && n !== 0) return "—";
@@ -20,20 +20,22 @@ function fmtSec(s) {
 
 export default function JobStatusCard({
   job, project, selectedThumbnail, canEdit, cancelling, starting,
-  onCancel, onRetry,
+  onCancel, onRetry, downloadUrl,
 }) {
-  const failed = job.status === "failed";
-  const completed = job.status === "completed";
-  const inProgress = ACTIVE_STATES.has(job.status);
+  const status = String(job.status || "").toLowerCase();
+  const failed = status === "failed";
+  const completed = status === "completed";
+  const inProgress = ACTIVE_STATES.has(status);
+  const deliveryUrl = downloadUrl || job.delivery_url || job.output_url;
 
   return (
     <div
-      data-testid={`render-job-${job.status}`}
+      data-testid={`render-job-${status}`}
       className="border p-5 rounded-sm space-y-3"
       style={{
         borderColor: failed ? "#FF336666"
                      : completed ? "#00FF6666"
-                     : job.status === "cancelled" ? "#52525B"
+                     : status === "cancelled" ? "#52525B"
                      : "#00E5FF66",
         background: failed ? "rgba(255,51,102,0.05)"
                      : completed ? "rgba(0,255,102,0.04)"
@@ -43,12 +45,12 @@ export default function JobStatusCard({
       <div className="flex items-start gap-3">
         {failed ? <AlertCircle size={18} className="text-[#FF3366] mt-0.5" />
           : completed ? <CheckCircle2 size={18} className="text-[#00FF66] mt-0.5" />
-          : job.status === "cancelled" ? <StopIcon size={18} className="text-zinc-500 mt-0.5" />
+          : status === "cancelled" ? <StopIcon size={18} className="text-zinc-500 mt-0.5" />
           : <Loader2 size={18} className="text-[#00E5FF] mt-0.5 animate-spin" />}
         <div className="flex-1 min-w-0">
           <div className="font-mono text-[11px] uppercase tracking-widest mb-1"
                style={{ color: failed ? "#FF3366" : completed ? "#00FF66" : "#00E5FF" }}>
-            Render · {job.status}
+            Render · {status}
           </div>
           <div className="text-sm text-zinc-300">
             Progress {job.progress}% · step{" "}
@@ -83,12 +85,12 @@ export default function JobStatusCard({
         />
       </div>
 
-      {completed && job.output_url && (
+      {completed && deliveryUrl && (
         <div data-testid="render-output" className="space-y-3 pt-2">
           <video
             data-testid="render-video-player"
             controls
-            src={job.output_url}
+            src={deliveryUrl}
             preload="metadata"
             poster={selectedThumbnail?.preview_url}
             className="w-full rounded-sm border border-zinc-800 bg-black aspect-video"
@@ -103,7 +105,7 @@ export default function JobStatusCard({
           <div className="flex flex-wrap items-center gap-2">
             <a
               data-testid="render-download-btn"
-              href={job.output_url}
+              href={deliveryUrl}
               download={`${(project.name || "facelessforge").replace(/[^a-z0-9_-]/gi, "_")}.mp4`}
               className="inline-flex items-center gap-2 bg-[#00FF66] text-black font-semibold text-sm px-4 py-2 rounded-sm hover:bg-[#33FF80] transition-colors"
             >

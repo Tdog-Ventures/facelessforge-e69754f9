@@ -57,7 +57,7 @@ function HumanParamsSidebar({ projectId, project, onChange, canEdit }) {
   };
 
   return (
-    <div className="sticky top-20 bg-[#1c2333] border border-[rgba(59,130,246,0.15)] rounded-lg p-5 space-y-5" style={{ boxShadow: "0 0 20px rgba(59,130,246,0.05)" }}>
+    <div className="bg-[#1c2333] border border-[rgba(59,130,246,0.15)] rounded-lg p-5 space-y-5" style={{ boxShadow: "0 0 20px rgba(59,130,246,0.05)" }}>
       <h3 className="font-mono text-[11px] uppercase tracking-widest text-slate-400">Project Goals</h3>
 
       <div className="space-y-1.5">
@@ -131,6 +131,7 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
   const [generating, setGenerating] = useState(false);
   const [autoAttaching, setAutoAttaching] = useState(false);
   const [activeScene, setActiveScene] = useState(null);
+  const [previewAsset, setPreviewAsset] = useState(null);
   const [credits, setCredits] = useState(null);
   const [exhaustedInfo, setExhaustedInfo] = useState(null);
   const [showPricingModal, setShowPricingModal] = useState(false);
@@ -184,12 +185,13 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
       return;
     }
     setGenerating(true);
-    toast.loading("Generating scene plan…", { id: "gen-scenes" });
+    const preserve = scenes.length > 0;
+    toast.loading(preserve ? "Regenerating scene content (keeping count)…" : "Generating scene plan…", { id: "gen-scenes" });
     try {
-      const { data } = await api.post(`/projects/${projectId}/generate-scenes`);
+      const { data } = await api.post(`/projects/${projectId}/generate-scenes`, preserve ? { preserveSceneCount: true } : {});
       onChange(data);
       if (data.project) setInnerProject(data.project);
-      toast.success("Scenes generated", { id: "gen-scenes" });
+      toast.success(preserve ? "Scenes regenerated (count preserved)" : "Scenes generated", { id: "gen-scenes" });
     } catch (err) {
       if (!handleExhausted(err)) toast.error("Generation failed", { id: "gen-scenes", description: formatApiError(err.response?.data?.detail) || err.message });
       else toast.error("Credits exhausted", { id: "gen-scenes", description: `0 left, resets ${(() => { try { return new Date(err.response?.data?.detail?.reset_at || credits?.reset_at).toLocaleDateString(); } catch { return err.response?.data?.detail?.reset_at || ""; }})()}` });
@@ -238,8 +240,39 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
 
   const assetsForScene = (sceneId) =>
     (attachedAssets || []).filter(
-      (a) => a.scene_id === sceneId && (a.asset_type === "stock_video" || a.asset_type === "stock_image")
+      (a) => a.scene_id === sceneId && ["stock_video", "stock_image", "client_video", "client_image", "before_after", "brand_image"].includes(a.asset_type)
     );
+
+  const uploadClientAsset = async (scene, file) => {
+    if (!file) return;
+    const form = new FormData();
+    form.append("file", file);
+    form.append("scene_id", scene.id);
+    form.append("asset_type", file.type.startsWith("video/") ? "client_video" : "client_image");
+    try {
+      await api.post(`/projects/${projectId}/assets/upload`, form, { headers: { "Content-Type": "multipart/form-data" } });
+      const { data } = await api.get(`/projects/${projectId}`);
+      onChange(data);
+      toast.success(`Client asset assigned to scene ${scene.scene_number}`);
+    } catch (err) {
+      toast.error("Client upload failed", { description: formatApiError(err.response?.data?.detail) || err.message });
+    }
+  };
+
+  const uploadBrandAsset = async (file) => {
+    if (!file) return;
+    const form = new FormData();
+    form.append("file", file);
+    form.append("asset_type", file.type.startsWith("image/") ? "brand_logo" : "brand_image");
+    try {
+      await api.post(`/projects/${projectId}/assets/upload`, form, { headers: { "Content-Type": "multipart/form-data" } });
+      const { data } = await api.get(`/projects/${projectId}`);
+      onChange(data);
+      toast.success("Brand asset uploaded with client provenance");
+    } catch (err) {
+      toast.error("Brand upload failed", { description: formatApiError(err.response?.data?.detail) || err.message });
+    }
+  };
 
   const voiceoverForScene = (sceneId) => {
     const list = (attachedAssets || []).filter(
@@ -349,9 +382,9 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-6">
-      <div className="space-y-4">
+      <div className="space-y-4 self-start sticky top-20">
         <HumanParamsSidebar projectId={projectId} project={innerProject} onChange={onChange} canEdit={canEdit} />
-        {canEdit && (
+        {canEdit && project?.production_mode !== "commercial_ad" && (
           <button
             data-testid="full-render-btn"
             onClick={fullRender}
@@ -366,11 +399,22 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
       <div className="space-y-4 min-w-0">
         <BillingBar />
         <div className="flex items-center justify-between">
-          <div className="font-mono text-[11px] text-slate-500">
-            {scenes.length} scenes · total {formatDuration(scenes[scenes.length - 1]?.end_time || 0)}
+          <div className="font-mono text-[11px] text-slate-500" title={`Locked: ceil(${innerProject?.target_duration || project?.target_duration || 0}s / 30s)`}>
+            {(() => {
+              const total = innerProject?.target_duration || project?.target_duration || 0;
+              const expected = Math.ceil(total / 30);
+              const actual = scenes.length;
+              const totalStr = formatDuration(scenes[scenes.length - 1]?.end_time || total);
+              const mismatch = actual !== expected && actual > 0;
+              return (
+                <span className={mismatch ? "text-amber-400" : ""}>
+                  Total: {total}s = {expected} × 30s · {actual} scenes · {totalStr} {mismatch ? "⚠ mismatch" : ""}
+                </span>
+              );
+            })()}
           </div>
           <div className="flex items-center gap-2">
-            {canEdit && (
+            {canEdit && project?.production_mode !== "commercial_ad" && (
               <button
                 data-testid="auto-attach-btn"
                 onClick={autoAttach}
@@ -381,6 +425,12 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
                 {autoAttaching ? <Loader2 size={12} className="animate-spin" /> : <Wand2 size={12} strokeWidth={1.8} />}
                 {exhausted ? `0 left, resets ${resetLabel}` : autoAttaching ? "Auto-attaching…" : "Auto-attach Assets"}
               </button>
+            )}
+            {canEdit && project?.production_mode === "commercial_ad" && (
+              <label className="font-mono text-[10px] uppercase tracking-widest text-[#00E5FF] border border-[#00E5FF]/40 px-2 py-1 rounded-md cursor-pointer">
+                Upload logo / brand asset
+                <input data-testid="upload-brand-asset" type="file" accept="image/*" className="hidden" onChange={(e) => uploadBrandAsset(e.target.files?.[0])} />
+              </label>
             )}
             <button
               data-testid="export-scenes-csv"
@@ -470,14 +520,14 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
                       <div className="text-slate-300 italic">"{s.caption_text}"</div>
                       {sceneAssets.length > 0 && (
                         <>
-                          <div className="grid grid-cols-5 gap-1 max-w-[280px]">
+                          <div className="grid grid-cols-3 gap-2 max-w-[420px]">
                             {sceneAssets.slice(0,10).map((a, i) => (
-                              <div key={a.id} data-testid={`scene-asset-${a.id}`} className="relative aspect-video bg-black border border-slate-700 group overflow-hidden rounded-md" title={`${a.name} · ${a.attribution_name || ""}`}>
+                              <div key={a.id} data-testid={`scene-asset-${a.id}`} className="relative aspect-video bg-black border border-slate-700 group overflow-hidden rounded-md cursor-pointer" title={`${a.name} · ${a.attribution_name || ""} — click to preview`} onClick={() => setPreviewAsset(a)}>
                                 {a.preview_url ? <img src={a.preview_url} alt="" className="w-full h-full object-cover" loading="lazy" referrerPolicy="no-referrer" onError={(e)=>{e.currentTarget.src='/fallback-thumb.png'; e.currentTarget.onerror=null;}} /> : <div className="w-full h-full bg-[#0f141f]" />}
                                 <span className="absolute bottom-0 left-0 text-[7px] bg-black/70 px-1 text-white">{i*3}s</span>
-                                {a.source && <span className="absolute top-0 right-0 text-[6px] bg-blue-500 text-white px-0.5">{a.source[0].toUpperCase()}</span>}
+                                {a.source && <span className="absolute top-0 left-0 text-[6px] bg-blue-500 text-white px-0.5">{a.source[0].toUpperCase()}</span>}
                                 {canEdit && (
-                                  <button data-testid={`detach-asset-${a.id}`} onClick={() => detach(a)} className="absolute inset-0 bg-black/70 opacity-0 group-hover:opacity-100 flex items-center justify-center text-red-400 transition-opacity">
+                                  <button data-testid={`detach-asset-${a.id}`} onClick={(e) => { e.stopPropagation(); detach(a); }} className="absolute top-1 right-1 w-6 h-6 bg-black/80 hover:bg-red-500 rounded-full flex items-center justify-center text-white hover:text-white opacity-0 group-hover:opacity-100 transition-opacity">
                                     <XIcon size={14} strokeWidth={2} />
                                   </button>
                                 )}
@@ -488,14 +538,18 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
                         </>
                       )}
                       {canEdit && (
-                        <button
-                          data-testid={`find-assets-btn-${s.id}`}
-                          onClick={() => setActiveScene(s)}
-                          className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-blue-400 hover:text-white border border-blue-500/30 hover:border-blue-400 px-2 py-1 rounded-md transition-colors"
-                        >
-                          <Search size={11} strokeWidth={1.5} />
-                          {sceneAssets.length > 0 ? "Find more" : "Find Assets"}
-                        </button>
+                        <div className="flex flex-wrap gap-2">
+                          {project?.production_mode === "commercial_ad" ? (
+                            <label className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-[#00E5FF] border border-[#00E5FF]/40 px-2 py-1 rounded-md cursor-pointer">
+                              Upload client asset
+                              <input data-testid={`upload-client-asset-${s.id}`} type="file" accept="image/*,video/*" className="hidden" onChange={(e) => uploadClientAsset(s, e.target.files?.[0])} />
+                            </label>
+                          ) : (
+                            <button data-testid={`find-assets-btn-${s.id}`} onClick={() => setActiveScene(s)} className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-blue-400 hover:text-white border border-blue-500/30 hover:border-blue-400 px-2 py-1 rounded-md transition-colors">
+                              <Search size={11} strokeWidth={1.5} /> {sceneAssets.length > 0 ? "Find more" : "Find Assets"}
+                            </button>
+                          )}
+                        </div>
                       )}
                     </td>
                   </tr>
@@ -516,6 +570,32 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
               onChange(data);
             }}
           />
+        )}
+
+        {previewAsset && (
+          <div data-testid="preview-modal" className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4" onClick={() => setPreviewAsset(null)}>
+            <div className="relative bg-[#1c2333] border border-slate-700 rounded-lg max-w-3xl w-full overflow-hidden" onClick={(e) => e.stopPropagation()}>
+              <button onClick={() => setPreviewAsset(null)} className="absolute top-2 right-2 w-8 h-8 bg-black/60 hover:bg-black rounded-full flex items-center justify-center text-white z-10">
+                <XIcon size={16} />
+              </button>
+              <div className="aspect-video bg-black">
+                {previewAsset.preview_url?.match(/\.(mp4|mov|webm)/) || previewAsset.asset_type === "stock_video" ? (
+                  <video src={previewAsset.preview_url} controls autoPlay muted loop className="w-full h-full object-contain" />
+                ) : (
+                  <img src={previewAsset.preview_url} alt={previewAsset.name} className="w-full h-full object-contain" />
+                )}
+              </div>
+              <div className="p-4 space-y-2">
+                <div className="text-sm text-white font-medium">{previewAsset.name}</div>
+                <div className="text-xs text-slate-400">{previewAsset.attribution_name || previewAsset.source || ""} · {previewAsset.width}×{previewAsset.height}</div>
+                <div className="flex gap-2 pt-2">
+                  <a href={previewAsset.preview_url} target="_blank" rel="noreferrer" className="text-xs text-blue-400 hover:underline">Open original</a>
+                  <span className="text-xs text-slate-600">|</span>
+                  <button onClick={() => { setPreviewAsset(null); detach(previewAsset); }} className="text-xs text-red-400 hover:underline">Detach</button>
+                </div>
+              </div>
+            </div>
+          </div>
         )}
 
         {showPricingModal && (

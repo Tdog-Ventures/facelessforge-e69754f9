@@ -1,124 +1,180 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
-# IDE and editors
-.idea/
-.vscode/
-
-# Dependencies
-node_modules/
-/node_modules
-/.pnp
-.pnp.js
-.yarn/install-state.gz
-.yarn/*
 !.yarn/patches
 !.yarn/plugins
 !.yarn/releases
 !.yarn/versions
-
-# Testing
-/coverage
-
-# Next.js
-/.next/
-/out/
-next-env.d.ts
-*.tsbuildinfo
-
-# Production builds
-/build
-dist/
-dist
-
-# Environment files (comprehensive coverage)
-
-*token.json*
-*credentials.json*
-
-# Local secrets folder (user-managed API keys)
-/secrets/
-secrets/
-
-# Logs and debug files
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-dump.rdb
-
-# System files
-.DS_Store
-*.pem
-
-# Python
-__pycache__/
-*pyc*
-venv/
-.venv/
-
-# Development tools
-chainlit.md
-.chainlit
-.ipynb_checkpoints/
-.ac
-
-# Deployment
-.vercel
-
-# Data and databases
-agenthub/agents/youtube/db
-
 # Archive files and large assets
-**/*.zip
-**/*.tar.gz
+# Build caches
+# Data and databases
+# Dependencies
+# Deployment
+# Development tools
+# Environment and credential files
+# Environment files (comprehensive coverage)
+# Generated render/voiceover/thumbnail artifacts — local disk only; object
+# IDE and editors
+# Local secrets folder (user-managed API keys)
+# Logs and debug files
+# Mobile development
+# Next.js
+# Production builds
+# Python
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+# System files
+# Testing
+# Yarn lockfiles (yarn build regenerates these; not tracked in this repo)
+# backups
+# frontend build artifacts - old CRA builds
+# more backup variants that slipped through
+# storage handles persistence in production. Retention sweep purges these.
 **/*.tar
+**/*.tar.gz
 **/*.tgz
-*.pack
+**/*.zip
+*-backup-*
+*.backup
+*.backup-*
+*.backup_*
+*.bak
+*.bak.*
+*.bak_*
 *.deb
 *.dylib
-
-# Build caches
+*.env
+*.fixed
+*.fixed-*
+*.key
+*.live_*
+*.live_backup
+*.orig
+*.pack
+*.pem
+*.tsbuildinfo
+*credentials.json*
+*pyc*
+*token.json*
+*~
+-e 
+.DS_Store
+.ac
+.adal/
+.agents/
+.aider-desk/
+.augment/
+.autohand/
+.bob/
 .cache/
-
-memory/test_credentials.md
-
-# Mobile development
+.chainlit
+.claude/
+.codeartsdoer/
+.codebuddy/
+.codemaker/
+.codestudio/
+.codex/
+.commandcode/
+.continue/
+.cortex/
+.credentials
+.crush/
+.devin/
+.emergent/
+.env
+.env.*
+.factory/
+.forge/
+.git/
+.goose/
+.grok/
+.hermes/
+.idea/
+.iflow/
+.inferencesh/
+.ipynb_checkpoints/
+.jazz/
+.junie/
+.kilocode/
+.kimchi/
+.kiro/
+.kode/
+.lingma/
+.mcpjam/
+.minimax/
+.moxby/
+.mux/
+.neovate/
+.ona/
+.opencode/
+.openhands/
+.pi/
+.playwright-cli/
+.pnp.js
+.pnpm-debug.log*
+.pochi/
+.posit/
+.pytest_cache/
+.qoder/
+.qwen/
+.reasonix/
+.roo/
+.rovodev/
+.tabnine/
+.terramind/
+.testsprite/
+.tinycloud/
+.trae/
+.venv/
+.vercel
+.vibe/
+.vscode/
+.windsurf/
+.yarn/*
+.yarn/install-state.gz
+.zcode/
+.zencoder/
+/.next/
+/.pnp
+/build
+/coverage
+/node_modules
+/out/
+/secrets/
+__pycache__/
+agenthub/agents/youtube/db
 android-sdk/frontend/node_modules/.cache/default-development/4.pack
+backend/static/
+backend/static/audio/
+backend/static/frontend/
+backend/static/renders/
+backend/static/thumbs/
+build/
+chainlit.md
+credentials.json
+dist
+dist/
+dump.rdb
+frontend/build/
+frontend/dist/
+frontend/node_modules/.cache/default-development/1.pack
+frontend/node_modules/.cache/default-development/13.pack
+frontend/node_modules/.cache/default-development/15.pack
+frontend/node_modules/.cache/default-development/3.pack
 frontend/node_modules/.cache/default-development/4.pack
 frontend/node_modules/.cache/default-development/6.pack
-frontend/node_modules/.cache/default-development/1.pack
 frontend/node_modules/.cache/default-development/7.pack
 frontend/node_modules/.cache/default-development/8.pack
 frontend/node_modules/.cache/default-development/9.pack
--e 
-# Environment and credential files
-.env
-.env.*
-*.env
-credentials.json
-*.pem
-*.key
-.credentials
-frontend/node_modules/.cache/default-development/3.pack
-frontend/node_modules/.cache/default-development/13.pack
--e 
-# Environment and credential files
-.env
-.env.*
-*.env
-credentials.json
-*.pem
-*.key
-.credentials
-
-
-# Yarn lockfiles (yarn build regenerates these; not tracked in this repo)
-yarn.lock
 frontend/yarn.lock
+memory/test_credentials.md
+next-env.d.ts
+node_modules/
+npm-debug.log*
+remotion-renderer/
+secrets/
+venv/
+yarn-debug.log*
+yarn-error.log*
+yarn.lock
 
-# Generated render/voiceover/thumbnail artifacts — local disk only; object
-# storage handles persistence in production. Retention sweep purges these.
-backend/static/audio/
-backend/static/renders/
-backend/static/thumbs/
-frontend/node_modules/.cache/default-development/15.pack
+# local data / captures (not source)
+/data/
+/backend/HTTP

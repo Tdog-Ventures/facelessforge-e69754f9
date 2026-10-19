@@ -1,0 +1,217 @@
+"""Regression tests for the render constitution verification gate (check f).
+
+Incident: a real 1080x1920 portrait render (video+audio present, captions
+burned, loudnorm in spec) was marked FAILED by check_f `no_pillarbox`
+because one sampled frame landed inside a fade-through-black transition:
+the whole frame was near-black (full-frame luminance ~8/255), which the
+check misread as a letterbox bar.
+
+Rule locked in by these tests: a flat dark edge strip is only a bar when
+the frame centre is actually bright. Full-frame fades / black leaders must
+pass; genuine letterbox bars (bright centre, black top/bottom) must fail.
+"""
+from __future__ import annotations
+
+import asyncio
+import os
+import shutil
+import socket
+import subprocess
+from pathlib import Path
+from urllib.parse import urlparse
+
+import pytest
+
+from backend.app import render, verify
+
+portrait_W, portrait_H = 1080, 1920
+ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
+
+
+def _run(cmd: list[str]) -> None:
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _fade_tail_video(dest: Path) -> Path:
+    """4s bright test pattern + 3s pure black tail (models a fade-to-black)."""
+    bright = dest.parent / "bright.mp4"
+    black = dest.parent / "black.mp4"
+    _run([ffmpeg, "-y", "-f", "lavfi", "-i",
+          f"testsrc2=size={portrait_W}x{portrait_H}:rate=30:duration=4",
+          "-c:v", "libx264", "-pix_fmt", "yuv420p", str(bright)])
+    _run([ffmpeg, "-y", "-f", "lavfi", "-i",
+          f"color=black:size={portrait_W}x{portrait_H}:rate=30:duration=3",
+          "-c:v", "libx264", "-pix_fmt", "yuv420p", str(black)])
+    _run([ffmpeg, "-y", "-i", str(bright), "-i", str(black),
+          "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0",
+          "-c:v", "libx264", "-pix_fmt", "yuv420p", str(dest)])
+    return dest
+
+
+def _letterboxed_video(dest: Path) -> Path:
+    """Bright pattern with genuine 200px black bars top and bottom."""
+    _run([ffmpeg, "-y", "-f", "lavfi", "-i",
+          f"testsrc2=size={portrait_W}x{portrait_H - 400}:rate=30:duration=7",
+          "-vf", f"pad={portrait_W}:{portrait_H}:0:200:black",
+          "-c:v", "libx264", "-pix_fmt", "yuv420p", str(dest)])
+    return dest
+
+
+def test_check_f_ignores_full_frame_fade_to_black(tmp_path: Path):
+    video = _fade_tail_video(tmp_path / "fade_tail.mp4")
+    result = asyncio.run(verify.check_f_no_pillarbox(str(video), aspect="9:16"))
+    assert result["frames_checked"] > 0
+    assert result["passed"] is True, f"fade-to-black flagged as bars: {result}"
+
+
+def test_check_f_still_rejects_genuine_letterbox_bars(tmp_path: Path):
+    video = _letterboxed_video(tmp_path / "letterbox.mp4")
+    result = asyncio.run(verify.check_f_no_pillarbox(str(video), aspect="9:16"))
+    assert result["frames_checked"] > 0
+    assert result["passed"] is False, f"genuine bars not detected: {result}"
+    assert result["edge_failures"] >= 1
+
+
+def _uniform_tone_video(dest: Path, duration_s: float = 30.07) -> Path:
+    """Video with uniform sine audio: every full 10s segment measures the
+    same level. Only a sub-second trailing sliver differs (~-91dB)."""
+    _run([ffmpeg, "-y",
+          "-f", "lavfi", "-i",
+          f"testsrc2=size={portrait_W}x{portrait_H}:rate=30:duration={duration_s}",
+          "-f", "lavfi", "-i",
+          f"sine=frequency=440:duration={duration_s}",
+          "-c:v", "libx264", "-pix_fmt", "yuv420p",
+          "-c:a", "aac", "-shortest", str(dest)])
+    return dest
+
+
+def _single_side_dark_top_video(dest: Path) -> Path:
+    """Bright pattern with a black band ONLY at the top (dark-sky content).
+
+    Incident 2026-10-11: a real render carried a ~200px near-black top band
+    over bright content for ~2.5s (night-sky stock). check_f flagged it as
+    letterboxing (OR logic) and failed the whole job. Bars from aspect
+    conversion come in pairs — one dark edge + bright opposite edge is
+    content and must pass.
+    """
+    src = dest.parent / "src_bright.mp4"
+    _run([ffmpeg, "-y", "-f", "lavfi", "-i",
+          f"testsrc2=size={portrait_W}x{portrait_H - 200}:rate=30:duration=11",
+          "-c:v", "libx264", "-pix_fmt", "yuv420p", str(src)])
+    _run([ffmpeg, "-y", "-i", str(src),
+          "-vf", f"pad={portrait_W}:{portrait_H}:0:200:black",
+          "-c:v", "libx264", "-pix_fmt", "yuv420p", str(dest)])
+    return dest
+
+
+def _landscape_single_side_dark_video(dest: Path) -> Path:
+    """1920x1080 with a black band ONLY on the left — content, must pass."""
+    src = dest.parent / "src_land.mp4"
+    _run([ffmpeg, "-y", "-f", "lavfi", "-i",
+          "testsrc2=size=1720x1080:rate=30:duration=11",
+          "-c:v", "libx264", "-pix_fmt", "yuv420p", str(src)])
+    _run([ffmpeg, "-y", "-i", str(src),
+          "-vf", "pad=1920:1080:200:0:black",
+          "-c:v", "libx264", "-pix_fmt", "yuv420p", str(dest)])
+    return dest
+
+
+def _landscape_symmetric_bars_video(dest: Path) -> Path:
+    """1920x1080 with black bars left AND right — genuine pillarbox, must fail."""
+    src = dest.parent / "src_land2.mp4"
+    _run([ffmpeg, "-y", "-f", "lavfi", "-i",
+          "testsrc2=size=1520x1080:rate=30:duration=11",
+          "-c:v", "libx264", "-pix_fmt", "yuv420p", str(src)])
+    _run([ffmpeg, "-y", "-i", str(src),
+          "-vf", "pad=1920:1080:200:0:black",
+          "-c:v", "libx264", "-pix_fmt", "yuv420p", str(dest)])
+    return dest
+
+
+def test_check_f_passes_single_sided_dark_top_content(tmp_path: Path):
+    video = _single_side_dark_top_video(tmp_path / "single_top.mp4")
+    result = asyncio.run(verify.check_f_no_pillarbox(str(video), aspect="9:16"))
+    assert result["frames_checked"] > 0
+    assert result["passed"] is True, f"single-sided dark content flagged as bars: {result}"
+
+
+def test_check_f_passes_single_sided_dark_left_content(tmp_path: Path):
+    video = _landscape_single_side_dark_video(tmp_path / "single_left.mp4")
+    result = asyncio.run(verify.check_f_no_pillarbox(str(video), aspect="16:9"))
+    assert result["frames_checked"] > 0
+    assert result["passed"] is True, f"single-sided dark content flagged as bars: {result}"
+
+
+def test_check_f_still_rejects_symmetric_pillarbox_bars(tmp_path: Path):
+    video = _landscape_symmetric_bars_video(tmp_path / "sym_bars.mp4")
+    result = asyncio.run(verify.check_f_no_pillarbox(str(video), aspect="16:9"))
+    assert result["frames_checked"] > 0
+    assert result["passed"] is False, f"symmetric pillarbox not detected: {result}"
+
+
+def test_check_c_ignores_trailing_subsecond_sliver(tmp_path: Path):
+    """Incident 2026-10-11: a 30.07s render with healthy uniform audio
+    failed check_c with vol_diff=72.4dB because the trailing 66ms sliver
+    measures ~-91dB. Slivers under MIN_VOL_SEGMENT_SEC must be skipped."""
+    video = _uniform_tone_video(tmp_path / "uniform_sliver.mp4")
+    result = asyncio.run(verify.check_c_volume_consistency(str(video)))
+    assert result["segments_checked"] == 3, f"sliver not skipped: {result}"
+    assert result["passed"] is True, f"healthy mix failed: {result}"
+    assert result["diff_db"] <= 12.0
+
+
+def test_configured_object_storage_endpoint_resolves():
+    """Guards the Sep-30 incident root cause: STORAGE pointed at an
+    unresolvable host (`minio`), failing every asset save. The configured
+    object-storage endpoint hostname must resolve via DNS."""
+    if (os.environ.get("STORAGE_MODE", "local") or "local").strip().lower() != "object":
+        pytest.skip("STORAGE_MODE is not object")
+    endpoint = (os.environ.get("STORAGE_ENDPOINT_URL")
+                or os.environ.get("STORAGE_ENDPOINT") or "").strip()
+    assert endpoint, "STORAGE endpoint not configured"
+    host = urlparse(endpoint).hostname or ""
+    assert host, f"no hostname in STORAGE endpoint {endpoint!r}"
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror as exc:
+        pytest.fail(f"object storage endpoint host does not resolve: {host} ({exc})")
+    assert infos, f"no addresses for {host}"
+
+
+class _ReachedScriptLookup(RuntimeError):
+    """Sentinel proving render startup progressed past environment handling."""
+
+
+class _FindOneCollection:
+    def __init__(self, value=None, error=None):
+        self.value = value
+        self.error = error
+
+    async def find_one(self, *_args, **_kwargs):
+        if self.error:
+            raise self.error
+        return self.value
+
+
+class _StartupDB:
+    render_jobs = _FindOneCollection({"aspect_ratio": "16:9", "burn_subtitles": True})
+    projects = _FindOneCollection({"aspect_ratio": "16:9", "burn_subtitles": True})
+    scripts = _FindOneCollection(error=_ReachedScriptLookup("script lookup reached"))
+
+
+def test_run_render_can_read_environment_before_script_lookup(monkeypatch):
+    """An inner ``import os`` must not shadow the module import in _run_render.
+
+    The production incident failed on RENDER_BURN_SUBTITLES before the first
+    script lookup. Reaching the sentinel demonstrates startup passed that line.
+    """
+
+    async def _no_op_set_job(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(render, "get_db", lambda: _StartupDB())
+    monkeypatch.setattr(render, "_set_job", _no_op_set_job)
+    monkeypatch.setenv("RENDER_BURN_SUBTITLES", "true")
+
+    with pytest.raises(_ReachedScriptLookup, match="script lookup reached"):
+        asyncio.run(render._run_render("job-id", "project-id"))

@@ -18,7 +18,7 @@ export default function ThumbnailPanel({
   const [working, setWorking] = useState(null); // asset id being acted on
   const [autoSelectFirst, setAutoSelectFirst] = useState(true);
   const [autoPendingBriefId, setAutoPendingBriefId] = useState(null);
-  const [meta, setMeta] = useState({ mock: true, provider: "gemini_nano_banana" });
+  const [meta, setMeta] = useState({ mock: false, configured: false, provider: "gemini_nano_banana" });
   const [metaLoading, setMetaLoading] = useState(true);
   const [metaError, setMetaError] = useState(null);
   const confirm = useConfirm();
@@ -27,7 +27,7 @@ export default function ThumbnailPanel({
   // close over an uninitialized variable (and so the panel never crashes when
   // assets arrive late or missing).
   const safeAssets = (assets || []).filter(Boolean);
-  const briefs = safeAssets.filter((a) => a?.asset_type === "thumbnail_concept" && a?.brief);
+  const briefs = safeAssets.filter((a) => a?.asset_type === "thumbnail_concept" && (a?.brief || a?.thumbnail_title_text));
   const generatedByBrief = (briefId) =>
     safeAssets.filter((a) => a?.asset_type === "generated_thumbnail" && a?.brief_asset_id === briefId);
 
@@ -36,7 +36,7 @@ export default function ThumbnailPanel({
     setMetaError(null);
     try {
       const { data } = await api.get("/thumbnails/meta");
-      setMeta(data || { mock: true, provider: "gemini_nano_banana" });
+      setMeta(data || { mock: false, configured: false, provider: "gemini_nano_banana" });
     } catch (err) {
       setMetaError(formatApiError(err.response?.data?.detail) || err.message);
     } finally {
@@ -216,7 +216,7 @@ export default function ThumbnailPanel({
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div className="font-mono text-[11px] text-zinc-500">
-          {autoGeneratingConcepts ? "Generating thumbnail concepts…" : `${briefs.length} concepts · ${meta.mock ? "mock images" : "Gemini Nano Banana"}`}
+          {autoGeneratingConcepts ? "Generating thumbnail concepts…" : `${briefs.length} concepts · ${meta.provider === "pexels_stock" ? "Pexels + local compositor" : "Gemini Nano Banana"}`}
         </div>
         <div className="flex items-center gap-3">
           {canEdit && (
@@ -230,26 +230,15 @@ export default function ThumbnailPanel({
               Auto-select first concept
             </label>
           )}
-          <div className="flex items-center gap-2">
-          {meta.mock ? (
-            <span
-              data-testid="thumb-mock-badge"
-              className="font-mono text-[10px] uppercase tracking-widest text-[#FFB020] border border-[#FFB020]/30 bg-[#FFB020]/10 px-2 py-0.5 rounded-sm"
-            >
-              Mock image
-            </span>
-          ) : (
-            <span className="font-mono text-[10px] uppercase tracking-widest text-[#00FF66] border border-[#00FF66]/30 bg-[#00FF66]/10 px-2 py-0.5 rounded-sm">
-              Generated · Gemini
-            </span>
-          )}
-          </div>
+          <span className={`font-mono text-[10px] uppercase tracking-widest px-2 py-0.5 rounded-sm border ${meta.configured === false ? "text-[#FFB020] border-[#FFB020]/30 bg-[#FFB020]/10" : "text-[#00FF66] border-[#00FF66]/30 bg-[#00FF66]/10"}`}>
+            {meta.mock ? "Mock thumbnails" : meta.configured === false ? "Image provider · Setup required" : meta.provider === "pexels_stock" ? "Pexels + local layout · Live" : "Gemini · Live"}
+          </span>
         </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
         {briefs.map((a, i) => {
-          const b = a.brief;
+          const b = a.brief || a;
           const gens = generatedByBrief(a.id);
           const isGen = generating === a.id;
           return (
@@ -296,18 +285,30 @@ export default function ThumbnailPanel({
                               : "border-zinc-800"
                           }`}
                         >
-                          <div className="aspect-video bg-[#0f141f]">
+                          <div className="aspect-video bg-[#0f141f] relative">
                             {g.preview_url ? (
                               <img
                                 src={g.preview_url}
                                 alt={g.name}
                                 className="w-full h-full object-cover"
                                 loading="lazy"
-                                onError={(e)=>{e.currentTarget.src='/fallback-thumb.png'; e.currentTarget.onerror=null;}}
+                                onError={(e)=>{
+                                  e.currentTarget.style.display='none';
+                                  e.currentTarget.nextSibling?.classList?.remove('hidden');
+                                }}
                               />
-                            ) : (
-                              <img src="/fallback-thumb.png" alt="fallback" className="w-full h-full object-cover" />
+                            ) : null}
+                            {!g.preview_url && (
+                              <div className="w-full h-full flex flex-col items-center justify-center gap-2 bg-zinc-900">
+                                <Loader2 size={16} className="animate-spin text-[#00E5FF]" />
+                                <span className="font-mono text-[9px] text-zinc-500">Generating 512×288…</span>
+                              </div>
                             )}
+                            <div className="hidden w-full h-full absolute inset-0 flex flex-col items-center justify-center gap-2 bg-zinc-900">
+                              <span className="font-mono text-[10px] text-[#FF3366]">Failed</span>
+                              <button onClick={() => generate(a.id, 1)} className="font-mono text-[9px] border border-[#FF3366] text-[#FF3366] px-2 py-1 rounded-sm">Retry</button>
+                            </div>
+                            {/* Hover preview for stock video: real frame at 1.5s will be generated via backend canvas */}
                           </div>
                           <span
                             className="absolute top-1.5 left-1.5 font-mono text-[9px] uppercase tracking-widest px-1.5 py-0.5 rounded-sm border"
@@ -316,12 +317,10 @@ export default function ThumbnailPanel({
                                 ? { color: "#00FF66", background: "rgba(0,255,102,0.12)", borderColor: "#00FF66" }
                                 : isRejected
                                 ? { color: "#FF3366", background: "rgba(255,51,102,0.1)", borderColor: "#FF3366" }
-                                : g.mock
-                                ? { color: "#FFB020", background: "rgba(255,176,32,0.1)", borderColor: "#FFB020" }
                                 : { color: "#00E5FF", background: "rgba(0,229,255,0.1)", borderColor: "#00E5FF" }
                             }
                           >
-                            {isSelected ? "Selected" : isRejected ? "Rejected" : g.mock ? "Mock" : "Generated"}
+                            {isSelected ? "Selected" : isRejected ? "Rejected" : "Generated"}
                           </span>
                           {canEdit && (
                             <div className="absolute inset-0 bg-black/0 group-hover:bg-black/70 opacity-0 group-hover:opacity-100 flex flex-wrap items-center justify-center gap-1 p-2 transition-opacity">

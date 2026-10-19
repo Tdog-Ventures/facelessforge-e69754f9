@@ -1,0 +1,78 @@
+{
+  "business": {
+    "legal_name": "ETHINX Solutions",
+    "trading_name": "ETHINX",
+    "email": "hello@ethinx.solutions",
+    "website_url": "https://ethinx.solutions",
+    "currency": "AUD"
+  },
+  "bank_transfer": {
+    "account_name": "ETHINX Solutions",
+    "bsb": "000-000",
+    "account_number": "00000000",
+    "payment_reference_prefix": "ETHX"
+  },
+  "bank_import": {
+    "encoding": "utf-8-sig",
+    "delimiter": ",",
+    "columns": {
+      "date": "Date",
+      "description": "Description",
+      "amount": "Credit Amount"
+    },
+    "date_formats": ["%d/%m/%Y", "%Y-%m-%d"],
+    "amount_kind": "credit_only"
+  },
+  "billing": {
+    "renewal_notice_days": 5
+  },
+  "privacy": {
+    "application_retention_days": "SET_AFTER_BUSINESS_REVIEW",
+    "bank_record_retention_days": "SET_AFTER_BUSINESS_REVIEW"
+  },
+  "security": {
+    "require_https": true,
+    "trusted_proxy_ips": ["127.0.0.1", "::1"],
+    "trusted_origins": ["https://billing.ethinx.solutions"],
+    "public_requests_per_window": 5,
+    "admin_requests_per_window": 30,
+    "rate_limit_window_seconds": 900
+  },
+  "monitoring": {
+    "job_max_age_seconds": {
+      "bank-reconcile": 7200,
+      "access-lifecycle": 7200,
+      "content-draft": 345600,
+      "backup": 93600
+    }
+  },
+  "plans": {
+    "individual": {
+      "name": "Individual / Creator",
+      "amount_cents": 4900,
+      "monthly": true,
+      "seats": 30
+    },
+    "agency": {
+      "name": "Agency / Team",
+      "amount_cents": 49900,
+      "monthly": true,
+      "seats": 20
+    }
+  },
+  "content": {
+    "timezone": "Australia/Adelaide",
+    "mode": "template",
+    "ollama_url": "http://127.0.0.1:11434/api/generate",
+    "ollama_model": "REPLACE_WITH_LOCAL_MODEL",
+    "website_url": "https://ethinx.solutions",
+    "product_name": "PortfolioForge",
+    "founder_context": "Solo founder in Adelaide, SA, building and operating a self-hosted autonomous video pipeline.",
+    "proof_points": [
+      "18 scenes attached; zero failures in the referenced run.",
+      "JWT tenant isolation using HS256.",
+      "Local ffprobe motion detection applies a still-image treatment where required.",
+      "The render engine runs on a Linux host using ffmpeg."
+    ]
+  }
+}

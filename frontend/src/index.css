@@ -147,3 +147,6 @@ input:focus-visible, textarea:focus-visible, select:focus-visible, button:focus-
 .ff-rise-2 { animation-delay: 80ms; }
 .ff-rise-3 { animation-delay: 120ms; }
 .ff-rise-4 { animation-delay: 160ms; }
+
+/* Adelaide mobile fixes — 360/768/1024 breakpoints */
+@import "./mobile-fix.css";

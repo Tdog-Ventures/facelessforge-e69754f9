@@ -11,7 +11,7 @@ export default function VoiceoverPanel({
   projectId, project, scenes = [], assets = [], hasScript, canEdit, onChange,
 }) {
   const confirm = useConfirm();
-  const [meta, setMeta] = useState({ mock: true, provider: "openai", model: "tts-1", default_voice_style: "narrator" });
+  const [meta, setMeta] = useState({ mock: false, configured: false, provider: "elevenlabs", model: "eleven_multilingual_v2", default_voice_style: "narrator" });
   const [voiceStyle, setVoiceStyle] = useState(null);
   const [generatingFull, setGeneratingFull] = useState(false);
   const [generatingScene, setGeneratingScene] = useState(null);
@@ -165,7 +165,9 @@ export default function VoiceoverPanel({
               data-testid="vo-live-badge"
               className="font-mono text-[10px] uppercase tracking-widest text-[#00FF66] border border-[#00FF66]/30 bg-[#00FF66]/10 px-2 py-0.5 rounded-sm"
             >
-              OpenAI · Live
+              {meta.configured === false
+                ? `${meta.provider || "Voice provider"} · Setup required`
+                : `${meta.provider || "Voice provider"} · Live`}
             </span>
           )}
         </div>

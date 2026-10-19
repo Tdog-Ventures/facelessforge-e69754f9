@@ -1,4 +1,5 @@
 """Seed admin + demo creator + 3 sample projects in different statuses."""
+import logging
 import os
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -7,6 +8,8 @@ from .auth import hash_password
 from .db import get_db
 from . import generation as gen
 from .scoring import quality_score, compute_project_status
+
+logger = logging.getLogger("facelessforge.seed")
 
 
 def _now():
@@ -148,6 +151,12 @@ async def _seed_project(db, *, user_id: str, spec: dict, created_offset_days: in
 
 
 async def run_seed():
+    # Fix: do not auto-recreate projects on every restart. Only run if explicitly enabled.
+    # This prevents "deleted projects stay deleted" from being violated (user wants 0 to stay 0).
+    # To seed deliberately: set AUTO_SEED=true in backend/.env and call run_seed manually, or run `python -m app.seed`.
+    if os.environ.get("AUTO_SEED", "false").lower() not in ("1", "true", "yes"):
+        logger.info("AUTO_SEED not enabled — skipping auto-creation of 3 sample projects (delete stays deleted)")
+        return
     db = get_db()
     admin_email = os.environ["ADMIN_EMAIL"]
     admin_password = os.environ["ADMIN_PASSWORD"]

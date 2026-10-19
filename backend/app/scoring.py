@@ -15,27 +15,45 @@ STATUSES = [
 
 
 def quality_score(*, project: dict, script: Optional[dict], scenes: list,
-                  metadata: Optional[dict], render_job: Optional[dict]) -> int:
+                  metadata: Optional[dict], render_job: Optional[dict],
+                  grounding: Optional[dict] = None) -> int:
+    """Compatibility score for list views; commercial failures never average out.
+
+    The detailed scorecard is persisted on the render job.  This number may
+    only be publish-ready when client grounding, semantic alignment and
+    commercial readiness all pass.
+    """
+    if project.get("production_mode") == "commercial_ad":
+        if not grounding or not grounding.get("ok"):
+            return 0
+        if not render_job or not render_job.get("release_eligible"):
+            return 0
+        return 100
     s = 0
-    if script and script.get("full_script"):
-        s += 20
-    if script and script.get("hook_option_one") and script.get("hook_option_two") and script.get("hook_option_three"):
-        s += 10
-    if scenes and len(scenes) > 0:
-        s += 20
-    if metadata:
-        s += 15
-    if metadata and len(metadata.get("title_options") or []) >= 10:
-        s += 10
-    if scenes and all(sc.get("caption_text") for sc in scenes):
-        s += 10
-    if script and script.get("cta_block"):
-        s += 5
-    if 30 <= int(project.get("target_duration", 0)) <= 3600:
-        s += 5
-    if not (render_job and render_job.get("status") == "FAILED"):
-        s += 5
+    if script and script.get("full_script"): s += 20
+    if scenes: s += 20
+    if metadata: s += 15
+    if scenes and all(sc.get("caption_text") for sc in scenes): s += 10
+    if script and script.get("cta_block"): s += 5
+    if 5 <= int(project.get("target_duration", 0)) <= 3600: s += 5
+    if not (render_job and render_job.get("status") == "FAILED"): s += 5
     return min(s, 100)
+
+
+def commercial_scorecard(*, grounding: dict, render_job: Optional[dict], qa_result: Optional[dict] = None) -> dict:
+    """Non-compensatory release dimensions for client commercial work."""
+    technical = bool(qa_result and qa_result.get("release_eligible"))
+    captions_audio = bool((render_job or {}).get("has_audio") and (render_job or {}).get("captions_burned"))
+    dimensions = {
+        "technical_validity": technical,
+        "captions_and_audio": captions_audio,
+        "shot_to_script_alignment": bool(grounding.get("scene_assignments")) and not grounding.get("semantic_rejections"),
+        "client_grounding": bool(grounding.get("ok")),
+        "branding": any(item["key"] == "brand_assets" and item["ok"] for item in grounding.get("checklist", [])),
+        "local_authenticity": bool(grounding.get("ok")),
+        "commercial_readiness": bool(grounding.get("ok")) and technical and captions_audio,
+    }
+    return {"dimensions": dimensions, "release_eligible": all(dimensions.values())}
 
 
 def quality_label(score: int) -> str:
@@ -50,9 +68,10 @@ def quality_label(score: int) -> str:
 
 def compute_project_status(*, has_script: bool, has_scenes: bool, has_metadata: bool,
                            has_assets: bool, render_status: Optional[str]) -> str:
-    if render_status == "COMPLETED":
+    normalized_render_status = str(render_status or "").upper()
+    if normalized_render_status == "COMPLETED":
         return "COMPLETED"
-    if render_status == "FAILED":
+    if normalized_render_status == "FAILED":
         return "FAILED"
     if has_script and has_scenes and has_metadata and has_assets:
         return "READY_TO_RENDER"

@@ -13,6 +13,12 @@ import ThumbnailPanel from "../components/ThumbnailPanel";
 import RenderPanel from "../components/RenderPanel";
 import SharePanel from "../components/SharePanel";
 import VoiceoverPanel from "../components/VoiceoverPanel";
+import IntakePacket from "../components/IntakePacket";
+import ClaimLedger from "../components/ClaimLedger";
+import RightsRegistry from "../components/RightsRegistry";
+import ComplianceChecklist from "../components/ComplianceChecklist";
+import ApprovalPanel from "../components/ApprovalPanel";
+import ProductionReceipt from "../components/ProductionReceipt";
 import { api, formatApiError, API } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { formatCurrency, formatDuration } from "../lib/format";
@@ -26,6 +32,12 @@ const TABS = [
   { id: "thumbnails", label: "Thumbnails" },
   { id: "voiceover", label: "Voiceover" },
   { id: "render", label: "Render & Export" },
+  { id: "intake", label: "Intake" },
+  { id: "claims", label: "Claims" },
+  { id: "rights", label: "Rights" },
+  { id: "compliance", label: "Checklist" },
+  { id: "approval", label: "Approval" },
+  { id: "receipt", label: "Receipt" },
 ];
 
 export default function ProjectDetailPage() {
@@ -39,12 +51,24 @@ export default function ProjectDetailPage() {
   const [autoGeneratingThumbnails, setAutoGeneratingThumbnails] = useState(false);
   const confirm = useConfirm();
 
-  const canEdit = user && user.role !== "viewer";
+  const canEdit = user && user.role !== "viewer" && (user.role === "admin" || !view || view.project?.user_id === user.id);
 
   const fetchView = async () => {
     try {
       const { data } = await api.get(`/projects/${id}`);
-      setView(data);
+      setView(prev => {
+        // Don't overwrite existing script with null from stale fetch (regression from last fix)
+        if (prev?.script && !data?.script) {
+          return { ...data, script: prev.script };
+        }
+        // Also persist script to localStorage for ScriptPanel recovery
+        if (data?.script?.full_script) {
+          try {
+            localStorage.setItem(`script-${id}`, JSON.stringify(data.script));
+          } catch {}
+        }
+        return data;
+      });
     } catch (err) {
       toast.error("Could not load project", { description: formatApiError(err.response?.data?.detail) || err.message });
     } finally {
@@ -95,7 +119,7 @@ export default function ProjectDetailPage() {
     );
   }
 
-  const { project, script, scenes, metadata, assets, render_job, share } = view;
+  const { project, script, scenes, metadata, assets, render_job, share, timing } = view;
 
   return (
     <AppShell>
@@ -228,24 +252,24 @@ export default function ProjectDetailPage() {
                 />
                 <OverviewTile
                   label="Final video"
-                  ready={!!render_job && render_job.status === "completed" && !!render_job.output_url}
+                  ready={!!render_job && String(render_job.status || "").toLowerCase() === "completed" && !!(render_job.output_storage_key || render_job.output_url)}
                   sub={
-                    render_job && render_job.status === "completed" && render_job.output_url
+                    render_job && String(render_job.status || "").toLowerCase() === "completed" && (render_job.output_storage_key || render_job.output_url)
                       ? `MP4 ready · ${render_job.duration ? `${Math.round(render_job.duration)}s` : ""}`
-                      : render_job && ["queued","validating","preparing_assets","rendering"].includes(render_job.status)
+                      : render_job && ["queued","validating","preparing_assets","rendering","verifying"].includes(String(render_job.status || "").toLowerCase())
                       ? `Rendering · ${render_job.progress || 0}%`
                       : "Not rendered"
                   }
                 />
               </div>
-              {render_job?.status === "completed" && render_job.output_url && (
+              {String(render_job?.status || "").toLowerCase() === "completed" && (render_job.output_storage_key || render_job.output_url) && (
                 <div data-testid="overview-final-video" className="border border-[#00FF66]/30 bg-[#00FF66]/5 rounded-sm p-4 space-y-3">
                   <div className="font-mono text-[10px] uppercase tracking-widest text-[#00FF66]">
                     Final video · ready
                   </div>
                   <video
                     controls
-                    src={render_job.output_url}
+                    src={`${API}/projects/${project.id}/render/jobs/${render_job.id}/download`}
                     poster={assets.find(a => a.id === project.selected_thumbnail_asset_id)?.preview_url}
                     preload="metadata"
                     className="w-full rounded-sm border border-[rgba(59,130,246,0.15)] bg-black aspect-video"
@@ -307,10 +331,17 @@ export default function ProjectDetailPage() {
               scenes={scenes}
               metadata={metadata}
               assets={assets}
+              timing={timing}
               canEdit={canEdit}
               onChange={setView}
             />
           )}
+          {tab === "intake" && <IntakePacket projectId={project.id} />}
+          {tab === "claims" && <ClaimLedger projectId={project.id} />}
+          {tab === "rights" && <RightsRegistry projectId={project.id} />}
+          {tab === "compliance" && <ComplianceChecklist projectId={project.id} />}
+          {tab === "approval" && <ApprovalPanel projectId={project.id} jobId={render_job?.id} />}
+          {tab === "receipt" && <ProductionReceipt projectId={project.id} />}
         </div>
       </div>
     </AppShell>

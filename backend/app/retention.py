@@ -111,7 +111,7 @@ async def run_cleanup_once() -> dict:
     if store.mode == "object":
         cutoff_dt = datetime.fromtimestamp(cutoff_ts, tz=timezone.utc)
         async for job in db.render_jobs.find(
-            {"status": "completed",
+            {"status": {"$in": ["completed", "COMPLETED"]},
              "storage_mode": "object",
              "storage_key": {"$ne": None},
              "completed_at": {"$lt": cutoff_dt}},
@@ -151,7 +151,7 @@ async def run_cleanup_once() -> dict:
     one_hour_ago = datetime.fromtimestamp(time.time() - 3600, tz=timezone.utc)
     res = await db.render_jobs.update_many(
         {
-            "status": {"$in": ["queued", "validating", "preparing_assets", "rendering"]},
+            "status": {"$in": ["queued", "QUEUED", "validating", "VALIDATING", "preparing_assets", "PREPARING_ASSETS", "rendering", "RENDERING", "verifying", "VERIFYING"]},
             "created_at": {"$lt": one_hour_ago},
         },
         {"$set": {"status": "failed", "current_step": "failed",

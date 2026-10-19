@@ -14,10 +14,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import io
 import logging
 import os
 import uuid
 from pathlib import Path
+
+import httpx
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from .storage import get_storage
 
@@ -28,9 +32,8 @@ STATIC_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 def _use_mock() -> bool:
-    key = os.environ.get("EMERGENT_LLM_KEY", "").strip() or os.environ.get("GEMINI_API_KEY", "").strip()
-    flag = os.environ.get("USE_MOCK_THUMBNAIL_IMAGES", "true").strip().lower() in ("1", "true", "yes")
-    return flag or not key
+    flag = os.environ.get("USE_MOCK_THUMBNAIL_IMAGES", "false").strip().lower() in ("1", "true", "yes")
+    return flag
 
 
 def is_mock_mode() -> bool:
@@ -38,10 +41,26 @@ def is_mock_mode() -> bool:
 
 
 def provider_info() -> dict:
+    mock = _use_mock()
+    gemini_configured = bool(os.environ.get("EMERGENT_LLM_KEY", "") or os.environ.get("GEMINI_API_KEY", ""))
+    pexels_configured = bool(os.environ.get("PEXELS_API_KEY", ""))
+    if mock:
+        provider = "mock"
+        model = "deterministic-svg"
+    elif gemini_configured:
+        provider = os.environ.get("THUMBNAIL_IMAGE_PROVIDER", "gemini_nano_banana")
+        model = os.environ.get("THUMBNAIL_IMAGE_MODEL", "gemini-3.1-flash-image-preview")
+    elif pexels_configured:
+        provider = "pexels_stock"
+        model = "photo-search+local-compositor"
+    else:
+        provider = os.environ.get("THUMBNAIL_IMAGE_PROVIDER", "gemini_nano_banana")
+        model = os.environ.get("THUMBNAIL_IMAGE_MODEL", "gemini-3.1-flash-image-preview")
     return {
-        "mock": _use_mock(),
-        "provider": os.environ.get("THUMBNAIL_IMAGE_PROVIDER", "gemini_nano_banana"),
-        "model": os.environ.get("THUMBNAIL_IMAGE_MODEL", "gemini-3.1-flash-image-preview"),
+        "mock": mock,
+        "configured": mock or gemini_configured or pexels_configured,
+        "provider": provider,
+        "model": model,
     }
 
 
@@ -145,6 +164,80 @@ async def _gemini_image(prompt: str, session_id: str) -> bytes | None:
         return None
 
 
+async def _pexels_stock_image(project: dict) -> tuple[bytes | None, dict | None]:
+    """Return a real landscape stock photo when the image model is unavailable."""
+    api_key = os.environ.get("PEXELS_API_KEY", "").strip()
+    if not api_key:
+        return None, None
+
+    location = (project.get("location") or "Australia").strip()
+    niche = (project.get("niche") or "housing").strip()
+    query = f"{location} {niche} home"
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            search = await client.get(
+                "https://api.pexels.com/v1/search",
+                headers={"Authorization": api_key},
+                params={"query": query, "per_page": 8, "orientation": "landscape"},
+            )
+            search.raise_for_status()
+            for photo in search.json().get("photos") or []:
+                src = photo.get("src") or {}
+                url = src.get("large2x") or src.get("large") or src.get("original")
+                if not url:
+                    continue
+                response = await client.get(url)
+                response.raise_for_status()
+                if len(response.content) > 20 * 1024 * 1024:
+                    continue
+                return response.content, {
+                    "external_id": str(photo.get("id") or ""),
+                    "source_url": photo.get("url"),
+                    "download_url": url,
+                    "photographer": photo.get("photographer"),
+                }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Pexels thumbnail search/download failed: %s", exc)
+    return None, None
+
+
+def _compose_stock_thumbnail(image_bytes: bytes, title: str) -> bytes:
+    """Crop a stock photo to 16:9 and add a restrained, readable title treatment."""
+    source = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    canvas = ImageOps.fit(source, (1280, 720), method=Image.Resampling.LANCZOS)
+    overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    draw.rectangle((0, 430, 1280, 720), fill=(5, 10, 18, 205))
+    draw.rectangle((0, 430, 18, 720), fill=(0, 229, 255, 255))
+    font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+    try:
+        font = ImageFont.truetype(font_path, 64)
+    except OSError:
+        font = ImageFont.load_default()
+    words = (title or "Your next move").upper().split()
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        width = draw.textbbox((0, 0), candidate, font=font)[2]
+        if current and width > 1120:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    lines = lines[:2]
+    y = 470
+    for line in lines:
+        draw.text((70, y), line, font=font, fill=(255, 255, 255, 255))
+        y += 78
+    composed = Image.alpha_composite(canvas.convert("RGBA"), overlay).convert("RGB")
+    output = io.BytesIO()
+    composed.save(output, format="PNG", optimize=True)
+    return output.getvalue()
+
+
 # ---------------- Public ----------------
 
 async def generate_thumbnail_images(
@@ -173,18 +266,32 @@ async def generate_thumbnail_images(
         ext = "svg"
         image_bytes: bytes | None = None
         source = "mock_thumbnail"
+        source_item: dict | None = None
 
-        if not _use_mock():
+        if _use_mock():
+            image_bytes = _mock_svg(asset_id, project, brief)
+        else:
             image_bytes = await _gemini_image(prompt, session_id)
             if image_bytes is not None:
                 ext = "png"
                 source = info["provider"]
+            else:
+                stock_bytes, source_item = await _pexels_stock_image(project)
+                if stock_bytes is not None:
+                    image_bytes = _compose_stock_thumbnail(stock_bytes, brief.get("thumbnail_title_text", ""))
+                    ext = "png"
+                    source = "pexels_stock"
+                else:
+                    logger.warning(
+                        "Thumbnail providers failed for %s variant %s; mock fallback is disabled",
+                        project_id,
+                        i,
+                    )
 
         if image_bytes is None:
-            # Mock fallback
-            image_bytes = _mock_svg(f"{asset_id}-{i}", project, brief)
-            ext = "svg"
-            source = "mock_thumbnail"
+            # No mock fallback — return real only, frontend shows skeleton/Retry
+            logger.warning("Thumbnail generation failed for %s variant %s — no mock, will show Retry", project_id, i)
+            continue
 
         file_path = dir_path / f"{asset_id}.{ext}"
         file_path.write_bytes(image_bytes)
@@ -202,7 +309,8 @@ async def generate_thumbnail_images(
             "name": f"{brief.get('thumbnail_title_text', 'Thumbnail')} · variant {i + 1}",
             "asset_type": "generated_thumbnail",
             "source": source,
-            "external_id": None,
+            "external_id": (source_item or {}).get("external_id"),
+            "source_url": (source_item or {}).get("source_url"),
             "preview_url": saved.url,
             "preview_path": saved.preview_path,
             "file_path": str(saved.file_path) if saved.file_path else None,
@@ -213,8 +321,8 @@ async def generate_thumbnail_images(
             "duration": None,
             "tags": ["thumbnail", "generated"],
             "prompt": prompt,
-            "provider": info["provider"],
-            "model": info["model"],
+            "provider": source,
+            "model": "photo-search+local-compositor" if source == "pexels_stock" else info["model"],
             "mock": _use_mock() or source == "mock_thumbnail",
             "brief_snapshot": {k: brief.get(k) for k in (
                 "thumbnail_title_text", "visual_composition", "emotion_angle",

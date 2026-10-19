@@ -1,6 +1,7 @@
 """TTS service — ElevenLabs primary, deterministic mock fallback. Fixed v3"""
 from __future__ import annotations
-import logging, os, re, struct, uuid, wave
+import asyncio
+import logging, os, re, shutil, struct, uuid, wave
 from pathlib import Path
 from typing import Optional
 import httpx
@@ -129,14 +130,15 @@ def _style_key_for(voice_style: Optional[str], tone: Optional[str]) -> str:
     return os.environ.get("DEFAULT_VOICE_STYLE", "narrator").lower()
 def _use_mock() -> bool:
     flag = os.environ.get("USE_MOCK_TTS", "false").strip().lower() in ("1", "true", "yes")
-    return flag or not _elevenlabs_key()
+    return flag
 def is_mock_mode() -> bool: return _use_mock()
 def provider_info() -> dict:
     try:
-        return {"mock": _use_mock(), "provider": "mock" if _use_mock() else "elevenlabs", "voice_id": _voice_id(), "voices": SUPPORTED_STYLES, "styles": [{"id": k, "label": k.title()} for k in VOICE_STYLE_MAP.keys()], "voice_presets": list(VOICE_MAP.keys()), "display_voices": DISPLAY_VOICES, "voice_map": VOICE_MAP, "style_map": VOICE_STYLE_MAP, "default_voice": os.environ.get("DEFAULT_VOICE", "NEUTRAL_MALE_NARRATOR"), "default_voice_style": os.environ.get("DEFAULT_VOICE_STYLE", "narrator"), "cloned_voice_id": DEFAULT_CLONED_ID}
+        mock = _use_mock()
+        return {"mock": mock, "configured": mock or bool(_elevenlabs_key()), "provider": "mock" if mock else "elevenlabs", "model": "mock" if mock else "eleven_multilingual_v2", "voice_id": _voice_id(), "voices": SUPPORTED_STYLES, "styles": [{"id": k, "label": k.title()} for k in VOICE_STYLE_MAP.keys()], "voice_presets": list(VOICE_MAP.keys()), "display_voices": DISPLAY_VOICES, "voice_map": VOICE_MAP, "style_map": VOICE_STYLE_MAP, "default_voice": os.environ.get("DEFAULT_VOICE", "NEUTRAL_MALE_NARRATOR"), "default_voice_style": os.environ.get("DEFAULT_VOICE_STYLE", "narrator"), "cloned_voice_id": DEFAULT_CLONED_ID}
     except Exception as e:
         logger.exception(f"provider_info error: {e}")
-        return {"mock": False, "provider": "elevenlabs", "voice_id": DEFAULT_CLONED_ID, "voices": SUPPORTED_STYLES, "voice_presets": list(VOICE_MAP.keys()), "display_voices": DISPLAY_VOICES, "voice_map": VOICE_MAP}
+        return {"mock": False, "configured": bool(_elevenlabs_key()), "provider": "elevenlabs", "model": "eleven_multilingual_v2", "voice_id": DEFAULT_CLONED_ID, "voices": SUPPORTED_STYLES, "voice_presets": list(VOICE_MAP.keys()), "display_voices": DISPLAY_VOICES, "voice_map": VOICE_MAP}
 def _estimate_duration_seconds(text: str) -> int:
     import re as _re; words = len(_re.findall(r"\b\w+\b", text or "")); return max(2, int(round(words / 2.5)))
 def _write_mock_wav(path: Path, duration_s: int) -> None:
@@ -169,6 +171,28 @@ async def _elevenlabs_tts(text: str, voice_style: str, voice_id: str | None = No
             resp.raise_for_status(); audio_parts.append(resp.content)
     return b"".join(audio_parts)
 def _estimate_mp3_duration(mp3_bytes: bytes) -> float: return max(1.0, len(mp3_bytes) / (128 * 1000 / 8))
+
+
+async def _measure_audio_duration(path: Path, timeout: int = 30) -> Optional[float]:
+    """Measured audio duration via ffprobe (ground truth for fitting).
+
+    Fitting decisions must use this, never the byte-size estimate. Returns
+    None when ffprobe is unavailable so callers can fall back explicitly.
+    """
+    ffprobe = os.environ.get("FFPROBE_PATH") or shutil.which("ffprobe")
+    if not ffprobe or not path.exists():
+        return None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            ffprobe, "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", str(path),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        return max(0.0, float((out or b"").decode().strip() or 0.0)) or None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[tts] ffprobe measure failed for %s: %s", path.name, exc)
+        return None
 async def generate_voiceover(text: str, voice_style: str = "narrator", tone: str | None = None, project_id: str = "", asset_id: str | None = None, scene_id: str | None = None, name_suffix: str | None = None) -> dict:
     display_text = text  # keep original for logs/display
     text = sanitize_for_tts(text)
@@ -183,6 +207,10 @@ async def generate_voiceover(text: str, voice_style: str = "narrator", tone: str
         logger.info("[tts] mock mode"); result = _mock_voiceover(text, asset_id, project_id, name_suffix)
         if scene_id: result["scene_id"] = scene_id
         return result
+    if not _elevenlabs_key():
+        raise RuntimeError(
+            "ElevenLabs is not configured; add a valid ELEVENLABS_API_KEY before generating voiceover."
+        )
     # Task spec voice resolver (ensures female-narrator -> Bella EXAVITQu4vr4xnSDxMaL)
     payload = {'voiceStyle': voice_style}
     voice_id = VOICE_MAP.get(payload.get('voiceStyle') if isinstance(payload,dict) else getattr(payload,'voiceStyle','female-narrator'), 'EXAVITQu4vr4xnSDxMaL')
@@ -199,14 +227,20 @@ async def generate_voiceover(text: str, voice_style: str = "narrator", tone: str
     style_key = _style_key_for(voice_style, tone)
     try:
         logger.info("[tts] ElevenLabs: voice=%s preset=%s style=%s tone=%s chars=%d", voice_id, voice_style, style_key, tone or "-", len(text))
-        mp3_bytes = await _elevenlabs_tts(text, voice_style, voice_id=voice_id, tone=tone); fname = f"{asset_id}.mp3"; local_path = STATIC_ROOT / fname; local_path.write_bytes(mp3_bytes); store = get_storage(); key = f"audio/{project_id}/{fname}"; info = store.save_file(local_path, key, "audio/mpeg"); local_path.unlink(missing_ok=True)
-        result = {"id": asset_id, "project_id": project_id, "name": f"Voiceover {name_suffix or ''}".strip(), "asset_type": "voiceover_audio", "url": info.url, "preview_url": info.preview_path or info.url, "file_path": str(info.file_path or ""), "duration": _estimate_mp3_duration(mp3_bytes), "word_count": len(re.findall(r"\b\w+\b", text or "")), "provider": "elevenlabs", "voice_id": voice_id, "voice_style": voice_style or "narrator", "tone": tone, "source": "elevenlabs", "mock": False}
+        mp3_bytes = await _elevenlabs_tts(text, voice_style, voice_id=voice_id, tone=tone); fname = f"{asset_id}.mp3"; local_path = STATIC_ROOT / fname; local_path.write_bytes(mp3_bytes)
+        measured = await _measure_audio_duration(local_path)
+        estimated = _estimate_mp3_duration(mp3_bytes)
+        if measured is None:
+            logger.warning("[tts] using byte-size duration estimate (ffprobe unavailable)")
+        store = get_storage(); key = f"audio/{project_id}/{fname}"; info = store.save_file(local_path, key, "audio/mpeg"); local_path.unlink(missing_ok=True)
+        result = {"id": asset_id, "project_id": project_id, "name": f"Voiceover {name_suffix or ''}".strip(), "asset_type": "voiceover_audio", "url": info.url, "preview_url": info.preview_path or info.url, "file_path": str(info.file_path or ""), "duration": measured if measured else estimated, "duration_estimate": estimated, "duration_measured": bool(measured), "word_count": len(re.findall(r"\b\w+\b", text or "")), "provider": "elevenlabs", "voice_id": voice_id, "voice_style": voice_style or "narrator", "tone": tone, "source": "elevenlabs", "mock": False}
         if scene_id: result["scene_id"] = scene_id
         return result
     except Exception as exc:
-        logger.exception("[tts] ElevenLabs failed, falling back to mock: %s", exc); result = _mock_voiceover(text, asset_id, project_id, name_suffix)
-        if scene_id: result["scene_id"] = scene_id
-        return result
+        logger.exception("[tts] ElevenLabs voiceover generation failed: %s", exc)
+        raise RuntimeError(
+            "ElevenLabs voiceover generation failed; verify the API key, quota, and selected voice."
+        ) from exc
 def generate_tts_audio(text: str, voice_style: Optional[str] = None, tone: Optional[str] = None, model_id: str = "eleven_multilingual_v2") -> bytes:
     import asyncio
     async def _run(): return await _elevenlabs_tts(text, voice_style or "narrator", voice_id=_voice_id_for(voice_style), tone=tone)

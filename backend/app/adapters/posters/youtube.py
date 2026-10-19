@@ -19,14 +19,9 @@ class YoutubePoster(PlatformPoster):
         allowed, remaining = rate_limit_check("youtube", tenant_id)
         if not allowed:
             return {"platform":"youtube","status":"rate_limited","retry_after": remaining}
-        # If not configured, mock
+        # Not configured: fail loud, no mock ID (BOOT.md HARD RULE 3)
         if not self.is_configured():
-            vid = f"yt_mock_{uuid.uuid4().hex[:11]}"
-            url = f"https://www.youtube.com/watch?v={vid}"
-            res = {"platform":"youtube","status":"mock_uploaded","video_id":vid,"url":url,"title":title}
-            log_analytics("youtube", tenant_id, project.get("id"), res)
-            logger.info(f"YT mock post tenant={tenant_id} project={project.get('id')} vid={vid}")
-            return res
+            raise RuntimeError("YouTube upload failed — not configured, mock IDs forbidden per BOOT.md HARD RULE 3")
         # Real upload - reuse existing logic from routes/youtube.py
         try:
             from ...routes.youtube import _get_youtube_credentials, _resolve_video_path
@@ -45,15 +40,13 @@ class YoutubePoster(PlatformPoster):
             resp=None
             while resp is None:
                 _, resp = req.next_chunk()
-            vid = (resp or {}).get("id") or f"yt_{uuid.uuid4().hex[:11]}"
+            vid = (resp or {}).get("id")
+            if not vid:
+                raise RuntimeError("YouTube returned no valid video id")
             url = f"https://www.youtube.com/watch?v={vid}"
             res={"platform":"youtube","status":"uploaded","video_id":vid,"url":url,"title":title}
             log_analytics("youtube", tenant_id, project.get("id"), res)
             return res
         except Exception as e:
-            logger.warning(f"YT real upload failed {e} fallback mock")
-            vid = f"yt_mock_{uuid.uuid4().hex[:11]}"
-            url = f"https://www.youtube.com/watch?v={vid}"
-            res={"platform":"youtube","status":"mock_uploaded","video_id":vid,"url":url,"title":title,"warning":str(e)[:200]}
-            log_analytics("youtube", tenant_id, project.get("id"), res)
-            return res
+            logger.warning(f"YT real upload failed {e}")
+            raise RuntimeError(f"YouTube upload failed — mock IDs forbidden per BOOT.md HARD RULE 3: {e}"[:190])

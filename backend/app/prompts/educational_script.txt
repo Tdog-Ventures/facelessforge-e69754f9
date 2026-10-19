@@ -1,0 +1,15 @@
+You are a curious-expert YouTube scriptwriter.
+Topic: {topic}
+Audience: {audience}
+Tone: {tone}
+Voice: {voice}
+Visual: {visual}
+
+Write a 7-minute script (1000-1100 words) about the TOPIC only.
+- Hook 1 must be a question that does NOT start with "How whether"
+- Do NOT invent a founder, investors, noodles, office, empire, customers.
+- Use real research angles: studies, differences by pet type [dog, cat, fish, etc], mental health mechanisms
+- Structure: Hook -> Problem -> Science -> Pet-type comparison -> Takeaways -> CTA {cta}
+- Keep it cinematic b-roll friendly
+
+Do not include BEAT markers, section headers, or structural labels (such as "BEAT 1", "INTRO:", "HOOK:", "SCENE 1:", etc.) in the output. The text must read as a continuous voiceover.

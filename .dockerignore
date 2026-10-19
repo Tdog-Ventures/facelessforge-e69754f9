@@ -1,0 +1,12 @@
+# Production-hardening: keep the image lean and secret-free.
+# The container runs on image site-packages (never the host venv), and
+# renders/audio are provided at runtime by named volumes.
+backend/venv/
+backend/node_modules/
+frontend/node_modules/
+**/__pycache__/
+**/*.pyc
+.git/
+backend/static/renders/
+backend/static/audio/
+backend/tests/.pytest_cache/

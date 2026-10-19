@@ -34,7 +34,7 @@ function StatCard({ label, value, icon: Icon, context, contextUp, delay = 0 }) {
   );
 }
 
-function ProductionStatus({ statusData, total }) {
+function ProductionStatus({ statusData, total, queue }) {
   const maxCount = Math.max(1, ...statusData.map(d => d.count));
   return (
     <div className="bg-[#1c2333] border border-[rgba(59,130,246,0.15)] rounded-lg p-5" style={{ boxShadow: "0 0 20px rgba(59,130,246,0.05)" }}>
@@ -44,6 +44,11 @@ function ProductionStatus({ statusData, total }) {
           <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" /> live
         </span>
       </div>
+      {queue && queue.display && (
+        <div className="mb-4 p-2 bg-amber-500/10 border border-amber-500/20 rounded text-xs font-mono text-amber-400">
+          {queue.display} · max {queue.max} concurrent
+        </div>
+      )}
       <div className="space-y-4">
         {statusData.length === 0 ? (
           <p className="text-sm text-slate-500">No projects yet</p>
@@ -66,6 +71,9 @@ function ProductionStatus({ statusData, total }) {
           );
         })}
       </div>
+      {queue && queue.queued > 0 && (
+        <div className="mt-4 text-[10px] font-mono text-slate-500">Queue: {queue.queued} queued · {queue.active} rendering</div>
+      )}
     </div>
   );
 }
@@ -112,59 +120,39 @@ export default function DashboardPage() {
   const totalProjects = analytics?.total_projects ?? 0;
 
   const timeData = useMemo(() => {
-    let src = analytics?.projects_over_time || [];
-    // If backend returns empty or sparse, synthesize Aug 3 -> Aug 31 daily
-    if (!src || src.length < 5) {
-      const synth = [];
-      for (let d = 3; d <= 31; d++) {
-        // find existing or randomize small
-        const existing = src.find(x => x.date && x.date.includes(`-08-${String(d).padStart(2,'0')}`));
-        synth.push({
-          date: `2025-08-${String(d).padStart(2,'0')}`,
-          count: existing ? existing.count : Math.floor(Math.random() * 3),
-          label: `Aug ${d}`,
-        });
-      }
-      return synth;
-    }
+    const src = analytics?.projects_over_time || [];
     return src.map(e => ({ ...e, label: e.date ? e.date.slice(5) : e.label }));
   }, [analytics]);
 
-  // credits calc: total_seconds/30*10
-  const totalSeconds = useMemo(() => {
-    if (projects.length > 0) {
-      return projects.reduce((acc, p) => acc + (Number(p.target_duration) || 0), 0);
-    }
-    return analytics?.total_duration_seconds ?? 0;
-  }, [projects, analytics]);
-
-  const creditEstimate = useMemo(() => {
-    if (!totalSeconds) return analytics?.total_estimated_cost ? `${analytics.total_estimated_cost.toFixed(2)}` : "—";
-    const credits = Math.round((totalSeconds / 30) * 10);
-    return `${credits} credits`;
-  }, [totalSeconds, analytics]);
-
-  const creditContext = totalSeconds ? `${Math.round(totalSeconds/60)} min total · ${(totalSeconds/30*10).toFixed(0)} credits` : "";
+  // Fixed: EST OUTPUT = completed_last_30d * 4.3, TOTAL EST COST = EST OUTPUT * 3cr (1 render = 3cr)
+  const estOutput = analytics?.monthly_output_projection ?? 0;
+  const totalCostCredits = analytics?.total_estimated_cost_credits ?? analytics?.total_estimated_cost ?? 0;
+  const creditEstimate = `${totalCostCredits} credits`;
+  const creditContext = `1 render = 3cr · ${estOutput} videos × 3cr`;
+  const estTooltip = `EST OUTPUT = completed_last_30d (${analytics?.completed_last_30d ?? 0}) × 4.3 = ${estOutput} videos; TOTAL = ${estOutput} × 3cr = ${totalCostCredits}cr`;
 
   return (
     <AppShell>
       <TopBar
         title="Dashboard"
-        subtitle="Control Room"
+        subtitle={analytics?.is_admin_view ? "Control Room · ADMIN VIEW" : "Control Room"}
         right={
-          <Link
-            to="/app/projects/new"
-            data-testid="dashboard-create-project"
-            className="flex items-center gap-2 text-xs font-semibold bg-blue-600 text-white px-3 py-2 rounded-md hover:bg-blue-500 transition-colors"
-          >
-            <Plus size={14} strokeWidth={2} /> New Project
-          </Link>
+          <div className="flex items-center gap-2">
+            {analytics?.is_admin_view && <span className="font-mono text-[10px] tracking-widest bg-amber-500 text-black px-2 py-1 rounded">ADMIN VIEW</span>}
+            <Link
+              to="/app/projects/new"
+              data-testid="dashboard-create-project"
+              className="flex items-center gap-2 text-xs font-semibold bg-blue-600 text-white px-3 py-2 rounded-md hover:bg-blue-500 transition-colors"
+            >
+              <Plus size={14} strokeWidth={2} /> New Project
+            </Link>
+          </div>
         }
       />
 
       <div className="p-8 space-y-8 bg-[#0f141f] min-h-[calc(100vh-64px)]">
         {/* Metrics row */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           <StatCard label="Total Projects" value={analytics?.total_projects ?? "—"} icon={FileVideo} context="+12% vs last month" contextUp={true} delay={0} />
           <StatCard label="Completed" value={analytics?.completed ?? "—"} icon={CheckCircle2} context="+8% vs last month" contextUp={true} delay={40} />
           <StatCard label="In Progress" value={analytics?.in_progress ?? "—"} icon={Activity} context="-8% drop" contextUp={false} delay={80} />
@@ -174,11 +162,11 @@ export default function DashboardPage() {
         {/* Charts row */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           <div className="lg:col-span-2">
-            <ProductionStatus statusData={statusData} total={totalProjects || Math.max(1, ...statusData.map(d=>d.count))} />
+            <ProductionStatus statusData={statusData} total={totalProjects || Math.max(1, ...statusData.map(d=>d.count))} queue={analytics?.render_queue} />
           </div>
 
           <div className="bg-[#1c2333] border border-[rgba(59,130,246,0.15)] rounded-lg p-5 space-y-5" style={{ boxShadow: "0 0 20px rgba(59,130,246,0.05)" }}>
-            <div>
+            <div title={estTooltip}>
               <span className="font-mono text-[10px] uppercase tracking-widest text-slate-400">
                 Est. monthly output
               </span>
@@ -186,9 +174,9 @@ export default function DashboardPage() {
                 {analytics?.monthly_output_projection ?? "—"}
                 <span className="text-slate-500 text-base"> videos</span>
               </div>
-              <span className="text-xs text-slate-500">+12% vs last month</span>
+              <span className="text-xs text-slate-500" title={analytics?.monthly_output_formula || "completed_last_30d * 4.3"}>1 render = 3cr · {analytics?.completed_last_30d ?? 0} completed last 30d × 4.3</span>
             </div>
-            <div className="pt-4 border-t border-slate-700/50">
+            <div className="pt-4 border-t border-slate-700/50" title={estTooltip}>
               <span className="font-mono text-[10px] uppercase tracking-widest text-slate-400">
                 Total est. cost
               </span>
@@ -196,7 +184,8 @@ export default function DashboardPage() {
                 <DollarSign size={16} strokeWidth={1.5} />
                 <span data-testid="credit-estimate">{creditEstimate}</span>
               </div>
-              {creditContext && <span className="text-xs text-slate-500">{creditContext}</span>}
+              {creditContext && <span className="text-xs text-slate-500" title={analytics?.total_estimated_cost_formula || "1 render = 3cr"}>{creditContext}</span>}
+              <div className="mt-1 text-[10px] text-slate-500 font-mono">Formula: 1 render = 3cr · e.g. 231 videos → 693cr (not 572 min ×20)</div>
               <div className="mt-3">
                 <BillingBar />
               </div>
