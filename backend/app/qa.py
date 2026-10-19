@@ -126,16 +126,31 @@ def run_checks(video_path: Path, manifest: dict, duration: float) -> Dict:
         checks.append({"check":"freezedetect","status":"fail","method":"frame_sample_mad","note": str(e)[:200]})
         blocked.append("freezedetect")
 
-    # 4. silencedetect >1s during narration (approx: check whole file)
+    # 4. silencedetect — ffmpeg exits 0 whether or not silence was found, so the
+    # intervals must be parsed from the log. Block only silence inside the
+    # narration window; leading/trailing silence at the file edges is allowed.
     try:
         out = subprocess.check_output(
             ["ffmpeg","-i", str(video_path), "-af", "silencedetect=noise=-50dB:d=1","-vn","-f","null","-"],
             stderr=subprocess.STDOUT, timeout=20, text=True
         )
-        # We expect some silence at start/end, so only flag if long silence mid
-        silence_count = out.count("silence_start")
-        if silence_count > 3:  # allow start/end
-            checks.append({"check":"silencedetect","status":"pass", "note": f"{silence_count} silences"})
+        starts = [float(x) for x in re.findall(r"silence_start:\s*([\d.]+)", out)]
+        ends = [float(x) for x in re.findall(r"silence_end:\s*([\d.]+)", out)]
+        edge = max(2.0, duration * 0.05)   # allowance at the very start/end
+        min_gap = 1.0                       # matches silencedetect d=1
+        interior = []
+        for i, s in enumerate(starts):
+            e = ends[i] if i < len(ends) else duration   # open-ended tail -> EOF
+            lo, hi = max(s, edge), min(e, duration - edge)
+            if hi - lo >= min_gap:
+                interior.append({"start": round(s, 3), "end": round(e, 3)})
+        if interior:
+            checks.append({"check":"silencedetect","status":"fail",
+                           "note": f"silence in narration window: {interior}"[:200]})
+            blocked.append("silencedetect")
+        elif starts:
+            checks.append({"check":"silencedetect","status":"pass",
+                           "note": f"{len(starts)} edge silence interval(s) within allowance"})
         else:
             checks.append({"check":"silencedetect","status":"pass"})
     except Exception as e:

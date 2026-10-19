@@ -110,3 +110,38 @@ def test_check_blocks_when_underlying_call_raises(tmp_path, monkeypatch, cmd_mar
     assert check["status"] == "fail", f"{check_name} must fail when it cannot run"
     assert "forced ffmpeg failure" in check.get("note", "")
     assert check_name in result["blocked"]
+
+
+def _gap_clip(path: Path, video_s: float, audio_segments: list[tuple[str, float]]) -> Path:
+    """Video with concatenated audio segments: ('tone'|'silence', seconds)."""
+    cmd = ["ffmpeg", "-v", "error", "-y",
+           "-f", "lavfi", "-i", f"testsrc2=size=320x240:rate=30:duration={video_s}"]
+    labels = []
+    for i, (kind, secs) in enumerate(audio_segments):
+        src = "sine=frequency=440" if kind == "tone" else "anullsrc=r=44100:cl=stereo"
+        cmd += ["-f", "lavfi", "-i", f"{src}:duration={secs}"]
+        labels.append(f"[{i + 1}:a]")
+    cmd += ["-filter_complex", "".join(labels) + f"concat=n={len(audio_segments)}:v=0:a=1[a]",
+            "-map", "0:v", "-map", "[a]",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest",
+            str(path)]
+    subprocess.run(cmd, check=True)
+    return path
+
+
+def test_silence_stitched_into_middle_blocks(tmp_path: Path):
+    video = _gap_clip(tmp_path / "mid_gap.mp4", 9.0,
+                      [("tone", 3.0), ("silence", 3.0), ("tone", 3.0)])
+    result = qa.run_checks(video, {}, qa.ffprobe_duration(video))
+    check = next(c for c in result["checks"] if c["check"] == "silencedetect")
+    assert check["status"] == "fail"
+    assert "silencedetect" in result["blocked"]
+
+
+def test_only_edge_silence_still_passes(tmp_path: Path):
+    video = _gap_clip(tmp_path / "edge_gap.mp4", 8.0,
+                      [("silence", 2.0), ("tone", 4.0), ("silence", 2.0)])
+    result = qa.run_checks(video, {}, qa.ffprobe_duration(video))
+    check = next(c for c in result["checks"] if c["check"] == "silencedetect")
+    assert check["status"] == "pass"
+    assert "silencedetect" not in result["blocked"]
