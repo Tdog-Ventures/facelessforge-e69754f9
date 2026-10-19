@@ -146,7 +146,7 @@ def _write_mock_wav(path: Path, duration_s: int) -> None:
     with wave.open(str(path), "wb") as w: w.setnchannels(1); w.setsampwidth(2); w.setframerate(sample_rate); w.writeframes(struct.pack("<" + "h" * n_samples, *([0] * n_samples)))
 def _mock_voiceover(text: str, asset_id: str, project_id: str, name_suffix: str | None = None) -> dict:
     duration = _estimate_duration_seconds(text); fname = f"{asset_id}.wav"; local_path = STATIC_ROOT / fname; _write_mock_wav(local_path, duration); store = get_storage(); key = f"audio/{project_id}/{fname}"; info = store.save_file(local_path, key, "audio/wav"); local_path.unlink(missing_ok=True)
-    return {"id": asset_id, "project_id": project_id, "name": f"Voiceover {name_suffix or ''}".strip(), "asset_type": "voiceover_audio", "url": info.url, "preview_url": info.preview_path or info.url, "file_path": str(info.file_path or ""), "duration": float(duration), "word_count": len(re.findall(r"\b\w+\b", text or "")), "provider": "mock", "voice_id": "mock", "voice_style": "narrator", "source": "mock", "mock": True}
+    return {"id": asset_id, "project_id": project_id, "name": f"Voiceover {name_suffix or ''}".strip(), "asset_type": "voiceover_audio", "storage_key": info.key, "url": info.url, "preview_url": info.preview_path or info.url, "file_path": str(info.file_path or ""), "duration": float(duration), "word_count": len(re.findall(r"\b\w+\b", text or "")), "provider": "mock", "voice_id": "mock", "voice_style": "narrator", "source": "mock", "mock": True}
 def _split_text(text: str, max_chars: int = MAX_CHARS_PER_CHUNK) -> list[str]:
     sentences = re.split(r'(?<=[.!?])\s+', text.strip()); chunks: list[str] = []; current = ""
     for sentence in sentences:
@@ -233,7 +233,7 @@ async def generate_voiceover(text: str, voice_style: str = "narrator", tone: str
         if measured is None:
             logger.warning("[tts] using byte-size duration estimate (ffprobe unavailable)")
         store = get_storage(); key = f"audio/{project_id}/{fname}"; info = store.save_file(local_path, key, "audio/mpeg"); local_path.unlink(missing_ok=True)
-        result = {"id": asset_id, "project_id": project_id, "name": f"Voiceover {name_suffix or ''}".strip(), "asset_type": "voiceover_audio", "url": info.url, "preview_url": info.preview_path or info.url, "file_path": str(info.file_path or ""), "duration": measured if measured else estimated, "duration_estimate": estimated, "duration_measured": bool(measured), "word_count": len(re.findall(r"\b\w+\b", text or "")), "provider": "elevenlabs", "voice_id": voice_id, "voice_style": voice_style or "narrator", "tone": tone, "source": "elevenlabs", "mock": False}
+        result = {"id": asset_id, "project_id": project_id, "name": f"Voiceover {name_suffix or ''}".strip(), "asset_type": "voiceover_audio", "storage_key": info.key, "url": info.url, "preview_url": info.preview_path or info.url, "file_path": str(info.file_path or ""), "duration": measured if measured else estimated, "duration_estimate": estimated, "duration_measured": bool(measured), "word_count": len(re.findall(r"\b\w+\b", text or "")), "provider": "elevenlabs", "voice_id": voice_id, "voice_style": voice_style or "narrator", "tone": tone, "source": "elevenlabs", "mock": False}
         if scene_id: result["scene_id"] = scene_id
         return result
     except Exception as exc:

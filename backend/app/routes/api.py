@@ -1923,14 +1923,24 @@ async def delete_voiceover(project_id: str, asset_id: str, user=Depends(get_curr
         raise HTTPException(status_code=404, detail="Voiceover not found")
     # Best-effort artifact removal via storage abstraction
     try:
-        from ..storage import get_storage as _gs
+        from ..storage import STATIC_ROOT, get_storage as _gs
         store = _gs()
+        # IDs are server-issued: a registered path cannot grant permission to
+        # delete another asset, even within the same project's directory.
+        allowed_keys = {f"audio/{project_id}/{asset_id}{ext}" for ext in (".mp3", ".wav")}
+        root = STATIC_ROOT.resolve()
         if asset.get("storage_key"):
-            store.delete(key=asset["storage_key"])
+            key = asset["storage_key"]
+            if key in allowed_keys:
+                path = root / key
+                # LocalStorage resolves symlinks, so check before dispatching.
+                if store.mode != "local" or path.resolve() == path:
+                    store.delete(key=key)
         elif asset.get("file_path"):
-            from pathlib import Path as _P
-            p = _P(asset["file_path"])
-            if p.exists() and p.is_file():
+            # Legacy records have no storage key. Accept only the canonical
+            # location issued for this asset, rejecting symlink escapes too.
+            p = Path(asset["file_path"]).resolve()
+            if p in {root / key for key in allowed_keys} and p.is_file():
                 p.unlink()
     except Exception:  # noqa: BLE001
         pass
