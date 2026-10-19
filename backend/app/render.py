@@ -1700,11 +1700,115 @@ async def is_render_active(project_id: str) -> bool:
     return bool(job)
 
 
+# 1 render = 3 credits. Single source of truth for deduct and reversal.
+RENDER_CREDIT_COST = 3
+
+# Unique index on credit_transactions.refund_id backs the idempotency guarantee
+# for render-failure reversals (at most one refund:<job_id> row can ever exist).
+_REFUND_INDEX_READY = False
+
+
+async def _ensure_refund_index(db) -> None:
+    global _REFUND_INDEX_READY
+    if _REFUND_INDEX_READY:
+        return
+    try:
+        result = db.credit_transactions.create_index("refund_id", unique=True, sparse=True)
+        if hasattr(result, "__await__"):
+            await result
+    except Exception:  # noqa: BLE001 — index creation is idempotent; degrade to ledger check
+        logger.debug("refund_id index creation skipped", exc_info=True)
+    _REFUND_INDEX_READY = True
+
+
+async def _apply_credit_refund(
+    db, *, user_id: str, amount: int, store: str, job_id: str, project_id: str, reason: str,
+) -> dict:
+    """Idempotent low-level credit refund against the store that was debited.
+
+    Deterministic ledger id `refund:<job_id>` (unique index) guarantees at most
+    one reversal per job ever. Returns a structured outcome for callers/tests.
+    """
+    if not user_id or amount <= 0 or store not in ("subscriptions", "ff_credits"):
+        return {"reversed": False, "amount": 0, "user_id": user_id, "reason": "no_charge_to_reverse"}
+    await _ensure_refund_index(db)
+    refund_id = f"refund:{job_id}"
+    existing = await db.credit_transactions.find_one({"refund_id": refund_id}, {"_id": 0, "id": 1})
+    if existing:
+        return {"reversed": False, "amount": 0, "user_id": user_id, "reason": "already_reversed"}
+    now = _now()
+    ledger = {
+        "id": str(uuid.uuid4()),
+        "refund_id": refund_id,
+        "job_id": job_id,
+        "user_id": user_id,
+        "amount": int(amount),
+        "reason": f"refund failed render {project_id}: {reason}"[:200],
+        "created_at": now,
+    }
+    try:
+        await db.credit_transactions.insert_one(dict(ledger))
+    except Exception as e:  # noqa: BLE001 — duplicate key = concurrent reversal already won
+        if "duplicate" in str(e).lower() or getattr(e, "code", None) == 11000:
+            return {"reversed": False, "amount": 0, "user_id": user_id, "reason": "already_reversed"}
+        raise
+    if store == "subscriptions":
+        await db.subscriptions.update_one(
+            {"user_id": user_id},
+            {"$inc": {"credits_remaining": int(amount)}, "$set": {"updated_at": now}},
+        )
+    else:
+        await db.ff_credits.update_one(
+            {"tenant_id": user_id},
+            {"$inc": {"credits": int(amount)}, "$set": {"updated_at": now}},
+        )
+    await db.render_jobs.update_one(
+        {"id": job_id},
+        {"$set": {"credit_reversed_at": now, "credit_reversed_refund_id": refund_id}},
+    )
+    logger.info(
+        "credit_reversal job=%s user=%s amount=+%s store=%s reason=%s",
+        job_id, user_id, amount, store, reason[:120],
+    )
+    return {"reversed": True, "amount": int(amount), "user_id": user_id, "reason": "reversed"}
+
+
+async def reverse_render_credits(job_id: str, *, reason: str) -> dict:
+    """Reverse the render credit charge for a terminally-failed job.
+
+    Idempotent: safe to call any number of times for the same job_id
+    (duplicate failure events, stale-job recovery racing a normal failure).
+    Jobs queued before credit_charge stamping (legacy) or full-access bypass
+    jobs carry no reversible charge and are a documented no-op.
+    """
+    db = get_db()
+    job = await db.render_jobs.find_one(
+        {"id": job_id},
+        {"_id": 0, "id": 1, "project_id": 1, "requested_by": 1, "credit_charge": 1, "credit_reversed_at": 1},
+    )
+    if not job:
+        return {"reversed": False, "amount": 0, "user_id": None, "reason": "job_not_found"}
+    if job.get("credit_reversed_at"):
+        return {"reversed": False, "amount": 0, "user_id": None, "reason": "already_reversed"}
+    charge = job.get("credit_charge") or {}
+    return await _apply_credit_refund(
+        db,
+        user_id=charge.get("user_id") or job.get("requested_by") or "",
+        amount=int(charge.get("amount") or 0),
+        store=charge.get("store") or "none",
+        job_id=job_id,
+        project_id=job.get("project_id") or "",
+        reason=reason,
+    )
+
+
 async def queue_render(project_id: str, *, requested_by: str, burn_subtitles: bool = False, aspect_ratio: str | None = None) -> dict:
     """Create a job in 'queued' state and start the background worker. Queue limit 3 concurrent, rest queued."""
     db = get_db()
     if await is_render_active(project_id):
         raise RuntimeError("A render is already in progress for this project.")
+    job_id = str(uuid.uuid4())
+    charge = {"user_id": requested_by, "amount": 0, "store": "none", "ledger_id": None}
     # Atomic deduct 3 credits (1 render = 3cr) before queue — prevents double-spend
     try:
         from pymongo import ReturnDocument
@@ -1745,25 +1849,29 @@ async def queue_render(project_id: str, *, requested_by: str, burn_subtitles: bo
         else:
             result = await db.subscriptions.find_one_and_update(
                 {"user_id": requested_by, "credits_remaining": {"$gte": 3}},
-                {"$inc": {"credits_remaining": -3}, "$set": {"updated_at": _now()}},
+                {"$inc": {"credits_remaining": -RENDER_CREDIT_COST}, "$set": {"updated_at": _now()}},
                 return_document=ReturnDocument.AFTER,
             )
         if not result:
             # Also try ff_credits if subscriptions failed
             ff_result = await db.ff_credits.find_one_and_update(
-                {"tenant_id": requested_by, "credits": {"$gte": 3}},
-                {"$inc": {"credits": -3}, "$set": {"updated_at": _now()}},
+                {"tenant_id": requested_by, "credits": {"$gte": RENDER_CREDIT_COST}},
+                {"$inc": {"credits": -RENDER_CREDIT_COST}, "$set": {"updated_at": _now()}},
                 return_document=ReturnDocument.AFTER,
             )
             if not ff_result:
                 remaining = int((sub or {}).get("credits_remaining", 0))
-                raise HTTPException(status_code=402, detail={"code": "credits_exhausted", "required": 3, "remaining": remaining, "message": f"Insufficient credits: {remaining} remaining, 3 required"})
-            # Log ff_credits deduct
-            await db.credit_transactions.insert_one({"id": str(uuid.uuid4()), "user_id": requested_by, "amount": -3, "reason": f"render {project_id}", "created_at": _now()})
+                raise HTTPException(status_code=402, detail={"code": "credits_exhausted", "required": RENDER_CREDIT_COST, "remaining": remaining, "message": f"Insufficient credits: {remaining} remaining, {RENDER_CREDIT_COST} required"})
+            # Log ff_credits deduct (job_id links the charge to its eventual reversal)
+            charge_ledger_id = str(uuid.uuid4())
+            await db.credit_transactions.insert_one({"id": charge_ledger_id, "job_id": job_id, "user_id": requested_by, "amount": -RENDER_CREDIT_COST, "reason": f"render {project_id}", "created_at": _now()})
+            charge = {"user_id": requested_by, "amount": RENDER_CREDIT_COST, "store": "ff_credits", "ledger_id": charge_ledger_id}
         elif _full_access:
             pass  # bypass: do not log a deduction that never happened
         else:
-            await db.credit_transactions.insert_one({"id": str(uuid.uuid4()), "user_id": requested_by, "amount": -3, "reason": f"render {project_id}", "created_at": _now()})
+            charge_ledger_id = str(uuid.uuid4())
+            await db.credit_transactions.insert_one({"id": charge_ledger_id, "job_id": job_id, "user_id": requested_by, "amount": -RENDER_CREDIT_COST, "reason": f"render {project_id}", "created_at": _now()})
+            charge = {"user_id": requested_by, "amount": RENDER_CREDIT_COST, "store": "subscriptions", "ledger_id": charge_ledger_id}
     except HTTPException:
         raise
     except Exception as e:
@@ -1777,7 +1885,6 @@ async def queue_render(project_id: str, *, requested_by: str, burn_subtitles: bo
     if active >= MAX_CONCURRENT_RENDERS:
         logger.info("queue limit hit active=%s max=%s — job %s will queue", active, MAX_CONCURRENT_RENDERS, project_id)
 
-    job_id = str(uuid.uuid4())
     now = _now()
     job = {
         "id": job_id,
@@ -1797,8 +1904,26 @@ async def queue_render(project_id: str, *, requested_by: str, burn_subtitles: bo
         "updated_at": now,
         "burn_subtitles": bool(burn_subtitles),
         "aspect_ratio": aspect_ratio or "9:16",
+        "credit_charge": charge,
     }
-    await db.render_jobs.insert_one(dict(job))
+    try:
+        await db.render_jobs.insert_one(dict(job))
+    except Exception:
+        # Charge already taken but the job never existed — refund before surfacing.
+        if charge.get("amount", 0) > 0 and charge.get("store") in ("subscriptions", "ff_credits"):
+            try:
+                await _apply_credit_refund(
+                    db,
+                    user_id=charge["user_id"],
+                    amount=int(charge["amount"]),
+                    store=charge["store"],
+                    job_id=job_id,
+                    project_id=project_id,
+                    reason="queue_insert_failed",
+                )
+            except Exception:  # noqa: BLE001 — never mask the original insert failure
+                logger.exception("credit reversal failed after queue insert error job=%s", job_id)
+        raise
 
     task = asyncio.create_task(_run_render_safe(job_id, project_id))
     _ACTIVE_TASKS[project_id] = task
@@ -1834,6 +1959,13 @@ async def _run_render_safe(job_id: str, project_id: str):
             raise
         except Exception as e:  # noqa: BLE001
             logger.exception("Render job failed")
+            # Reverse the render credit charge BEFORE the job is marked failed.
+            # Reversal is idempotent (refund:<job_id> unique) and must never
+            # block the failure transition itself.
+            try:
+                await reverse_render_credits(job_id, reason=f"{type(e).__name__}: {e}"[:160])
+            except Exception:  # noqa: BLE001
+                logger.exception("credit reversal failed for failed job %s", job_id)
             await _set_job(job_id, status="failed", current_step="failed",
                            error_message=f"{type(e).__name__}: {e}"[:240],
                            completed_at=_now(), release_eligible=False)
@@ -1893,6 +2025,11 @@ async def recover_stale_jobs() -> int:
             "STALE_JOB_RECOVERED job=%s project=%s was=%s",
             j["id"], j.get("project_id"), j.get("status"),
         )
+        # Crashed/orphaned jobs are terminal failures — reverse their charge too.
+        try:
+            await reverse_render_credits(j["id"], reason="stale_job_recovery")
+        except Exception:  # noqa: BLE001 — recovery of one refund must not block the rest
+            logger.exception("credit reversal failed for stale job %s", j["id"])
     return res.modified_count or len(stale)
 
 
