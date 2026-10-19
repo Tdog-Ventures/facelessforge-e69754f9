@@ -113,9 +113,9 @@ def run_checks(video_path: Path, manifest: dict, duration: float) -> Dict:
 
     # 3. freeze >3.0s (first trigger at 3.25s with 4fps sampling) — direct frame
     # sampling (ffmpeg freezedetect false-positives on full concatenated streams:
-    # on full concatenated streams: it reports freeze_start=0 with no freeze_end
-    # even when direct frame diffs show real motion; isolated segments of the same
-    # file never trigger it). Sampled luma MAD against a rolling reference instead.
+    # it reports freeze_start=0 with no freeze_end even when direct frame diffs
+    # show real motion; isolated segments of the same file never trigger it).
+    # Sampled luma MAD against a rolling reference instead.
     try:
         if detect_freeze(video_path):
             checks.append({"check":"freezedetect","status":"fail","method":"frame_sample_mad","detail":"near-zero motion >3.0s"})
