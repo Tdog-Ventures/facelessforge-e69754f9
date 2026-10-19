@@ -23,6 +23,7 @@ Endpoints (all under /api/youtube-oauth):
 """
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
@@ -263,7 +264,7 @@ async def youtube_callback(
     if error:
         return HTMLResponse(
             f"<html><body style='font-family:monospace;padding:40px;background:#0A0A0A;color:#fff'>"
-            f"<h3>YouTube connect failed</h3><p>Error: {error}</p></body></html>",
+            f"<h3>YouTube connect failed</h3><p>Error: {html.escape(error)}</p></body></html>",
             status_code=400,
         )
     if not code or not state:
@@ -292,7 +293,7 @@ async def youtube_callback(
             logger.error("YouTube token exchange failed %s %s", r.status_code, r.text[:500])
             return HTMLResponse(
                 f"<html><body style='font-family:monospace;padding:40px;background:#0A0A0A;color:#fff'>"
-                f"<h3>YouTube connect failed</h3><p>Token exchange failed: {r.text[:300]}</p></body></html>",
+                f"<h3>YouTube connect failed</h3><p>Token exchange failed: {html.escape(r.text[:300])}</p></body></html>",
                 status_code=400,
             )
         tok = r.json()
@@ -338,8 +339,8 @@ async def youtube_callback(
     return HTMLResponse(
         f"<html><body style='font-family:monospace;padding:40px;background:#0A0A0A;color:#fff'>"
         f"<h3 style='color:#00E5FF'>YouTube connected</h3>"
-        f"<p>Tenant: <b>{tenant_id}</b></p>"
-        f"<p>Channel: <b>{channel.get('channel_title') or '(unknown)'}</b> ({channel.get('channel_id') or '—'})</p>"
+        f"<p>Tenant: <b>{html.escape(tenant_id)}</b></p>"
+        f"<p>Channel: <b>{html.escape(channel.get('channel_title') or '(unknown)')}</b> ({html.escape(channel.get('channel_id') or '—')})</p>"
         f"<p>Refresh token encrypted and stored in ethinx-redis. You can close this tab.</p>"
         f"<p><a href='https://dashboard.ethinx.solutions' style='color:#00E5FF'>Back to dashboard</a></p>"
         f"</body></html>"

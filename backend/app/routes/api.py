@@ -2356,6 +2356,7 @@ async def billing_balance(user=Depends(get_current_user)):
 @router.get("/thumbnails/{asset_id}")
 async def get_thumbnail(asset_id: str, request: Request, user=Depends(get_current_user)):
     from ..db import get_db as _get_db
+    from ..storage import STATIC_ROOT as _STATIC_ROOT
     from fastapi.responses import FileResponse, Response
     from pathlib import Path
     db = _get_db()
@@ -2365,11 +2366,30 @@ async def get_thumbnail(asset_id: str, request: Request, user=Depends(get_curren
         if fallback.exists():
             return FileResponse(str(fallback), media_type="image/png")
         return Response(status_code=404, content=b"not found")
-    fp = asset.get("file_path")
-    if fp and Path(fp).exists():
-        ext = Path(fp).suffix.lower()
+    # Serve only the canonical artifact issued for this asset. IDs are
+    # server-issued, so a stored file_path/storage_key can never authorize
+    # reading another asset's file or anything outside the storage root.
+    project_id = asset.get("project_id")
+    allowed_keys = {f"thumbs/{project_id}/{asset_id}{ext}" for ext in (".png", ".jpg", ".jpeg", ".webp", ".svg")}
+    root = _STATIC_ROOT.resolve()
+    served = None
+    if asset.get("storage_key"):
+        key = asset["storage_key"]
+        if key in allowed_keys:
+            p = root / key
+            # Local storage resolves symlinks, so check before dispatching.
+            if p.resolve() == p and p.is_file():
+                served = p
+    elif asset.get("file_path"):
+        # Legacy records have no storage key. Accept only the canonical
+        # location issued for this asset, rejecting symlink escapes too.
+        p = Path(asset["file_path"]).resolve()
+        if p in {root / key for key in allowed_keys} and p.is_file():
+            served = p
+    if served is not None:
+        ext = served.suffix.lower()
         ct = "image/png" if ext==".png" else "image/jpeg" if ext in (".jpg",".jpeg") else "image/svg+xml" if ext==".svg" else "image/png"
-        return FileResponse(str(fp), media_type=ct, headers={"Content-Disposition": f'inline; filename="{asset_id}{ext}"'})
+        return FileResponse(str(served), media_type=ct, headers={"Content-Disposition": f'inline; filename="{asset_id}{ext}"'})
     url = asset.get("preview_url")
     if url:
         return Response(status_code=302, headers={"Location": url})

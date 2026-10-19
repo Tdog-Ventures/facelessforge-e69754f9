@@ -129,6 +129,6 @@ redis-cli SMEMBERS "dodo:webhooks:processed" | head
 
 ## 10. Contacts & env ownership
 
-* `ADMIN_EMAIL=tdogga14@gmail.com` `ADMIN_PASSWORD=EthinxForge2026!` (`backend/.env:9`) — rotate after audit.
+* `ADMIN_EMAIL=tdogga14@gmail.com` — admin credentials exist only in `backend/.env` (`ADMIN_EMAIL`/`ADMIN_PASSWORD`, kept 640 root:www-data). Retrieve them on the host with `sudo grep '^ADMIN_' /opt/facelessforge/deploy/backend/.env`; never copy values into docs. Password rotation is a manual ops step — rotate after audit.
 * `FRONTEND_URL=https://facelessforge.ethinx.solutions` `STORAGE_PUBLIC_BASE_URL=https://videos.ethinx.solutions` (R2 `facelessforge-prod` via `9d1310958fd8...r2.cloudflarestorage.com`).
 * Keep `backend/.env` 640 root:www-data, never commit.
