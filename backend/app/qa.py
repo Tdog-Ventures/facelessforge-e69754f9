@@ -108,20 +108,23 @@ def run_checks(video_path: Path, manifest: dict, duration: float) -> Dict:
         else:
             checks.append({"check":"blackdetect","status":"pass"})
     except Exception as e:
-        checks.append({"check":"blackdetect","status":"pass", "note": str(e)[:200]})
+        checks.append({"check":"blackdetect","status":"fail","note": str(e)[:200]})
+        blocked.append("blackdetect")
 
-    # 3. freeze >3.5s — direct frame sampling (ffmpeg freezedetect false-positives
+    # 3. freeze >3.0s (first trigger at 3.25s with 4fps sampling) — direct frame
+    # sampling (ffmpeg freezedetect false-positives on full concatenated streams:
     # on full concatenated streams: it reports freeze_start=0 with no freeze_end
     # even when direct frame diffs show real motion; isolated segments of the same
     # file never trigger it). Sampled luma MAD against a rolling reference instead.
     try:
         if detect_freeze(video_path):
-            checks.append({"check":"freezedetect","status":"fail","method":"frame_sample_mad","detail":"near-zero motion >3.5s"})
+            checks.append({"check":"freezedetect","status":"fail","method":"frame_sample_mad","detail":"near-zero motion >3.0s"})
             blocked.append("freezedetect")
         else:
             checks.append({"check":"freezedetect","status":"pass","method":"frame_sample_mad"})
     except Exception as e:
-        checks.append({"check":"freezedetect","status":"pass", "note": str(e)[:200]})
+        checks.append({"check":"freezedetect","status":"fail","method":"frame_sample_mad","note": str(e)[:200]})
+        blocked.append("freezedetect")
 
     # 4. silencedetect >1s during narration (approx: check whole file)
     try:
@@ -135,8 +138,9 @@ def run_checks(video_path: Path, manifest: dict, duration: float) -> Dict:
             checks.append({"check":"silencedetect","status":"pass", "note": f"{silence_count} silences"})
         else:
             checks.append({"check":"silencedetect","status":"pass"})
-    except:
-        checks.append({"check":"silencedetect","status":"pass"})
+    except Exception as e:
+        checks.append({"check":"silencedetect","status":"fail","note": str(e)[:200]})
+        blocked.append("silencedetect")
 
     # 5. loudnorm -16 LUFS ±2, true peak -1 dBTP
     try:
@@ -160,7 +164,8 @@ def run_checks(video_path: Path, manifest: dict, duration: float) -> Dict:
         else:
             checks.append({"check":"loudnorm","status":"pass"})
     except Exception as e:
-        checks.append({"check":"loudnorm","status":"pass", "note": str(e)[:200]})
+        checks.append({"check":"loudnorm","status":"fail","note": str(e)[:200]})
+        blocked.append("loudnorm")
 
     # 6. captions checks would need srt file — placeholder pass, frontend validates timecodes
     checks.append({"check":"captions","status":"pass", "note": "validated in frontend + srt ordering"})

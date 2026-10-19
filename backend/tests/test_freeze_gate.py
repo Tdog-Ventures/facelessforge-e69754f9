@@ -69,3 +69,44 @@ def test_frame_sampler_budget_is_strict():
 def test_empty_or_single_frame_is_not_a_freeze():
     assert qa._freeze_from_frames([]) is False
     assert qa._freeze_from_frames([bytes(64 * 64)]) is False
+
+
+def _clip(path: Path) -> Path:
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-y",
+         "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30:duration=2",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+         "-shortest", str(path)],
+        check=True,
+    )
+    return path
+
+
+@pytest.mark.parametrize(
+    "cmd_marker,check_name",
+    [
+        ("blackdetect", "blackdetect"),
+        ("scale=64:64", "freezedetect"),
+        ("silencedetect", "silencedetect"),
+        ("loudnorm", "loudnorm"),
+    ],
+)
+def test_check_blocks_when_underlying_call_raises(tmp_path, monkeypatch, cmd_marker, check_name):
+    """A check that could not run must fail-closed: status=fail, in blocked,
+    exception text preserved. Never report pass on an exception."""
+    video = _clip(tmp_path / "clip.mp4")
+    real_check_output = qa.subprocess.check_output
+
+    def raiser(cmd, *args, **kwargs):
+        if any(cmd_marker in str(c) for c in cmd):
+            raise RuntimeError("forced ffmpeg failure")
+        return real_check_output(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(qa.subprocess, "check_output", raiser)
+    result = qa.run_checks(video, {}, qa.ffprobe_duration(video))
+
+    check = next(c for c in result["checks"] if c["check"] == check_name)
+    assert check["status"] == "fail", f"{check_name} must fail when it cannot run"
+    assert "forced ffmpeg failure" in check.get("note", "")
+    assert check_name in result["blocked"]
