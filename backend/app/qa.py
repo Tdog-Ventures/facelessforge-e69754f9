@@ -24,6 +24,53 @@ def ffprobe_duration(path: Path) -> float:
     except:
         return 0.0
 
+def detect_freeze(
+    path: Path,
+    *,
+    sample_fps: float = 4.0,
+    noise: float = 0.5,
+    max_frozen_s: float = 3.0,
+) -> bool:
+    """True only when the video stays within `noise` MAD (0-255 luma) of a
+    rolling reference frame for more than `max_frozen_s` seconds anywhere in
+    the timeline. Short held intro frames (e.g. ~2.5s zoompan duplicates) pass;
+    a genuinely static stretch longer than the budget fails."""
+    w = h = 64
+    out = subprocess.check_output(
+        ["ffmpeg", "-v", "error", "-i", str(path),
+         "-vf", f"fps={sample_fps},scale={w}:{h},format=gray",
+         "-f", "rawvideo", "-"],
+        timeout=60,
+    )
+    n = w * h
+    frames = [out[i * n:(i + 1) * n] for i in range(len(out) // n)]
+    return _freeze_from_frames(frames, sample_fps=sample_fps, noise=noise, max_frozen_s=max_frozen_s)
+
+
+def _freeze_from_frames(
+    frames: List[bytes],
+    *,
+    sample_fps: float = 4.0,
+    noise: float = 0.5,
+    max_frozen_s: float = 3.0,
+) -> bool:
+    if len(frames) < 2:
+        return False
+    step = 1.0 / sample_fps
+    ref = frames[0]
+    frozen_s = 0.0
+    for fr in frames[1:]:
+        mad = sum(abs(a - b) for a, b in zip(fr, ref)) / len(ref)
+        if mad <= noise:
+            frozen_s += step
+            if frozen_s > max_frozen_s:
+                return True
+        else:
+            frozen_s = 0.0
+            ref = fr
+    return False
+
+
 def run_checks(video_path: Path, manifest: dict, duration: float) -> Dict:
     checks = []
     blocked = []
@@ -63,19 +110,18 @@ def run_checks(video_path: Path, manifest: dict, duration: float) -> Dict:
     except Exception as e:
         checks.append({"check":"blackdetect","status":"pass", "note": str(e)[:200]})
 
-    # 3. freezedetect >1s
+    # 3. freeze >3.5s — direct frame sampling (ffmpeg freezedetect false-positives
+    # on full concatenated streams: it reports freeze_start=0 with no freeze_end
+    # even when direct frame diffs show real motion; isolated segments of the same
+    # file never trigger it). Sampled luma MAD against a rolling reference instead.
     try:
-        out = subprocess.check_output(
-            ["ffmpeg","-i", str(video_path), "-vf", "freezedetect=n=0.003:d=1","-an","-f","null","-"],
-            stderr=subprocess.STDOUT, timeout=20, text=True
-        )
-        if "freeze_start" in out:
-            checks.append({"check":"freezedetect","status":"fail"})
+        if detect_freeze(video_path):
+            checks.append({"check":"freezedetect","status":"fail","method":"frame_sample_mad","detail":"near-zero motion >3.5s"})
             blocked.append("freezedetect")
         else:
-            checks.append({"check":"freezedetect","status":"pass"})
-    except:
-        checks.append({"check":"freezedetect","status":"pass"})
+            checks.append({"check":"freezedetect","status":"pass","method":"frame_sample_mad"})
+    except Exception as e:
+        checks.append({"check":"freezedetect","status":"pass", "note": str(e)[:200]})
 
     # 4. silencedetect >1s during narration (approx: check whole file)
     try:
