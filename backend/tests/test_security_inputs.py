@@ -88,7 +88,7 @@ async def test_render_download_rejects_private_url_without_creating_file(tmp_pat
     assert not target.exists()
 
 
-@pytest.mark.parametrize('name', ['../secret.txt', '/outside.txt', '..\\secret.txt'])
+@pytest.mark.parametrize('name', ['../secret.txt', '/outside.txt', '..\\secret.txt', 'a\x00b'])
 def test_spa_path_cannot_escape_public_root(tmp_path, name):
     from app.public_files import public_file
     from fastapi import HTTPException
