@@ -83,10 +83,31 @@ def normalize_for_tts(text: str) -> str:
     text = re.sub(r'ethinx', 'E-thinks', text, flags=re.IGNORECASE)
     return text
 
+def _strip_tts_directions(text: str) -> str:
+    # Each successful search consumes its entire span. Remember unmatched
+    # openers per line so malformed input cannot retry a wildcard at each byte.
+    output = []
+    pairs = {"[": "]", "(": ")"}
+    for line in text.splitlines(keepends=True):
+        missing = set()
+        i = 0
+        while i < len(line):
+            char = line[i]
+            if char in pairs and char not in missing:
+                end = line.find(pairs[char], i + 1)
+                if end >= 0:
+                    i = end + 1
+                    continue
+                missing.add(char)
+            output.append(char)
+            i += 1
+    return "".join(output)
+
+
 def sanitize_for_tts(text: str) -> str:
-    text = re.sub(r'^\s*(HOOK|INTRO|OUTRO|CTA|SCENE\s*\d*)\s*[:\-–]\s*', '', text, flags=re.IGNORECASE | re.MULTILINE)
-    text = re.sub(r'^\s*Visual\s*:.*$', '', text, flags=re.IGNORECASE | re.MULTILINE)
-    text = re.sub(r'\[.*?\]|\(.*?\)', '', text)
+    text = re.sub(r'^[ \t]*(HOOK|INTRO|OUTRO|CTA|SCENE(?:[ \t]*\d+)?)[ \t]*[:\-–][ \t]*', '', text, flags=re.IGNORECASE | re.MULTILINE)
+    text = re.sub(r'^[ \t]*Visual[ \t]*:.*$', '', text, flags=re.IGNORECASE | re.MULTILINE)
+    text = _strip_tts_directions(text)
     text = re.sub(r'[*#_`]{1,3}', '', text)
     return re.sub(r'\n{2,}', '\n', text).strip()
 

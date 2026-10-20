@@ -50,5 +50,5 @@ class YoutubePoster(PlatformPoster):
             log_analytics("youtube", tenant_id, project.get("id"), res)
             return res
         except Exception as e:
-            logger.warning(f"YT real upload failed {e}")
-            raise RuntimeError(f"YouTube upload failed — mock IDs forbidden per BOOT.md HARD RULE 3: {e}"[:190])
+            logger.warning("YT real upload failed (%s)", type(e).__name__)
+            raise RuntimeError("YouTube upload failed — provider rejected the upload") from None
