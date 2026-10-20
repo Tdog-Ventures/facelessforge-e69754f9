@@ -77,21 +77,106 @@ async def test_youtube_provider_exception_never_leaks_secret(monkeypatch, caplog
     assert 'DO_NOT_DISCLOSE' not in caplog.text
 
 
-def test_external_upload_provider_error_is_not_echoed():
-    # The registry upload path raised the raw provider exception back to the
-    # caller and into logs; it must now disclose only a generic failure.
-    source = Path(__file__).parents[1] / 'app' / 'external_api.py'
-    tree = ast.parse(source.read_text(encoding='utf-8'))
-    offenders = [node.lineno for node in ast.walk(tree)
-                 if isinstance(node, ast.JoinedStr)
-                 and any(isinstance(v, ast.FormattedValue) for v in node.values)
-                 and 'mock IDs forbidden' in ''.join(c for c in [_const_text(v) for v in node.values] if isinstance(c, str))]
-    assert not offenders, f'external_api.py re-exposes provider error at lines {offenders}'
-    assert 'type(_e).__name__' in source.read_text(encoding='utf-8')
+def test_external_upload_provider_error_is_not_echoed(monkeypatch, caplog):
+    # Drive the real auto-upload task with a provider exception carrying a
+    # distinctive secret; it must not surface in logs or the persisted job error.
+    import asyncio
+    from app import external_api
+    from app.routes import youtube as _youtube_mod
+    SECRET = 'SECRET_REFRESH_TOKEN_DO_NOT_DISCLOSE'
 
+    captured = {}
 
-def _const_text(node):
-    return node.value if isinstance(node, ast.Constant) else None
+    def _fake_create_task(coro):
+        captured['coro'] = coro
+        return SimpleNamespace(cancel=lambda: None)
+
+    monkeypatch.setattr(asyncio, 'create_task', _fake_create_task)
+
+    class FakeCursor:
+        def __init__(self, docs):
+            self.docs = docs
+        def sort(self, *a, **k):
+            return self
+        async def to_list(self, n):
+            return list(self.docs)
+
+    class FakeCollection:
+        def __init__(self):
+            self.inserted = []
+            self.updated = []
+        async def insert_one(self, doc):
+            self.inserted.append(doc)
+        async def insert_many(self, docs):
+            self.inserted.extend(docs)
+        async def update_one(self, query, update, upsert=False):
+            self.updated.append((query, update))
+        async def find_one(self, query, projection=None):
+            for doc in self.inserted:
+                if all(doc.get(k) == v for k, v in query.items()):
+                    return dict(doc)
+            return None
+        def find(self, query=None, projection=None):
+            return FakeCursor(list(self.inserted))
+
+    class FakeDB:
+        def __init__(self):
+            self._cols = {}
+        def __getattr__(self, name):
+            return self._cols.setdefault(name, FakeCollection())
+
+    fake_db = FakeDB()
+    monkeypatch.setattr(external_api, '_system_creator', AsyncMock(return_value={'id': 'sys', 'role': 'admin'}))
+    monkeypatch.setattr(external_api, 'get_db', lambda: fake_db)
+    # The auto-upload closure re-imports get_db from app.db; patch that source too.
+    import app.db as _app_db
+    monkeypatch.setattr(_app_db, 'get_db', lambda: fake_db)
+    monkeypatch.setattr(external_api.render_service, 'validate_prerequisites', lambda *a: {'ok': True, 'issues': []})
+    monkeypatch.setattr(external_api.render_service, 'queue_render', AsyncMock(return_value={'id': 'job-1'}))
+
+    class BoomCreds:
+        def refresh(self, req):
+            reached.append(True)
+            raise RuntimeError(f'provider failed with {SECRET}')
+
+    reached = []
+    monkeypatch.setattr(_youtube_mod, '_get_youtube_credentials', lambda: BoomCreds())
+    monkeypatch.setattr(_youtube_mod, '_resolve_video_path', lambda pid: Path('/tmp/fake-render.mp4'))
+    monkeypatch.setenv('EXTERNAL_RENDER_ENABLED', 'true')
+    monkeypatch.setenv('EXTERNAL_RENDER_API_KEY', 'test-key')
+
+    # Neutralize downstream generators that would hit providers/filesystem.
+    monkeypatch.setattr(external_api.gen, 'generate_metadata', AsyncMock(return_value={'title_options': ['T'], 'selected_title': 'T', 'description': 'd', 'tags': ['x'], 'youtube_chapters': [], 'social_caption': 'T'}))
+    monkeypatch.setattr(external_api.gen, 'generate_thumbnails', AsyncMock(return_value=[]))
+    monkeypatch.setattr(external_api.thumb_images, 'generate_thumbnail_images', AsyncMock(return_value=[]))
+    monkeypatch.setattr(external_api.tts_service, 'generate_voiceover',
+                        AsyncMock(return_value={'id': 'vo-1', 'status': 'generated'}))
+
+    body = external_api.ExternalRenderRequest(title='T', script='A long enough script body.', auto_upload=True)
+    asyncio.run(external_api.external_render_video(body, 'test-key'))
+    assert 'coro' in captured, 'auto-upload task was not scheduled'
+
+    async def _short_sleep(_t):
+        return None
+
+    async def _completed_job(_q, _p=None):
+        return {'id': 'job-1', 'status': 'completed'}
+
+    async def _run():
+        original_sleep = asyncio.sleep
+        asyncio.sleep = _short_sleep
+        fake_db.render_jobs.find_one = _completed_job
+        try:
+            await captured['coro']
+        finally:
+            asyncio.sleep = original_sleep
+
+    asyncio.run(_run())
+
+    assert reached, 'auto-upload did not reach the provider call — test would not detect a leak'
+    assert SECRET not in caplog.text, 'secret leaked into logs'
+    recorded = str(fake_db.forge_runs.updated) + str(fake_db.forge_runs.inserted)
+    assert SECRET not in recorded, 'secret leaked into persisted job error'
 
 
 @pytest.mark.parametrize('role,expected', [(None, 401), ('creator', 403), ('admin', 200)])
