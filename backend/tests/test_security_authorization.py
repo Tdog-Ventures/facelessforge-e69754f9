@@ -160,8 +160,8 @@ async def test_callback_accepts_one_time_admin_state(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_auth_supersedes_stale_oauth_states(monkeypatch):
-    # An abandoned consent must not leave a permanent row behind: requesting a
-    # fresh auth URL clears the caller's prior states before inserting one.
+    # Starting a new consent invalidates the caller's earlier consent: existing
+    # rows are deleted before the new state is inserted.
     class States:
         def __init__(self):
             self.deleted = []
@@ -183,18 +183,40 @@ async def test_auth_supersedes_stale_oauth_states(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_auth_tolerates_backend_without_delete_many(monkeypatch):
-    # Older driver stubs (or restricted collections) lacking delete_many must not
-    # break the happy path; the state is still inserted.
+async def test_auth_cleanup_failure_prevents_new_state(monkeypatch):
+    # A failing invalidation must fail closed: no new state is issued and the
+    # error surfaces rather than being swallowed.
     class States:
         def __init__(self):
             self.inserted = []
+        async def delete_many(self, query):
+            raise RuntimeError('mongo operation failed')
         async def insert_one(self, doc):
             self.inserted.append(doc)
     states = States()
     tokens = SimpleNamespace(find_one=AsyncMock(return_value=None))
     monkeypatch.setattr(youtube, 'get_db', lambda: SimpleNamespace(youtube_oauth_states=states, youtube_tokens=tokens))
     monkeypatch.setenv('YOUTUBE_CLIENT_ID', 'test-client')
-    result = await youtube.youtube_auth(request(), user={'id': 'operator', 'role': 'admin'})
-    assert len(states.inserted) == 1
-    assert 'auth_url' in result
+    with pytest.raises(RuntimeError):
+        await youtube.youtube_auth(request(), user={'id': 'operator', 'role': 'admin'})
+    assert states.inserted == []
+
+
+@pytest.mark.asyncio
+async def test_callback_rejects_expired_state_before_exchange(monkeypatch):
+    # TTL deletion is asynchronous, so the callback must reject an expired state
+    # on its own even if the row is still present.
+    from datetime import datetime, timezone
+    class States:
+        def __init__(self):
+            self.deleted = []
+        async def find_one_and_delete(self, query):
+            assert query['expires_at']['$gt'] <= datetime.now(timezone.utc)
+            return None
+    states = States()
+    monkeypatch.setattr(youtube, 'get_db', lambda: SimpleNamespace(youtube_oauth_states=states))
+    monkeypatch.setenv('YOUTUBE_CLIENT_ID', 'test-client')
+    monkeypatch.setenv('YOUTUBE_CLIENT_SECRET', 'test-secret')
+    with pytest.raises(HTTPException) as error:
+        await youtube.youtube_callback(request(), code='code', state='expired', user={'id': 'operator', 'role': 'admin'})
+    assert error.value.status_code == 400

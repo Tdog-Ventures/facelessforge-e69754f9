@@ -64,6 +64,14 @@ async def ensure_indexes():
     await db.password_reset_tokens.create_index("token", unique=True)
     await db.password_reset_tokens.create_index("expires_at", expireAfterSeconds=0)
     await db.password_reset_attempts.create_index("identifier")
+    # YouTube OAuth consent states (TTL on expires_at). Deletion is asynchronous:
+    # the callback keeps validating expires_at so a stale state is rejected even
+    # before the TTL monitor removes it.
+    try:
+        await db.youtube_oauth_states.create_index("state", unique=True, sparse=True)
+        await db.youtube_oauth_states.create_index("expires_at", expireAfterSeconds=0)
+    except Exception:
+        pass
     # Assets
     await db.assets.create_index([("project_id", 1), ("scene_id", 1), ("external_id", 1), ("source", 1)])
     # Unique only when external_id is set — protects scene stock attachments from double-attach
