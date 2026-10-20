@@ -105,6 +105,56 @@ async def test_external_key_reads_own_job(monkeypatch):
     assert result.video_url == 'https://cdn.example/video.mp4'
 
 
+@pytest.mark.parametrize('source', ['', '   ', '\t\n'])
+def test_external_request_rejects_blank_source(source):
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        external_api.ExternalRenderRequest(title='T', script='a valid script body', source=source)
+
+
+def test_external_request_trims_whitespace_source():
+    req = external_api.ExternalRenderRequest(title='T', script='a valid script body', source='  partner-x  ')
+    assert req.source == 'partner-x'
+
+
+@pytest.mark.asyncio
+async def test_external_valid_source_can_read_and_cancel_own_job(monkeypatch):
+    # A valid-source project persists a truthy external_source, so the external
+    # account that created it can read and cancel its own job.
+    monkeypatch.setenv('EXTERNAL_RENDER_ENABLED', 'true')
+    monkeypatch.setenv('EXTERNAL_RENDER_API_KEY', 'test-key')
+    req = external_api.ExternalRenderRequest(title='T', script='a valid script body', source='external')
+    system_user = {'id': 'system', 'is_external_system': True}
+    project = {'id': 'p', 'user_id': 'system', 'external_source': req.source}
+    db = SimpleNamespace(
+        users=SimpleNamespace(find_one=AsyncMock(return_value=system_user)),
+        render_jobs=SimpleNamespace(find_one=AsyncMock(return_value={'id': 'job-xyz01', 'project_id': 'p', 'status': 'completed'})),
+        projects=SimpleNamespace(find_one=AsyncMock(return_value=project)),
+    )
+    monkeypatch.setattr(external_api, 'get_db', lambda: db)
+    status = await external_api.external_render_status('job-xyz01', 'test-key')
+    assert status.job_id == 'job-xyz01'
+    cancel = await external_api.external_render_cancel(external_api.ExternalCancelRequest(job_id='job-xyz01'), 'test-key')
+    assert cancel.job_id == 'job-xyz01'
+
+
+@pytest.mark.asyncio
+async def test_external_key_still_denied_cross_customer_job(monkeypatch):
+    # Preserve cross-customer denial: a system account cannot read a job whose
+    # project belongs to a different user, regardless of external_source.
+    monkeypatch.setenv('EXTERNAL_RENDER_ENABLED', 'true')
+    monkeypatch.setenv('EXTERNAL_RENDER_API_KEY', 'test-key')
+    db = SimpleNamespace(
+        users=SimpleNamespace(find_one=AsyncMock(return_value={'id': 'system', 'is_external_system': True})),
+        render_jobs=SimpleNamespace(find_one=AsyncMock(return_value={'id': 'job-other', 'project_id': 'other', 'status': 'completed'})),
+        projects=SimpleNamespace(find_one=AsyncMock(return_value={'id': 'other', 'user_id': 'customer', 'external_source': 'external'})),
+    )
+    monkeypatch.setattr(external_api, 'get_db', lambda: db)
+    with pytest.raises(HTTPException) as error:
+        await external_api.external_render_status('job-other', 'test-key')
+    assert error.value.status_code == 404
+
+
 @pytest.mark.asyncio
 async def test_adapter_cannot_publish_customer_project(monkeypatch):
     import app.db

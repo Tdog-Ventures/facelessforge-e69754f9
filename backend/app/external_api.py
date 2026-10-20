@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, Body, Header, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from . import generation as gen
 from . import render as render_service
@@ -64,6 +64,17 @@ class ExternalRenderRequest(BaseModel):
     tone: Optional[str] = Field(default=None, max_length=80)
     target_duration: Optional[int] = Field(default=None, ge=15, le=3600)
     auto_upload: bool = False
+
+    @field_validator("source")
+    @classmethod
+    def _source_nonblank(cls, value: str) -> str:
+        # Blank sources would persist an empty external_source, and the
+        # external access check requires a truthy marker — the account would
+        # then be unable to read or cancel its own job.
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("source must not be blank")
+        return trimmed
 
 
 class ExternalRenderResponse(BaseModel):
