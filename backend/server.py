@@ -309,8 +309,10 @@ if frontend_build.exists():
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str = ""):
         from fastapi.responses import FileResponse
-        if full_path and (frontend_build / full_path).is_file():
-            return FileResponse(frontend_build / full_path)
+        from app.public_files import public_file
+        asset = public_file(frontend_build, full_path) if full_path else None
+        if asset:
+            return FileResponse(asset)
         index = frontend_build / "index.html"
         if index.exists():
             return FileResponse(index, media_type="text/html")

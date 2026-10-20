@@ -735,8 +735,9 @@ async def _download_to(url: str, out_path: Path, *, max_bytes: int,
     """Best-effort download. Returns True on success, False on any failure."""
     try:
         timeout = httpx.Timeout(20.0, connect=10.0)
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            async with client.stream("GET", url) as resp:
+        from .public_http import public_stream
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+            async with public_stream(client, url) as resp:
                 if resp.status_code != 200:
                     return False
                 ct = resp.headers.get("content-type", "")
@@ -996,7 +997,7 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
             if is_image:
                 # Download as image; will be rendered with Ken Burns zoompan
                 ext_img = ".jpg" if ".png" not in url.lower() else ".png"
-                target = out_dir / f"scene_{idx:03d}_src_{ext_id}{ext_img}"
+                target = out_dir / f"scene_{idx:03d}_src_{hashlib.sha256(ext_id.encode()).hexdigest()[:24]}{ext_img}"
                 ok = await _download_to(url, target, max_bytes=MAX_VIDEO_DOWNLOAD_BYTES)
                 if not ok:
                     logger.warning("scene=%02d FOOTAGE_REJECT reason=image_download_failed ext_id=%s url=%s",
@@ -1009,7 +1010,7 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
             logger.info("scene=%02d FOOTAGE_SKIP reason=unknown_type ext_id=%s url=%s",
                         idx + 1, ext_id, url[:100])
             continue
-        target = out_dir / f"scene_{idx:03d}_src_{ext_id}.mp4"
+        target = out_dir / f"scene_{idx:03d}_src_{hashlib.sha256(ext_id.encode()).hexdigest()[:24]}.mp4"
         ok = await _download_to(url, target, max_bytes=MAX_VIDEO_DOWNLOAD_BYTES)
         if not ok:
             logger.warning("scene=%02d FOOTAGE_REJECT reason=download_failed ext_id=%s url=%s",
@@ -1074,7 +1075,7 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
         if not url:
             continue
         ext_id = r.get("external_id") or ""
-        target = out_dir / f"scene_{idx:03d}_retry_{ext_id}.mp4"
+        target = out_dir / f"scene_{idx:03d}_retry_{hashlib.sha256(ext_id.encode()).hexdigest()[:24]}.mp4"
         ok = await _download_to(url, target, max_bytes=MAX_VIDEO_DOWNLOAD_BYTES)
         if not ok:
             logger.warning("scene=%02d FOOTAGE_RETRY_REJECT reason=download_failed ext_id=%s",
