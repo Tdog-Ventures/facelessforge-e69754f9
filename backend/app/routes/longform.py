@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 
 from ..auth import get_current_user
 from ..db import get_db
+from ..publishing_access import ensure_operator
 
 logger = logging.getLogger("facelessforge.longform")
 
@@ -62,10 +63,10 @@ class LongformRequest(BaseModel):
     industry: str = Field(default="Builder")
     channelId: Optional[str] = None
     plan: Optional[str] = None
-    jobId: Optional[str] = None
+    jobId: Optional[str] = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,64}$")
     privacy: str = "public"  # public|private|unlisted
     duration_minutes: int = 10
-    jobId: Optional[str] = None
+    jobId: Optional[str] = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,64}$")
 
 
 class LongformResponse(BaseModel):
@@ -185,7 +186,12 @@ def _get_broll_clips_via_teaser(industry: str, jobId: str) -> List[dict]:
 
 def _render_longform(jobId: str, companyName: str, industry: str, script: str, clip_paths: List[str], target_seconds: int = 600) -> Path:
     """Concatenate clip_paths into ~target_seconds total, scale 1280x720, add drawtext overlays + audio track (silent if no voice)."""
-    out_path = STORAGE_DIR / f"{jobId}.mp4"
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", jobId):
+        raise ValueError("Invalid longform job ID")
+    root = STORAGE_DIR.resolve()
+    out_path = root / f"{jobId}.mp4"
+    if not out_path.resolve().is_relative_to(root):
+        raise ValueError("Longform output escapes storage")
     if out_path.exists():
         try:
             out_path.unlink()
@@ -212,7 +218,9 @@ def _render_longform(jobId: str, companyName: str, industry: str, script: str, c
         ]
     else:
         # Build concat list
-        list_file = STORAGE_DIR / f"{jobId}_list.txt"
+        list_file = root / f"{jobId}_list.txt"
+        if not list_file.resolve().is_relative_to(root):
+            raise ValueError("Longform list escapes storage")
         per_clip = max(5.0, target_seconds / len(clip_paths))
         with open(list_file, "w") as f:
             for cp in clip_paths:
@@ -302,6 +310,7 @@ async def longform_generate(req: LongformRequest, request: Request, user=Depends
     Auth: standard JWT (Bearer). Channel ID is taken from req or user record.
     Returns: projectId, videoPath, publicUrl (R2 after upload), youtube status.
     """
+    ensure_operator(user)
     jobId = (req.jobId or "").strip() or uuid.uuid4().hex[:10]
     projectId = f"longform_{jobId}"
     companyName = req.companyName.strip()

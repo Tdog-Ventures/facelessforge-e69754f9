@@ -438,6 +438,8 @@ async def _youtube_upload(project: dict) -> dict:
     from ..routes.youtube import _resolve_video_path, _get_youtube_credentials
     import uuid as _uuid
     db = get_db()
+    from ..publishing_access import ensure_operator_project
+    await ensure_operator_project(project)
     meta = await db.metadata_packages.find_one({"project_id": project["id"]}, {"_id": 0})
     title = ((meta or {}).get("selected_title") or project.get("name") or project.get("topic") or "Untitled")[:95]
     if "Faceless Forge" not in title:
@@ -837,6 +839,7 @@ def get_last_run():
 # Expose APIS
 from fastapi import APIRouter, Depends, HTTPException
 from ..auth import get_current_user
+from ..publishing_access import ensure_operator
 
 forge_router = APIRouter(prefix="/api/forge", tags=["forge"])
 
@@ -848,6 +851,7 @@ async def forge_run_now(topic: Optional[str] = None, niche: Optional[str] = None
     triggering a YouTube upload it refuses with HTTP 409 so an operator must
     explicitly enable automation first.
     """
+    ensure_operator(user)
     try:
         result = await run_forge_once(user_id=user["id"], topic_override=topic, niche_override=niche)
         return result
@@ -858,6 +862,7 @@ async def forge_run_now(topic: Optional[str] = None, niche: Optional[str] = None
 
 @forge_router.get("/status")
 async def forge_status(user=Depends(get_current_user)):
+    ensure_operator(user)
     db = get_db()
     sched = get_scheduler()
     scheduler_exists = sched is not None
@@ -927,6 +932,7 @@ async def forge_status(user=Depends(get_current_user)):
 
 @forge_router.get("/runs")
 async def forge_runs(user=Depends(get_current_user)):
+    ensure_operator(user)
     from ..db import get_db
     db = get_db()
     runs = await db.forge_runs.find({}, {"_id": 0}).sort("created_at", -1).to_list(20)
@@ -934,6 +940,7 @@ async def forge_runs(user=Depends(get_current_user)):
 
 @forge_router.post("/toggle")
 async def forge_toggle(enabled: bool = True, user=Depends(get_current_user)):
+    ensure_operator(user)
     # Toggle is env-level but we store in DB settings for persistence
     from ..db import get_db
     db = get_db()

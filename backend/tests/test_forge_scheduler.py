@@ -60,7 +60,7 @@ async def test_forge_status_shape_when_scheduler_is_off(monkeypatch):
     monkeypatch.setattr(forge_loop, "get_db", lambda: FakeDB(auto_post_enabled=False))
     monkeypatch.setattr(forge_loop, "get_scheduler", lambda: None)
 
-    status = await forge_loop.forge_status(user={"id": "user-1"})
+    status = await forge_loop.forge_status(user={"id": "user-1", "role": "admin"})
 
     assert status["scheduler_exists"] is False
     assert status["job_registered"] is False
@@ -77,7 +77,7 @@ async def test_forge_status_reports_registered_job(monkeypatch):
     monkeypatch.setattr(forge_loop, "get_db", lambda: FakeDB(auto_post_enabled=True))
     monkeypatch.setattr(forge_loop, "get_scheduler", lambda: FakeScheduler())
 
-    status = await forge_loop.forge_status(user={"id": "user-1"})
+    status = await forge_loop.forge_status(user={"id": "user-1", "role": "admin"})
 
     assert status["scheduler_exists"] is True
     assert status["job_registered"] is True
@@ -114,7 +114,7 @@ async def test_run_now_is_blocked_from_publishing_while_off(monkeypatch):
     monkeypatch.setattr(forge_loop, "_youtube_upload", _fail_upload)
 
     with pytest.raises(HTTPException) as excinfo:
-        await forge_loop.forge_run_now(user={"id": "user-1"}, topic=None, niche=None)
+        await forge_loop.forge_run_now(user={"id": "user-1", "role": "admin"}, topic=None, niche=None)
 
     assert excinfo.value.status_code == 409
 

@@ -117,6 +117,14 @@ def _require_external_key(x_facelessforge_key: Optional[str]) -> None:
 
 # ============================ HELPERS ============================
 
+async def _ensure_external_job_access(db, job: dict) -> None:
+    email = os.environ.get("EXTERNAL_SYSTEM_USER_EMAIL", "external-renderer@facelessforge.io")
+    owner = await db.users.find_one({"email": email}, {"_id": 0, "id": 1, "is_external_system": 1})
+    project = await db.projects.find_one({"id": job.get("project_id")}, {"_id": 0})
+    if not owner or not owner.get("is_external_system") or not project or project.get("user_id") != owner.get("id") or not project.get("external_source"):
+        raise HTTPException(status_code=404, detail="Job not found")
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -142,12 +150,15 @@ async def _system_creator(db) -> dict:
     email = os.environ.get("EXTERNAL_SYSTEM_USER_EMAIL", "external-renderer@facelessforge.io")
     user = await db.users.find_one({"email": email}, {"_id": 0, "password_hash": 0})
     if user:
+        if user.get("is_external_system") is not True:
+            raise HTTPException(status_code=503, detail="External system account requires operator verification")
         return user
     from .auth import hash_password
     new_user = {
         "id": str(uuid.uuid4()),
         "email": email,
         "name": "External Renderer (system)",
+        "is_external_system": True,
         "role": "creator",
         "password_hash": hash_password(secrets.token_urlsafe(48)),
         "created_at": _now(),
@@ -588,6 +599,7 @@ async def external_render_status(
     job = await db.render_jobs.find_one({"id": job_id}, {"_id": 0})
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    await _ensure_external_job_access(db, job)
     status = _PUBLIC_STATUS_MAP.get(job.get("status", ""), job.get("status", "unknown"))
     completed = status == "completed"
     return ExternalStatusResponse(
@@ -617,6 +629,7 @@ async def external_render_cancel(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
+    await _ensure_external_job_access(db, job)
     internal_status = job.get("status", "")
     public = _PUBLIC_STATUS_MAP.get(internal_status, internal_status)
 
