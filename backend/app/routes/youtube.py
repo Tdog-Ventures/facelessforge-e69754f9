@@ -78,6 +78,12 @@ async def youtube_auth(request: Request, user=Depends(get_current_user)):
     ensure_operator(user)
     state = secrets.token_urlsafe(32)
     db = get_db()
+    # Drop this user's expired or superseded states so abandoned consents cannot
+    # accumulate; then store exactly one live state per user.
+    try:
+        await db.youtube_oauth_states.delete_many({"user_id": user["id"]})
+    except AttributeError:
+        pass
     await db.youtube_oauth_states.insert_one({"state": state, "user_id": user["id"], "expires_at": _now() + timedelta(minutes=10)})
     url = _build_auth_url(request, state)
     connected = bool(_env("YOUTUBE_REFRESH_TOKEN"))
