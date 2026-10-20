@@ -1,4 +1,6 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
+from app.auth import get_current_user
+from app.publishing_access import ensure_operator
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.routing import Match
@@ -381,7 +383,8 @@ async def serve_teaser_8081(jobId: str):
     return JSONResponse({"detail":"not found","jobId":clean}, status_code=404)
 
 @app.get("/debug/files")
-def debug_files_8081():
+def debug_files_8081(user=Depends(get_current_user)):
+    ensure_operator(user)
     import datetime, pathlib
     locals=[]
     for p in [_TEASER_TMP, _TEASER_DIR]:

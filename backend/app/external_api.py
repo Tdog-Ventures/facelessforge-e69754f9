@@ -520,8 +520,8 @@ async def external_render_video(
                                 _url = f"https://www.youtube.com/watch?v={_vid}"
                                 logger.info("auto_upload YouTube success pid=%s vid=%s", pid, _vid)
                             except Exception as _e:
-                                logger.warning("auto_upload YouTube failed pid=%s: %s", pid, _e)
-                                raise RuntimeError(f"YouTube upload failed — mock IDs forbidden per BOOT.md HARD RULE 3: {_e}"[:190])
+                                logger.warning("auto_upload YouTube failed pid=%s type=%s", pid, type(_e).__name__)
+                                raise RuntimeError("YouTube upload failed — provider rejected the upload") from None
                         # persist forge_runs
                         try:
                             await _db.forge_runs.insert_one(
