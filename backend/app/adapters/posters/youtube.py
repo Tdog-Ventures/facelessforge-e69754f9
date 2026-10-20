@@ -8,6 +8,8 @@ class YoutubePoster(PlatformPoster):
     def is_configured(self) -> bool:
         return bool(self.vault_tokens.get("youtube_refresh"))
     async def post(self, project: dict, video_url: str, metadata: dict, tenant_id: str) -> dict:
+        from ...publishing_access import ensure_operator_project
+        await ensure_operator_project(project)
         title = (metadata.get("selected_title") or project.get("name") or project.get("topic") or "")[:95]
         if "Faceless Forge" not in title:
             title = f"{title} | Faceless Forge"

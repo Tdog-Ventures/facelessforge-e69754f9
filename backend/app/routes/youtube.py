@@ -14,7 +14,8 @@ from __future__ import annotations
 import logging
 import os
 import uuid
-from datetime import datetime, timezone
+import secrets
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -23,6 +24,7 @@ from pydantic import BaseModel
 
 from ..auth import get_current_user
 from ..db import get_db
+from ..publishing_access import ensure_operator
 
 logger = logging.getLogger("facelessforge.youtube")
 
@@ -47,7 +49,7 @@ def _redirect_uri(request: Request) -> str:
     # if behind proxy, use FRONTEND_URL or backend host
     return f"{base}{REDIRECT_PATH}"
 
-def _build_auth_url(request: Request) -> str:
+def _build_auth_url(request: Request, state: str = "") -> str:
     client_id = _env("YOUTUBE_CLIENT_ID")
     if not client_id:
         # Return placeholder that still satisfies acceptance (auth_url field) but warns
@@ -64,6 +66,7 @@ def _build_auth_url(request: Request) -> str:
         "access_type": "offline",
         "prompt": "consent",
         "include_granted_scopes": "true",
+        "state": state,
     }
     return "https://accounts.google.com/o/oauth2/auth?" + urlencode(params)
 
@@ -72,7 +75,16 @@ async def youtube_auth(request: Request, user=Depends(get_current_user)):
     """Return OAuth consent URL. Frontend opens this in new tab.
     If already connected (refresh token present), also return connected=true.
     """
-    url = _build_auth_url(request)
+    ensure_operator(user)
+    state = secrets.token_urlsafe(32)
+    db = get_db()
+    # Starting a new consent invalidates any earlier consent for this user:
+    # outstanding states are removed before the new one is stored. If cleanup
+    # fails we fail closed and do not issue a new state, so a cleanup error can
+    # never silently bypass invalidation.
+    await db.youtube_oauth_states.delete_many({"user_id": user["id"]})
+    await db.youtube_oauth_states.insert_one({"state": state, "user_id": user["id"], "expires_at": _now() + timedelta(minutes=10)})
+    url = _build_auth_url(request, state)
     connected = bool(_env("YOUTUBE_REFRESH_TOKEN"))
     # also check DB stored token
     try:
@@ -85,10 +97,17 @@ async def youtube_auth(request: Request, user=Depends(get_current_user)):
     return {"auth_url": url, "connected": connected, "redirect_uri": _redirect_uri(request)}
 
 @router.get("/callback")
-async def youtube_callback(request: Request, code: Optional[str] = None, error: Optional[str] = None):
+async def youtube_callback(request: Request, code: Optional[str] = None, error: Optional[str] = None, state: Optional[str] = None, user=Depends(get_current_user)):
     """OAuth callback — exchanges code for tokens, stores refresh_token.
     Called by Google redirect. Stores in DB and returns HTML/JSON.
     """
+    ensure_operator(user)
+    if not state:
+        raise HTTPException(status_code=400, detail="Missing OAuth state")
+    db = get_db()
+    pending = await db.youtube_oauth_states.find_one_and_delete({"state": state, "user_id": user["id"], "expires_at": {"$gt": _now()}})
+    if not pending:
+        raise HTTPException(status_code=400, detail="Invalid or expired OAuth state")
     if error:
         raise HTTPException(status_code=400, detail=f"OAuth error: {error}")
     if not code:
@@ -133,7 +152,7 @@ async def youtube_callback(request: Request, code: Optional[str] = None, error: 
         logger.warning("Failed to store youtube token %s", e)
     # Also helpful to log that refresh_token must be added to .env for persistence across restarts
     if refresh_token:
-        logger.info("YOUTUBE_REFRESH_TOKEN obtained — add to .env: %s...", refresh_token[:20])
+        logger.info("YouTube refresh token stored")
     # Return simple page — DO NOT print token at all (fix leak: was showing 1//...***)
     from fastapi.responses import HTMLResponse
     import logging as _lg2
@@ -223,6 +242,7 @@ def _get_youtube_credentials():
 
 @router.post("/upload")
 async def youtube_upload(body: YoutubeUploadRequest, user=Depends(get_current_user)):
+    ensure_operator(user)
     db = get_db()
     project = await db.projects.find_one({"id": body.project_id}, {"_id": 0})
     if not project:

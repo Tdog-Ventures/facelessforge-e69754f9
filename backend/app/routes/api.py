@@ -22,6 +22,7 @@ from ..auth import (
     set_auth_cookies, clear_auth_cookies, get_current_user, require_roles,
 )
 from ..db import get_db
+from ..publishing_access import ensure_operator
 from pydantic import BaseModel, Field
 
 from ..models import (
@@ -3209,6 +3210,7 @@ async def auto_generate_project(request: Request, user=Depends(get_current_user)
     Spec: FacelessForge Auto Button https://facelessforge.ethinx.solutions/api/projects/auto-generate
     Idempotent, thread-capped, BullMQ+Redis style via semaphore, pins versions, health /api/health.
     """
+    ensure_operator(user)
     from app.workers.forge_loop import run_forge_once
     try:
         body = {}
@@ -3222,6 +3224,7 @@ async def auto_generate_project(request: Request, user=Depends(get_current_user)
         raise HTTPException(status_code=500, detail=str(e)[:800])
 @router.post("/auto-generate")
 async def auto_generate_alias(request: Request, user=Depends(get_current_user)):
+    ensure_operator(user)
     from app.workers.forge_loop import run_forge_once
     try:
         result = await run_forge_once(user_id=user["id"])

@@ -117,7 +117,7 @@ async def test_youtube_upload_without_render_never_mints_mock_success(monkeypatc
     with pytest.raises(HTTPException) as exc:
         await youtube.youtube_upload(
             youtube.YoutubeUploadRequest(project_id="project-1"),
-            user={"id": "user-1", "role": "creator"},
+            user={"id": "user-1", "role": "admin"},
         )
 
     assert exc.value.status_code == 409
