@@ -16,12 +16,15 @@ from app.auth import get_current_user
 from app.models import ProjectUpdate, ForgotPasswordRequest
 from app.routes import api
 
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+
 
 def test_tts_unclosed_brackets_complete_in_bounded_time():
     # The old lazy wildcard retries from every '[' on an unmatched input.
+    environment = {**os.environ, 'PYTHONPATH': str(BACKEND_ROOT)}
     subprocess.run([sys.executable, '-c',
                     "from app.tts import sanitize_for_tts; s='['*100000; assert sanitize_for_tts(s)==s"],
-                   check=True, timeout=5, capture_output=True)
+                   check=True, timeout=5, capture_output=True, env=environment)
 
 
 def test_tts_preserves_spoken_words_and_removes_directions():
@@ -72,6 +75,23 @@ async def test_youtube_provider_exception_never_leaks_secret(monkeypatch, caplog
     assert reached
     assert 'DO_NOT_DISCLOSE' not in str(error.value)
     assert 'DO_NOT_DISCLOSE' not in caplog.text
+
+
+def test_external_upload_provider_error_is_not_echoed():
+    # The registry upload path raised the raw provider exception back to the
+    # caller and into logs; it must now disclose only a generic failure.
+    source = Path(__file__).parents[1] / 'app' / 'external_api.py'
+    tree = ast.parse(source.read_text(encoding='utf-8'))
+    offenders = [node.lineno for node in ast.walk(tree)
+                 if isinstance(node, ast.JoinedStr)
+                 and any(isinstance(v, ast.FormattedValue) for v in node.values)
+                 and 'mock IDs forbidden' in ''.join(c for c in [_const_text(v) for v in node.values] if isinstance(c, str))]
+    assert not offenders, f'external_api.py re-exposes provider error at lines {offenders}'
+    assert 'type(_e).__name__' in source.read_text(encoding='utf-8')
+
+
+def _const_text(node):
+    return node.value if isinstance(node, ast.Constant) else None
 
 
 @pytest.mark.parametrize('role,expected', [(None, 401), ('creator', 403), ('admin', 200)])
