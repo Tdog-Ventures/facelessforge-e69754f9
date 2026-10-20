@@ -54,10 +54,8 @@ async def scrape_website(url: str, timeout: float = 12.0) -> dict:
     """Fetch URL and extract website text, products, brand tone, auto-mapped keywords."""
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0 (FacelessForge Scraper)"}) as client:
-        r = await client.get(url)
-        r.raise_for_status()
-        html = r.text
+    from .public_http import public_text
+    html = await public_text(url, timeout=timeout)
     soup = BeautifulSoup(html, "lxml")
     title = soup.title.string.strip() if soup.title and soup.title.string else ""
     meta_desc = ""

@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import html
 import io
 import logging
 import os
@@ -108,6 +109,8 @@ def _mock_svg(seed: str, project: dict, brief: dict) -> bytes:
     bg, accent, secondary = _MOCK_PALETTES[int(hashlib.sha1(seed.encode()).hexdigest()[:8], 16) % len(_MOCK_PALETTES)]
     title = (brief.get("thumbnail_title_text") or project.get("niche") or "Forge").upper()[:28]
     topic = (project.get("topic") or "")[:70]
+    title = html.escape(title)
+    topic = html.escape(topic)
     # Radial-ish composition using SVG
     svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">
   <defs>
