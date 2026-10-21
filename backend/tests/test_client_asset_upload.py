@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+from pathlib import Path
 
 import pytest
 from fastapi import UploadFile
@@ -261,3 +262,68 @@ def test_client_visuals_are_preferred_over_stock_for_rendering():
         {"id": "brand", "asset_type": "brand_logo"},
     ])
     assert [a["id"] for a in ordered] == ["client", "stock", "brand"]
+
+
+@pytest.mark.asyncio
+async def test_oversized_body_rejected_before_read(monkeypatch, fake_media):
+    # Regression for the #18 review: the whole body used to be read into
+    # memory before the size check, so an oversized upload spiked RAM.
+    db = FakeDB(_project())
+    monkeypatch.setattr(api_routes, "get_db", lambda: db)
+    oversized = UploadFile(
+        filename="clip.mp4", file=io.BytesIO(b"x"),
+        size=api_routes.CLIENT_VIDEO_MAX_BYTES + 1,
+    )
+
+    with pytest.raises(Exception) as exc:
+        await api_routes.upload_client_asset(
+            "p1", file=oversized, scene_id="s1",
+            asset_type="client_video", user=_user(),
+        )
+
+    assert getattr(exc.value, "status_code", None) == 413
+    assert fake_media.calls == [], "oversized body must never reach the storage layer"
+
+
+@pytest.mark.asyncio
+async def test_bare_read_limit_still_enforced(monkeypatch, fake_media):
+    # Servers that do not populate UploadFile.size must still hit the
+    # post-read guard (image limit is 15 MB, so this stays cheap).
+    db = FakeDB(_project(), scenes=[_scene()])
+    monkeypatch.setattr(api_routes, "get_db", lambda: db)
+    oversized = UploadFile(
+        filename="shop.png", file=io.BytesIO(b"z" * (api_routes.CLIENT_IMAGE_MAX_BYTES + 1)),
+        size=None,
+    )
+
+    with pytest.raises(Exception) as exc:
+        await api_routes.upload_client_asset(
+            "p1", file=oversized, scene_id="s1",
+            asset_type="client_image", user=_user(),
+        )
+
+    assert getattr(exc.value, "status_code", None) == 413
+    assert fake_media.calls == []
+
+
+def test_audio_probe_failure_degrades_to_422(monkeypatch):
+    # Regression for the #18 review: a broken ffprobe raised bare RuntimeError
+    # out of _inspect_client_audio and surfaced as a 500.
+    def boom(_path):
+        raise RuntimeError("ffprobe missing")
+
+    monkeypatch.setattr(api_routes.audio_mix_service, "probe_audio", boom)
+
+    with pytest.raises(Exception) as exc:
+        api_routes._inspect_client_audio(Path("/tmp/whatever.mp3"))
+
+    assert getattr(exc.value, "status_code", None) == 422
+
+
+def test_audio_probe_none_report_is_guarded(monkeypatch):
+    monkeypatch.setattr(api_routes.audio_mix_service, "probe_audio", lambda _p: None)
+
+    with pytest.raises(Exception) as exc:
+        api_routes._inspect_client_audio(Path("/tmp/whatever.mp3"))
+
+    assert getattr(exc.value, "status_code", None) == 422
