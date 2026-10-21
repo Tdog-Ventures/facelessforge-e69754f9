@@ -327,3 +327,57 @@ def test_audio_probe_none_report_is_guarded(monkeypatch):
         api_routes._inspect_client_audio(Path("/tmp/whatever.mp3"))
 
     assert getattr(exc.value, "status_code", None) == 422
+
+
+@pytest.mark.asyncio
+async def test_before_after_image_uses_image_budget_not_video_budget(monkeypatch, fake_media):
+    # Regression for review finding: before_after uploads matched the
+    # client_video branch of the limit table, so a 16 MB image slipped past
+    # the pre-check even though images must stay under 15 MB.
+    db = FakeDB(_project(), scenes=[_scene()])
+    monkeypatch.setattr(api_routes, "get_db", lambda: db)
+    between_limits = UploadFile(
+        filename="half.png",
+        file=io.BytesIO(b"z" * (api_routes.CLIENT_IMAGE_MAX_BYTES + 1)),
+        size=api_routes.CLIENT_IMAGE_MAX_BYTES + 1,  # still far under the 60 MB video limit
+    )
+
+    with pytest.raises(Exception) as exc:
+        await api_routes.upload_client_asset(
+            "p1", file=between_limits, scene_id="s1",
+            asset_type="before_after", user=_user(),
+        )
+
+    assert getattr(exc.value, "status_code", None) == 413
+    assert fake_media.calls == []
+    assert db.assets.docs == []
+
+
+@pytest.mark.asyncio
+async def test_staged_temp_copy_is_removed_when_storage_save_fails(monkeypatch, fake_media):
+    # Regression for review finding: _stage_upload_copy leaked the staged
+    # copy (up to 60 MB) into $TMPDIR whenever save_file raised.
+    import tempfile
+
+    store = fake_media
+
+    def boom(path, key, content_type):
+        raise RuntimeError("storage outage")
+
+    store.save_file = boom
+
+    db = FakeDB(_project(), scenes=[_scene()])
+    monkeypatch.setattr(api_routes, "get_db", lambda: db)
+
+    tmpdir = Path(tempfile.gettempdir())
+    before = set(p.name for p in tmpdir.glob("client-asset-*"))
+
+    with pytest.raises(Exception) as exc:
+        await api_routes.upload_client_asset(
+            "p1", file=_upload("shop.png"), scene_id="s1",
+            asset_type="client_image", user=_user(),
+        )
+
+    assert "storage outage" in str(exc.value)
+    after = set(p.name for p in tmpdir.glob("client-asset-*"))
+    assert after == before, f"orphaned staged files: {after - before}"

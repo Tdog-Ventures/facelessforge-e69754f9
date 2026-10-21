@@ -634,6 +634,11 @@ def _split_script_exact(full_script: str, scene_count: int) -> list[str]:
     Scene planning is semantic only: the model may choose visuals and search
     terms, but it must never rewrite the voiceover.  Concatenating the returned
     chunks with single spaces reproduces the whitespace-normalised script.
+
+    Exception: the words-splitting path (short scripts with fewer sentences
+    than scenes) starves once the words run out — later scenes receive empty
+    strings rather than losing or duplicating a word, so the join equality
+    then only holds word-for-word ("both sides split() equal").
     """
     count = max(1, int(scene_count))
     text = " ".join(str(full_script or "").split())

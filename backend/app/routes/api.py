@@ -603,22 +603,27 @@ async def update_project(project_id: str, body: ProjectUpdate, user=Depends(get_
     if "target_duration" in patch and not (5 <= int(patch["target_duration"]) <= 3600):
         raise HTTPException(status_code=422, detail="Target duration must be 5..3600s")
     commercial_fields = {"production_mode", "client_name", "structured_brief", "verified_cta"}
-    if "production_mode" in patch and patch["production_mode"] != project.get("production_mode"):
+    mode_switching = "production_mode" in patch and patch["production_mode"] != project.get("production_mode")
+
+    from .. import render as render_service
+
+    def _mode_lock_conflict() -> HTTPException:
+        return HTTPException(
+            status_code=409,
+            detail=(
+                "Cannot change production_mode while a render is active; "
+                "wait for the render to finish or cancel it first."
+            ),
+        )
+
+    if mode_switching:
         # The render worker snapshots production_mode when the job starts and
         # gates release/auto-post with it; re-reading the (patched) project
         # only refreshes surrounding fields. A mid-render mode switch could
         # therefore ungated auto-post an editorial render or record commercial
         # post-QA metadata the new mode never validated. Block until idle.
-        from .. import render as render_service
-
         if await render_service.is_render_active(project_id):
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "Cannot change production_mode while a render is active; "
-                    "wait for the render to finish or cancel it first."
-                ),
-            )
+            raise _mode_lock_conflict()
     if commercial_fields.intersection(patch):
         merged = {**project, **patch}
         # Creation parity: an editorial project must not carry commercial
@@ -638,6 +643,12 @@ async def update_project(project_id: str, body: ProjectUpdate, user=Depends(get_
                 detail="Commercial project requires: " + ", ".join(errors),
             )
     if patch:
+        if mode_switching:
+            # TOCTOU: a render can be queued between the first check and this
+            # write. Re-assert immediately before committing so the worker's
+            # start snapshot cannot lag a mode flip by an await.
+            if await render_service.is_render_active(project_id):
+                raise _mode_lock_conflict()
         patch["updated_at"] = _now()
         await db.projects.update_one({"id": project_id}, {"$set": patch})
     return await _attach_project_view(db, await db.projects.find_one({"id": project_id}, {"_id": 0}))
@@ -1150,6 +1161,9 @@ async def upload_client_asset(
         else CLIENT_VIDEO_MAX_BYTES if kind in {"client_video", "before_after"}
         else CLIENT_AUDIO_MAX_BYTES
     )
+    if kind == "before_after" and ext in CLIENT_IMAGE_EXTS:
+        # The half is validated as an image below; hold it to the image budget.
+        limit = CLIENT_IMAGE_MAX_BYTES
     # Reject oversized uploads before reading the body into memory.
     if file.size is not None and file.size > limit:
         raise HTTPException(status_code=413, detail=f"File exceeds {limit // (1024 * 1024)} MB")
@@ -1210,7 +1224,17 @@ async def upload_client_asset(
     asset_id = str(uuid.uuid4())
     key = f"assets/{project_id}/{asset_id}{ext}"
     mime = mimetypes.guess_type(file.filename or "")[0] or file.content_type or "application/octet-stream"
-    saved = _gs().save_file(_stage_upload_copy(raw, key, ext, prefix="client-asset"), key, mime)
+    staged = _stage_upload_copy(raw, key, ext, prefix="client-asset")
+    try:
+        saved = _gs().save_file(staged, key, mime)
+    except Exception:
+        # A storage outage must not orphan the staged copy (up to 60 MB
+        # would otherwise leak into $TMPDIR).
+        try:
+            staged.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
+        raise
 
     is_full_voice = kind == "voiceover_audio" and not scene_id
     order = None
@@ -1717,6 +1741,7 @@ async def auto_attach_assets(project_id: str, body: AutoAttachRequest, user=Depe
                 existing_count = 0
             else:
                 start_order = existing_count
+            scene_attached = 0
             for i, asset in enumerate(unique):
                 order = start_order + i
                 start_offset = order * 3  # 0,3,6,9...
@@ -1750,15 +1775,22 @@ async def auto_attach_assets(project_id: str, body: AutoAttachRequest, user=Depe
                 try:
                     await db.assets.insert_one(doc)
                     attached += 1
+                    scene_attached += 1
                     project_visual_titles.append(doc["name"])
                     details.append({"scene_id": scene_id, "scene_number": scene.get("scene_number"), "status": "attached", "asset_id": doc["id"], "order": order, "start_offset": start_offset})
                 except Exception:
                     skipped += 1
-                    details.append({"scene_id": scene_id, "scene_number": scene.get("scene_number"), "status": "skipped", "reason": "duplicate"})
-            # Deduct credits for this scene's attached assets
-            if unique:
-                await db.subscriptions.update_one({"user_id": user["id"]}, {"$inc": {"credits_remaining": -len(unique)}, "$set": {"updated_at": _now()}})
-                for _ in range(len(unique)):
+                    # Concurrent writers can breach the (project, scene,
+                    # external_id, source) unique index — an insert failure is
+                    # not a dedupe-near miss, so label it correctly.
+                    details.append({"scene_id": scene_id, "scene_number": scene.get("scene_number"), "status": "skipped", "reason": "insert_failed"})
+            # Deduct credits for this scene's actually attached assets — not
+            # the search result count: inserts can fail after the replacement
+            # originals were already deleted, and billing then must not
+            # charge for assets that never landed.
+            if scene_attached:
+                await db.subscriptions.update_one({"user_id": user["id"]}, {"$inc": {"credits_remaining": -scene_attached}, "$set": {"updated_at": _now()}})
+                for _ in range(scene_attached):
                     await db.credit_transactions.insert_one({
                         "id": str(uuid.uuid4()),
                         "user_id": user["id"],
@@ -1768,9 +1800,9 @@ async def auto_attach_assets(project_id: str, body: AutoAttachRequest, user=Depe
                     })
                 # also mirror to ff_credits for backward compat
                 try:
-                    await db.ff_credits.update_one({"tenant_id": user["id"]}, {"$inc": {"credits": -len(unique)}})
+                    await db.ff_credits.update_one({"tenant_id": user["id"]}, {"$inc": {"credits": -scene_attached}})
                 except: pass
-            logger.info("auto-attach scene %s duration=%s num_needed=%s remaining=%s query='%s' -> %d unique attached %d", scene.get("scene_number"), duration, num_needed, remaining, query[:60], len(unique), attached)
+            logger.info("auto-attach scene %s duration=%s num_needed=%s remaining=%s query='%s' -> %d unique attached %d", scene.get("scene_number"), duration, num_needed, remaining, query[:60], len(unique), scene_attached)
         except Exception as e:
             failed += 1
             details.append({"scene_id": scene_id, "scene_number": scene.get("scene_number"), "status": "failed", "reason": str(e)[:120]})

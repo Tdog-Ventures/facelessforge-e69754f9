@@ -45,6 +45,7 @@ class FakeAssets:
     def __init__(self, docs=None):
         self.docs = [dict(d) for d in (docs or [])]
         self.delete_calls = []
+        self.fail_insert_after_first = False
 
     def find(self, query=None, projection=None):
         return FakeCursor([d for d in self.docs if _match(d, query or {})])
@@ -54,6 +55,10 @@ class FakeAssets:
         return sum(1 for d in self.docs if _match(d, query))
 
     async def insert_one(self, doc):
+        if self.fail_insert_after_first and self.docs:
+            # Simulates the compound unique index rejecting the insert after
+            # the originals were already deleted.
+            raise RuntimeError("simulated E11000 duplicate insert")
         self.docs.append(dict(doc))
 
     async def delete_many(self, query):
@@ -66,6 +71,7 @@ class FakeAssets:
 class FakeCollection:
     def __init__(self, docs=None):
         self.docs = [dict(d) for d in (docs or [])]
+        self.inc_totals = {}
 
     def find(self, query=None, projection=None):
         return FakeCursor([d for d in self.docs if _match(d, query or {})])
@@ -79,12 +85,19 @@ class FakeCollection:
     async def insert_one(self, doc):
         self.docs.append(dict(doc))
 
-    async def update_one(self, _query, update, upsert=False):
+    async def update_one(self, query, update, upsert=False):
+        matched = 0
         for doc in self.docs:
-            if not update.get("$set"):
-                break
-            doc.update(update.get("$set", {}))
-        return SimpleNamespace(modified_count=len(self.docs))
+            if not _match(doc, query or {}):
+                continue
+            matched += 1
+            if update.get("$set"):
+                doc.update(update.get("$set", {}))
+            for key, delta in (update.get("$inc") or {}).items():
+                doc[key] = doc.get(key, 0) + delta
+        for key, delta in (update.get("$inc") or {}).items():
+            self.inc_totals[key] = self.inc_totals.get(key, 0) + delta
+        return SimpleNamespace(modified_count=matched)
 
     async def count_documents(self, query):
         return sum(1 for d in self.docs if _match(d, query))
@@ -178,6 +191,32 @@ def test_auto_attach_filters_near_duplicates_and_attaches(monkeypatch):
     assert "Video editing software timeline" in titles_seen
     attached_names = [d["asset_id"] for d in response["details"] if d.get("asset_id")]
     assert len(attached_names) == 4
+
+
+def test_credits_charge_only_successfully_inserted_assets(monkeypatch):
+    # Regression for the independent-review MAJOR: credits were charged
+    # len(unique) — the search result count — even when inserts failed after
+    # the scene's originals had already been deleted. Billing must mirror
+    # what actually landed in the scene.
+    _patch_stock(monkeypatch, DISTINCT_TITLES[:2])
+    db = FakeDB(_project(), [_scene()])
+    db.assets.fail_insert_after_first = True
+    monkeypatch.setattr(api_routes, "get_db", lambda: db)
+
+    response = asyncio.run(api_routes.auto_attach_assets(
+        "p1", AutoAttachRequest(replace_existing=True), _user(),
+    ))
+
+    assert response["attached"] == 1, response
+    assert response["skipped"] == 1, response
+    assert response["failed"] == 0
+    reasons = [d.get("reason") for d in response["details"]]
+    assert "insert_failed" in reasons, reasons
+    assert "duplicate" not in reasons, reasons
+    # Deduction mirrors reality: only the asset that actually landed.
+    assert db.subscriptions.inc_totals == {"credits_remaining": -1}, db.subscriptions.inc_totals
+    assert db.ff_credits.inc_totals == {"credits": -1}, db.ff_credits.inc_totals
+    assert len(db.credit_transactions.docs) == 1
 
 
 def test_replace_defers_deletion_until_replacement_confirmed(monkeypatch):

@@ -256,6 +256,35 @@ def test_update_mode_change_blocked_while_render_active(monkeypatch):
     assert updated["auto_post"] is True
 
 
+def test_update_mode_switch_recheck_closes_toctou_window(monkeypatch):
+    # Regression for the independent-review finding: the P8 guard ran once,
+    # far ahead of unrelated awaits; a render queued in that window could
+    # still reach the $set. The guard now re-asserts immediately before
+    # committing, so the worker's start snapshot cannot lag the mode flip.
+    from backend.app import render as render_service
+
+    calls = {"n": 0}
+
+    async def fake_is_active(_project_id):
+        calls["n"] += 1
+        return calls["n"] >= 2  # render queues between check and write
+
+    monkeypatch.setattr(render_service, "is_render_active", fake_is_active)
+    _stub_attach(monkeypatch)
+    db = _DB(_commercial_project())
+    monkeypatch.setattr(api_routes, "get_db", lambda: db)
+    user = {"id": "u1", "role": "user"}
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(api_routes.update_project(
+            "p1", ProjectUpdate(production_mode="editorial"), user,
+        ))
+
+    assert exc.value.status_code == 409
+    assert calls["n"] == 2, calls
+    assert db.projects.last_update is None
+
+
 def test_update_mode_change_allowed_when_no_render_active(monkeypatch):
     _patch_active_render(monkeypatch, None)
     _stub_attach(monkeypatch)
