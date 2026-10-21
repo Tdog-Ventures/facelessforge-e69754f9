@@ -44,6 +44,7 @@ from ..storage import resolve_delivery_url
 from .. import generation as gen
 from .. import stock as stock_service
 from .. import thumbnail_images as thumb_images
+from ..asset_dedupe import filter_distinct_titles
 
 
 router = APIRouter(prefix="/api")
@@ -1077,8 +1078,16 @@ async def _inspect_client_video(path: Path) -> tuple[int, int, float]:
 
 def _inspect_client_audio(path: Path) -> float:
     """Validate audio bytes and return duration in seconds."""
-    info = audio_mix_service.probe_audio(path)
-    duration = float((info or {}).get("duration") or 0)
+    # probe_audio shells out to ffprobe; a missing/broken binary must degrade
+    # to the same 422 the video path raises instead of a bare 500.
+    try:
+        info = audio_mix_service.probe_audio(path)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail="File is not decodable audio") from exc
+    info = info or {}
+    duration = float(info.get("duration") or 0)
     if not info.get("sample_rate") or duration <= 0:
         raise HTTPException(status_code=422, detail="File is not decodable audio")
     return duration
@@ -1136,14 +1145,17 @@ async def upload_client_asset(
 
     ext = (Path(file.filename or "").suffix or "").lower()
     kind = _client_upload_kind(asset_type, ext, file.content_type or "")
-    raw = await file.read()
-    if not raw:
-        raise HTTPException(status_code=422, detail="Uploaded file is empty")
     limit = (
         CLIENT_IMAGE_MAX_BYTES if kind in {"client_image", "brand_image", "brand_logo"}
         else CLIENT_VIDEO_MAX_BYTES if kind in {"client_video", "before_after"}
         else CLIENT_AUDIO_MAX_BYTES
     )
+    # Reject oversized uploads before reading the body into memory.
+    if file.size is not None and file.size > limit:
+        raise HTTPException(status_code=413, detail=f"File exceeds {limit // (1024 * 1024)} MB")
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=422, detail="Uploaded file is empty")
     if len(raw) > limit:
         raise HTTPException(status_code=413, detail=f"File exceeds {limit // (1024 * 1024)} MB")
 
@@ -1627,13 +1639,10 @@ async def auto_attach_assets(project_id: str, body: AutoAttachRequest, user=Depe
                 continue
             remaining = num_needed - existing_count
         else:
-            if body.replace_existing and existing_count > 0:
-                await db.assets.delete_many({
-                    "project_id": project_id,
-                    "scene_id": scene_id,
-                    "asset_type": {"$in": ["stock_video", "stock_image"]},
-                })
-                existing_count = 0
+            # Replacement deletion is deferred to the moment the scene's
+            # replacement set is confirmed non-empty (after search + filters),
+            # so a futile search or a dedup collapse leaves the scene's
+            # current visuals in place rather than wiping them.
             remaining = num_needed
 
         # Build query from search_terms[0] as spec, truncated to 60 (stock.py will also truncate to 4 words)
@@ -1653,8 +1662,11 @@ async def auto_attach_assets(project_id: str, body: AutoAttachRequest, user=Depe
             query = q_raw.strip()
             if not query:
                 query = "ancient Rome"
-            # Gather existing ids to exclude (dedup)
-            existing_assets = await db.assets.find({"project_id": project_id, "scene_id": scene_id, "asset_type": {"$in": ["stock_video", "stock_image"]}}, {"_id": 0, "external_id": 1, "preview_url": 1}).to_list(100)
+            # Gather existing ids to exclude (dedup). In replacement mode the
+            # originals are deleted once the fresh set is confirmed, so they
+            # must not block the replacement (matches the pre-refactor order
+            # where deletion preceded this read).
+            existing_assets = [] if body.replace_existing else await db.assets.find({"project_id": project_id, "scene_id": scene_id, "asset_type": {"$in": ["stock_video", "stock_image"]}}, {"_id": 0, "external_id": 1, "preview_url": 1}).to_list(100)
             existing_ids = set()
             for ea in existing_assets:
                 if ea.get("external_id"):
@@ -1693,7 +1705,18 @@ async def auto_attach_assets(project_id: str, body: AutoAttachRequest, user=Depe
                 failed += 1
                 details.append({"scene_id": scene_id, "scene_number": scene.get("scene_number"), "status": "failed", "reason": "no_stock_results"})
                 continue
-            start_order = existing_count
+            if body.replace_existing:
+                # Remove the scene's originals only now: the replacement set
+                # is non-empty, so the scene never ends up visually empty.
+                await db.assets.delete_many({
+                    "project_id": project_id,
+                    "scene_id": scene_id,
+                    "asset_type": {"$in": ["stock_video", "stock_image"]},
+                })
+                start_order = 0
+                existing_count = 0
+            else:
+                start_order = existing_count
             for i, asset in enumerate(unique):
                 order = start_order + i
                 start_offset = order * 3  # 0,3,6,9...
