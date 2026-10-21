@@ -1773,7 +1773,8 @@ async def generate_full_voiceover(
         # (never truncated to fit). attempts_used counts this correction.
         factor = narration_budget / measured
         current_words = len(current_text.split())
-        corrected_target = max(30.0, min(3600.0, round((current_words * factor) / 2.5 + 2.5)))
+        intro_seconds = 0.0 if project.get("production_mode") == "commercial_ad" else 2.5
+        corrected_target = max(5.0, min(3600.0, round((current_words * factor) / 2.5 + intro_seconds)))
         actions.append(
             f"attempt {attempts_used}: measured {measured:.2f}s vs {narration_budget:.2f}s budget — "
             f"regenerating AI script at {corrected_target:.0f}s budget"

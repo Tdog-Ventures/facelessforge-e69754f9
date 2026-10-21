@@ -62,7 +62,7 @@ class ExternalRenderRequest(BaseModel):
     niche: Optional[str] = Field(default=None, max_length=120)
     audience: Optional[str] = Field(default=None, max_length=200)
     tone: Optional[str] = Field(default=None, max_length=80)
-    target_duration: Optional[int] = Field(default=None, ge=15, le=3600)
+    target_duration: Optional[int] = Field(default=None, ge=5, le=3600)
     auto_upload: bool = False
 
     @field_validator("source")
@@ -273,10 +273,10 @@ async def external_render_video(
             (float(s.end_time or ((s.start_time or 0) + (s.duration or 6))) for s in body.scene_breakdown),
             default=180.0,
         )
-        target_duration = int(max(30, min(3600, round(last_end))))
+        target_duration = int(max(5, min(3600, round(last_end))))
     else:
         words = max(50, len(body.script.split()))
-        target_duration = int(max(30, min(3600, round(words / 2.5))))
+        target_duration = int(max(5, min(3600, round(words / 2.5))))
 
     project_id = str(uuid.uuid4())
     voice_style_label = body.voiceover_notes or "neutral male narrator"

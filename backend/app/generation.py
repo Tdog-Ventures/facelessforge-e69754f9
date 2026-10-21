@@ -138,7 +138,7 @@ Respond with strict JSON in this exact shape:
   "cta_block": "call to action"
 }}
 
-CRITICAL: full_script must be ONE continuous string of ~{target_words} words (for 300s you MUST write 700-800 words, not 400), not a list or object. Count words before responding. Minimum 700 words for 300s."""
+CRITICAL: full_script must be ONE continuous string of ~{target_words} words, not a list or object. Count words before responding."""
 
 
 def _llm_available() -> bool:
@@ -415,7 +415,7 @@ async def generate_script(project: dict) -> dict:
     target_dur = int(project.get("target_duration", 300))
     timing = TimingContract.from_project(project)
     narration_dur = timing.narration_seconds
-    target_words = max(20, target_word_count(narration_dur))
+    target_words = max(5, target_word_count(narration_dur))
 
     if _is_edu:
         logger.info(f"EDUCATIONAL topic detected: {project.get('topic')} -> using educational_script.txt (Ollama primary)")
@@ -451,7 +451,7 @@ Niche: {project.get('niche', 'business')}
 Target duration: {target_dur}s (~{target_words} words)
 Tone: {project.get('tone', 'documentary')}
 
-CRITICAL: full_script must be ONE continuous string of ~{target_words} words (for 300s you MUST write 700-800 words, not 400), not a list or object. Count words before responding. Minimum 700 words for 300s.
+CRITICAL: full_script must be ONE continuous string of ~{target_words} words, not a list or object. Count words before responding.
 Write specifically about the Topic above. Do NOT fall back to a generic entrepreneur/startup origin story (instant noodles, sleeping in the office, investors saying no, first 100 customers) unless the Topic explicitly asks for one.
 Do not include BEAT markers, section headers, or structural labels (such as "BEAT 1", "INTRO:", "HOOK:", "CTA:", "SCENE 1:", etc.) in the output. All text must read as continuous voiceover."""
 
