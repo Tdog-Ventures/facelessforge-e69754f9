@@ -38,6 +38,7 @@ except Exception:
     check_credits = None  # fallback if billing not yet patched
 from ..scoring import quality_score, quality_label, compute_project_status, scenes_to_csv
 from ..timing import build_timing_status
+from ..grounding import commercial_project_errors
 from ..storage import resolve_delivery_url
 from .. import generation as gen
 from .. import stock as stock_service
@@ -456,12 +457,32 @@ async def create_project(body: ProjectCreate, user=Depends(get_current_user)):
         "cta_goal": body.cta_goal or "subscribe",
         "auto_post": body.auto_post if body.auto_post is not None else False,
         "platforms": body.platforms or [],
+        "production_mode": body.production_mode,
+        "client_name": body.client_name,
+        "structured_brief": body.structured_brief.model_dump() if body.structured_brief else None,
+        "verified_cta": body.verified_cta.model_dump() if body.verified_cta else None,
+        "brand_assets_supplied": bool(body.brand_assets_supplied),
+        "aspect_ratio": body.aspect_ratio or "9:16",
+        "resolution": body.resolution or "1080x1920",
         "status": "DRAFT",
         "quality_score": 0,
         "estimated_cost": 0.0,
         "created_at": _now(),
         "updated_at": _now(),
     }
+    if body.production_mode == "editorial":
+        proj.update({
+            "client_name": None,
+            "structured_brief": None,
+            "verified_cta": None,
+            "brand_assets_supplied": False,
+        })
+    errors = commercial_project_errors(proj)
+    if errors:
+        raise HTTPException(
+            status_code=422,
+            detail="Commercial project requires: " + ", ".join(errors),
+        )
     await db.projects.insert_one(proj)
     return _ser(proj)
 
@@ -577,8 +598,17 @@ async def update_project(project_id: str, body: ProjectUpdate, user=Depends(get_
     project = await db.projects.find_one({"id": project_id}, {"_id": 0})
     _ensure_project_access(project, user, write=True)
     patch = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
-    if "target_duration" in patch and not (30 <= int(patch["target_duration"]) <= 3600):
-        raise HTTPException(status_code=422, detail="Target duration must be 30..3600s")
+    if "target_duration" in patch and not (5 <= int(patch["target_duration"]) <= 3600):
+        raise HTTPException(status_code=422, detail="Target duration must be 5..3600s")
+    commercial_fields = {"production_mode", "client_name", "structured_brief", "verified_cta"}
+    if commercial_fields.intersection(patch):
+        merged = {**project, **patch}
+        errors = commercial_project_errors(merged)
+        if errors:
+            raise HTTPException(
+                status_code=422,
+                detail="Commercial project requires: " + ", ".join(errors),
+            )
     if patch:
         patch["updated_at"] = _now()
         await db.projects.update_one({"id": project_id}, {"$set": patch})

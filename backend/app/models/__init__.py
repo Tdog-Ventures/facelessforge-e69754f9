@@ -63,9 +63,10 @@ class ProjectCreate(BaseModel):
     cta_goal: Optional[str] = "subscribe"
     auto_post: Optional[bool] = False
     platforms: Optional[List[str]] = []
-    # Product Hunt / client-delivery path. Existing archival YouTube projects
-    # remain readable, but a new production project is grounded by default.
-    production_mode: Literal["commercial_ad", "editorial"] = "commercial_ad"
+    # Commercial client ads must opt in; ordinary YouTube projects are
+    # editorial. Existing projects without this field already render as
+    # editorial, so the default preserves their timeline contract.
+    production_mode: Literal["commercial_ad", "editorial"] = "editorial"
     client_name: Optional[str] = Field(default=None, max_length=160)
     structured_brief: Optional[StructuredBrief] = None
     verified_cta: Optional[VerifiedCTA] = None
@@ -89,6 +90,7 @@ class ProjectUpdate(BaseModel):
     status: Optional[str] = None
     auto_post: Optional[bool] = None
     platforms: Optional[List[str]] = None
+    production_mode: Optional[Literal["commercial_ad", "editorial"]] = None
     client_name: Optional[str] = Field(default=None, max_length=160)
     structured_brief: Optional[StructuredBrief] = None
     verified_cta: Optional[VerifiedCTA] = None
