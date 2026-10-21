@@ -16,6 +16,9 @@ from app import render
 _real_run_render_safe = render._run_render_safe
 
 
+from backend.tests.fake_db import FakeCollection as ProjectCollection  # honours lease CAS filters
+
+
 class _Cursor:
     def __init__(self, docs):
         self._docs = docs
@@ -106,7 +109,8 @@ def _db(subs=(), ffs=(), jobs=(), ledger=()):
         ff_credits = FakeCollection(ffs)
         render_jobs = FakeCollection(jobs)
         credit_transactions = FakeCollection(ledger)
-        projects = FakeCollection()
+        # The render lease lives on the project record, so the fixture must hold one.
+        projects = ProjectCollection("projects", [{"id": "project-1", "user_id": "user-1", "production_mode": "editorial"}])
 
     return FakeDB()
 

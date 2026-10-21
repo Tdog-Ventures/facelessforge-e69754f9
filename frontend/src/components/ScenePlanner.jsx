@@ -309,9 +309,13 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
       { id: "auto-attach" },
     );
     try {
+      // One key per user action: a repeated or retried request with the same key
+      // replays its outcome and cannot replace or charge twice.
+      const idempotencyKey = `aa-${(globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`)}`;
       const { data } = await api.post(`/projects/${projectId}/auto-attach-assets`, {
         replace_existing: replaceExisting,
         media_type: "both",
+        idempotency_key: idempotencyKey,
       });
       const parts = [
         `${data.attached} attached`,

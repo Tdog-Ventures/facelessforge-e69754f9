@@ -4,6 +4,7 @@ Not part of the shipped codebase — verification helper for the
 fix/visuals-v2-force-video branch.
 """
 import json
+import uuid
 import sys
 import time
 
@@ -99,7 +100,8 @@ step("voiceover_select", c.post(f"/projects/{pid}/voiceover/{voices[0]['id']}/se
 
 # ---- stock attach (videos only — 'have=1' per scene; top-up must fill) ----
 res = step("auto_attach", c.post(f"/projects/{pid}/auto-attach-assets",
-                                 json={"media_type": "videos", "replace_existing": True}))
+                                 json={"media_type": "videos", "replace_existing": True,
+                                       "idempotency_key": f"e2e-{uuid.uuid4()}"}))
 print(f"auto_attach: attached={res.get('attached')} skipped={res.get('skipped')} "
       f"failed={res.get('failed')} mock={res.get('mock')}", flush=True)
 

@@ -225,6 +225,26 @@ def test_short_educational_budget_fallback_keeps_the_topic(monkeypatch):
     assert result["word_count"] <= 6 * 2  # short script, not a 30-word skeleton head
 
 
+def test_short_budget_never_returns_more_words_than_it_can_speak(monkeypatch):
+    # Regression for the Codex P2 on PR #19: a 7-9 word topic against a 5s editorial
+    # budget (~6 words) was returned whole. Finalization tolerates 50% overrun, so the
+    # voiceover overran the slot and failed render preflight.
+    async def _no_llm(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(generation, "_llm_json", _no_llm)
+    # Nine words: finalization's 50% tolerance lets it through untouched.
+    project = _project(topic="How much sleep do older senior dogs need nightly")
+    project["target_duration"] = 5
+    result = asyncio.run(generation.generate_script(project))
+
+    budget = result["word_budget"]
+    assert budget is not None and budget <= 12
+    spoken = result["full_script"].split()
+    assert len(spoken) <= budget, (len(spoken), budget, result["full_script"])
+    assert result["full_script"].lower().startswith("how much sleep do older senior")
+
+
 def test_longer_educational_budget_keeps_the_full_skeleton(monkeypatch):
     async def _no_llm(*_args, **_kwargs):
         return None

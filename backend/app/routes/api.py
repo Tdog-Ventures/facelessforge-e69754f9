@@ -45,6 +45,7 @@ from .. import generation as gen
 from .. import stock as stock_service
 from .. import thumbnail_images as thumb_images
 from ..asset_dedupe import filter_distinct_titles
+from .. import asset_commit, project_lease
 
 
 router = APIRouter(prefix="/api")
@@ -390,6 +391,7 @@ async def reset_password(body: ResetPasswordRequest):
 # ============================ PROJECTS ============================
 
 async def _attach_project_view(db, project: dict) -> dict:
+    project = project_lease.strip_lease_fields(project)
     script = await db.scripts.find_one({"project_id": project["id"]}, {"_id": 0})
     scenes = await db.scenes.find({"project_id": project["id"]}, {"_id": 0}).to_list(1000)
     metadata = await db.metadata_packages.find_one({"project_id": project["id"]}, {"_id": 0})
@@ -500,7 +502,7 @@ async def list_projects(user=Depends(get_current_user)):
         q = {"user_id": user["id"], "is_demo": {"$ne": True}, "is_template": {"$ne": True}}
     projs = await db.projects.find(q, {"_id": 0}).sort("created_at", -1).to_list(5000)
     # Attach derived score labels without recomputing too expensively:
-    result = [_ser(p) | {"quality_label": quality_label(int(p.get("quality_score", 0)))} for p in projs]
+    result = [_ser(project_lease.strip_lease_fields(p)) | {"quality_label": quality_label(int(p.get("quality_score", 0)))} for p in projs]
     # For admin, add flag so frontend can show badge
     if is_admin:
         for r in result:
@@ -537,7 +539,10 @@ async def _batch_render_impl(body: BatchRenderRequest, user: dict):
                 if not check.get("ok") and not body.force:
                     errors.append({"project_id": pid, "error": "preflight_failed", "details": check})
                     continue
-                job = await render_service.queue_render(pid, requested_by=user["id"])
+                job = await render_service.queue_render(
+                    pid, requested_by=user["id"],
+                    expected_inputs=project_lease.render_input_snapshot(project),
+                )
                 results.append({"project_id": pid, "job_id": job.get("id"), "status": job.get("status")})
             except Exception as e:
                 logger.exception("batch pid=%s error %s", pid, e)
@@ -596,6 +601,16 @@ async def get_project(project_id: str, user=Depends(get_current_user)):
 
 @router.patch("/projects/{project_id}")
 async def update_project(project_id: str, body: ProjectUpdate, user=Depends(get_current_user)):
+    """Partial project update.
+
+    Writes to render-input fields (production mode, commercial ground truth,
+    target duration) run under the project's render lease. The same lease
+    serializes render submission and render release, so validation, the
+    active-render check and the write are one atomic contract across workers.
+    The write itself is fenced on the lease holder and fence.
+    """
+    from .. import render as render_service
+
     db = get_db()
     project = await db.projects.find_one({"id": project_id}, {"_id": 0})
     _ensure_project_access(project, user, write=True)
@@ -603,9 +618,6 @@ async def update_project(project_id: str, body: ProjectUpdate, user=Depends(get_
     if "target_duration" in patch and not (5 <= int(patch["target_duration"]) <= 3600):
         raise HTTPException(status_code=422, detail="Target duration must be 5..3600s")
     commercial_fields = {"production_mode", "client_name", "structured_brief", "verified_cta"}
-    mode_switching = "production_mode" in patch and patch["production_mode"] != project.get("production_mode")
-
-    from .. import render as render_service
 
     def _mode_lock_conflict() -> HTTPException:
         return HTTPException(
@@ -616,41 +628,64 @@ async def update_project(project_id: str, body: ProjectUpdate, user=Depends(get_
             ),
         )
 
-    if mode_switching:
-        # The render worker snapshots production_mode when the job starts and
-        # gates release/auto-post with it; re-reading the (patched) project
-        # only refreshes surrounding fields. A mid-render mode switch could
-        # therefore ungated auto-post an editorial render or record commercial
-        # post-QA metadata the new mode never validated. Block until idle.
-        if await render_service.is_render_active(project_id):
-            raise _mode_lock_conflict()
-    if commercial_fields.intersection(patch):
-        merged = {**project, **patch}
-        # Creation parity: an editorial project must not carry commercial
-        # ground truth, so a later commercial switch validates against fresh
-        # client data instead of inheriting stale values.
-        if merged.get("production_mode") == "editorial":
-            patch.update({
-                "client_name": None,
-                "structured_brief": None,
-                "verified_cta": None,
-                "brand_assets_supplied": False,
-            })
-        errors = commercial_project_errors({**project, **patch})
-        if errors:
-            raise HTTPException(
-                status_code=422,
-                detail="Commercial project requires: " + ", ".join(errors),
-            )
-    if patch:
-        if mode_switching:
-            # TOCTOU: a render can be queued between the first check and this
-            # write. Re-assert immediately before committing so the worker's
-            # start snapshot cannot lag a mode flip by an await.
-            if await render_service.is_render_active(project_id):
-                raise _mode_lock_conflict()
+    if not patch:
+        return await _attach_project_view(db, project)
+
+    if not (set(patch) & set(project_lease.RENDER_INPUT_FIELDS)):
+        # Non-render-input edits (e.g. auto_post) keep their previous behaviour.
         patch["updated_at"] = _now()
         await db.projects.update_one({"id": project_id}, {"$set": patch})
+        return await _attach_project_view(db, await db.projects.find_one({"id": project_id}, {"_id": 0}))
+
+    lease = await project_lease.acquire(
+        db, project_id, project_lease.RENDER_LEASE, ttl_seconds=project_lease.RENDER_LEASE_TTL_SECONDS,
+    )
+    if lease is None:
+        raise HTTPException(
+            status_code=409,
+            detail="The project is being updated or a render is being submitted or released; retry shortly.",
+        )
+    try:
+        # Re-read under the lease: validation must see the state the write will replace.
+        current = await db.projects.find_one({"id": project_id}, {"_id": 0})
+        if current is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        mode_switching = "production_mode" in patch and patch["production_mode"] != current.get("production_mode")
+        if mode_switching:
+            # The render worker snapshots production_mode when the job starts and
+            # gates release/auto-post with it. A mode switch while a render is
+            # active could ungate an editorial auto-post or record commercial
+            # metadata the new mode never validated. Refuse while active.
+            if await render_service.is_render_active(project_id):
+                raise _mode_lock_conflict()
+        if commercial_fields.intersection(patch):
+            merged = {**current, **patch}
+            # Creation parity: an editorial project must not carry commercial
+            # ground truth, so a later commercial switch validates against fresh
+            # client data instead of inheriting stale values.
+            if merged.get("production_mode") == "editorial":
+                patch.update({
+                    "client_name": None,
+                    "structured_brief": None,
+                    "verified_cta": None,
+                    "brand_assets_supplied": False,
+                })
+            errors = commercial_project_errors({**current, **patch})
+            if errors:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Commercial project requires: " + ", ".join(errors),
+                )
+        patch["updated_at"] = _now()
+        result = await db.projects.update_one({"id": project_id, **lease.guard()}, {"$set": patch})
+        if getattr(result, "matched_count", 0) != 1:
+            # Fenced: the lease expired and was taken over. Nothing was written.
+            raise HTTPException(
+                status_code=409,
+                detail="The project lease was lost during the update; nothing was changed. Retry.",
+            )
+    finally:
+        await project_lease.release(db, lease)
     return await _attach_project_view(db, await db.projects.find_one({"id": project_id}, {"_id": 0}))
 
 
@@ -1188,8 +1223,8 @@ async def upload_client_asset(
         width, height = _inspect_client_image(raw)
     elif kind == "client_video":
         tmp = Path(tempfile.gettempdir()) / f"client-video-{uuid.uuid4().hex}{ext}"
-        tmp.write_bytes(raw)
         try:
+            tmp.write_bytes(raw)
             width, height, duration = await _inspect_client_video(tmp)
         finally:
             try:
@@ -1199,8 +1234,8 @@ async def upload_client_asset(
     elif kind == "before_after":
         if ext in CLIENT_VIDEO_EXTS:
             tmp = Path(tempfile.gettempdir()) / f"client-before-after-{uuid.uuid4().hex}{ext}"
-            tmp.write_bytes(raw)
             try:
+                tmp.write_bytes(raw)
                 width, height, duration = await _inspect_client_video(tmp)
             finally:
                 try:
@@ -1211,8 +1246,8 @@ async def upload_client_asset(
             width, height = _inspect_client_image(raw)
     else:
         tmp = Path(tempfile.gettempdir()) / f"client-audio-{uuid.uuid4().hex}{ext}"
-        tmp.write_bytes(raw)
         try:
+            tmp.write_bytes(raw)
             duration = _inspect_client_audio(tmp)
         finally:
             try:
@@ -1434,40 +1469,71 @@ async def attach_scene_asset(project_id: str, scene_id: str, body: StockAttachRe
     if not scene:
         raise HTTPException(status_code=404, detail="Scene not found")
 
-    # Idempotency: reject duplicates by (project_id, scene_id, external_id, source)
-    existing = await db.assets.find_one({
-        "project_id": project_id,
-        "scene_id": scene_id,
-        "external_id": body.external_id,
-        "source": body.source,
-    }, {"_id": 0})
-    if existing:
-        raise HTTPException(status_code=409, detail="This asset is already attached to the scene.")
+    lease = await project_lease.acquire(
+        db, project_id, project_lease.ASSET_LEASE, ttl_seconds=project_lease.ASSET_LEASE_TTL_SECONDS,
+    )
+    if lease is None:
+        raise HTTPException(status_code=409, detail="Another asset update is running for this project; retry shortly.")
+    async def commit(db):
+        # Idempotency: reject duplicates by (project_id, scene_id, external_id, source)
+        existing = await db.assets.find_one({
+            "project_id": project_id,
+            "scene_id": scene_id,
+            "external_id": body.external_id,
+            "source": body.source,
+        }, {"_id": 0})
+        if existing:
+            raise HTTPException(status_code=409, detail="This asset is already attached to the scene.")
 
-    doc = {
-        "id": str(uuid.uuid4()),
-        "project_id": project_id,
-        "scene_id": scene_id,
-        "name": body.title,
-        "asset_type": body.media_type,  # stock_video | stock_image
-        "file_path": None,
-        "source": body.source,
-        "external_id": body.external_id,
-        "preview_url": body.preview_url,
-        "source_url": body.source_url,
-        "download_url": body.download_url,
-        "attribution_name": body.attribution_name,
-        "attribution_url": body.attribution_url,
-        "width": body.width,
-        "height": body.height,
-        "duration": body.duration,
-        "tags": body.tags or [],
-        "query": body.query,
-        "status": "attached",
-        "created_at": _now(),
-        "updated_at": _now(),
-    }
-    await db.assets.insert_one(doc)
+        doc = {
+            "id": str(uuid.uuid4()),
+            "project_id": project_id,
+            "scene_id": scene_id,
+            "name": body.title,
+            "asset_type": body.media_type,  # stock_video | stock_image
+            "file_path": None,
+            "source": body.source,
+            "external_id": body.external_id,
+            "preview_url": body.preview_url,
+            "source_url": body.source_url,
+            "download_url": body.download_url,
+            "attribution_name": body.attribution_name,
+            "attribution_url": body.attribution_url,
+            "width": body.width,
+            "height": body.height,
+            "duration": body.duration,
+            "tags": body.tags or [],
+            "query": body.query,
+            "status": "attached",
+            "created_at": _now(),
+            "updated_at": _now(),
+        }
+        await asset_commit.set_intent(db, {
+            "kind": "manual_attach", "scene_id": scene_id, "candidates": [doc],
+            "previous_scene": scene,
+        })
+        try:
+            await db.assets.insert_one(doc)
+        except Exception as exc:  # noqa: BLE001
+            if _is_duplicate_key_error(exc):
+                raise HTTPException(status_code=409, detail="This asset is already attached to the scene.") from exc
+            import logging as _logging
+            _logging.getLogger("facelessforge.routes").error("manual attach insert failed project=%s scene=%s", project_id, scene_id, exc_info=True)
+            raise HTTPException(status_code=503, detail="Asset storage is unavailable; the attachment was not saved. Retry.") from exc
+        await db.scenes.update_one(
+            {"id": scene_id, "project_id": project_id},
+            {"$set": {"status": "assets_attached", "updated_at": _now()}},
+        )
+        return doc
+
+    try:
+        doc = await asset_commit.run(db, lease, commit)
+    except asset_commit.LeaseLost as exc:
+        raise HTTPException(status_code=409, detail="Asset ownership changed; retry the attachment.") from exc
+    except asset_commit.CommitUncertain as exc:
+        raise HTTPException(status_code=503, detail="Asset commit requires reconciliation; retry after recovery.") from exc
+    finally:
+        await project_lease.release(db, lease)
     # Archive licence at acquisition (Agent 3 spec: rights_registry + filesystem)
     try:
         await db.rights_registry.insert_one({
@@ -1498,11 +1564,6 @@ async def attach_scene_asset(project_id: str, scene_id: str, body: StockAttachRe
         }, indent=2))
     except Exception:
         pass
-    # Mark scene as having assets
-    await db.scenes.update_one(
-        {"id": scene_id, "project_id": project_id},
-        {"$set": {"status": "assets_attached", "updated_at": _now()}},
-    )
     return _ser(doc)
 
 
@@ -1570,256 +1631,624 @@ def _dedup_by_preview(results: list[dict]) -> list[dict]:
         out.append(r)
     return out
 
+STOCK_ASSET_TYPES = ["stock_video", "stock_image"]
+
+
+def _is_duplicate_key_error(exc: BaseException) -> bool:
+    """True only for a unique-index conflict (Mongo 11000), never for a storage failure."""
+    return getattr(exc, "code", None) == 11000 or type(exc).__name__ == "DuplicateKeyError"
+
+
+class _CreditsExhausted(Exception):
+    """A scene's committed attachments could not be debited; the scene is rolled back."""
+
+
+def _stock_scene_query(project_id: str, scene_id: str) -> dict:
+    return {"project_id": project_id, "scene_id": scene_id, "asset_type": {"$in": STOCK_ASSET_TYPES}}
+
+
+async def _rollback_scene_assets(db, project_id: str, committed: list, restore: list) -> None:
+    """Undo a scene's partial commit: remove rows this run inserted, restore removed originals."""
+    import logging
+    logger = logging.getLogger("facelessforge.routes")
+    ids = [doc["id"] for doc in committed]
+    if ids:
+        try:
+            await db.assets.delete_many({"project_id": project_id, "id": {"$in": ids}})
+        except Exception:  # noqa: BLE001
+            asset_commit.require_recovery(db)
+            logger.critical("auto-attach rollback could not remove new rows project=%s ids=%s", project_id, ids, exc_info=True)
+    if not restore:
+        return
+    wanted = [doc["id"] for doc in restore]
+    try:
+        present = {
+            d["id"] for d in await db.assets.find(
+                {"project_id": project_id, "id": {"$in": wanted}}, {"_id": 0, "id": 1},
+            ).to_list(len(wanted) + 1)
+        }
+    except Exception:  # noqa: BLE001
+        asset_commit.require_recovery(db)
+        logger.critical("auto-attach rollback could not inspect originals project=%s", project_id, exc_info=True)
+        return
+    for doc in restore:
+        if doc["id"] in present:
+            continue
+        try:
+            await db.assets.insert_one(dict(doc))
+        except Exception:  # noqa: BLE001
+            asset_commit.require_recovery(db)
+            logger.critical("auto-attach rollback could not restore original project=%s asset=%s", project_id, doc.get("id"), exc_info=True)
+
+
+async def _debit_committed_attachments(
+    db, *, collection: str, balance_filter: dict, field: str, user_id: str, asset_ids: list, reason: str,
+) -> int:
+    """Debit one credit per committed attachment, exactly once per attachment.
+
+    The debit and the record of which attachment it paid for are one single-document
+    update on the account, so a retried or resumed operation cannot debit the same
+    attachment twice, and a crash cannot debit without recording it. The balance
+    update is conditional on sufficient credits. Returns how many attachments this
+    call newly debited. On any failure, debits made by this call are reversed.
+    """
+    import logging
+    logger = logging.getLogger("facelessforge.routes")
+    target = getattr(db, collection)
+    newly: list[str] = []
+    try:
+        for asset_id in asset_ids:
+            res = await target.update_one(
+                {**balance_filter, "charged_attach_ids": {"$ne": asset_id}, field: {"$gte": 1}},
+                {
+                    "$inc": {field: -1},
+                    "$set": {"updated_at": _now()},
+                    "$addToSet": {"charged_attach_ids": asset_id},
+                },
+            )
+            if getattr(res, "matched_count", 0) != 1:
+                already = await target.find_one({**balance_filter, "charged_attach_ids": asset_id}, {"_id": 0})
+                if already:
+                    continue  # charged by an earlier attempt of this operation
+                raise _CreditsExhausted()
+            newly.append(asset_id)
+            try:
+                await db.credit_transactions.insert_one({
+                    "_id": f"attach:{asset_id}",
+                    "id": str(uuid.uuid4()),
+                    "user_id": user_id,
+                    "asset_id": asset_id,
+                    "amount": -1,
+                    "reason": reason,
+                    "created_at": _now(),
+                })
+            except Exception:  # noqa: BLE001 - the balance is authoritative; the ledger row is an audit copy
+                logger.warning("auto-attach ledger row not written asset=%s", asset_id, exc_info=True)
+    except BaseException:
+        for asset_id in newly:
+            try:
+                await target.update_one(
+                    {**balance_filter, "charged_attach_ids": asset_id},
+                    {"$inc": {field: 1}, "$pull": {"charged_attach_ids": asset_id}},
+                )
+                await db.credit_transactions.delete_one({"_id": f"attach:{asset_id}"})
+            except Exception:  # noqa: BLE001
+                asset_commit.require_recovery(db)
+                logger.critical("auto-attach could not reverse debit asset=%s", asset_id, exc_info=True)
+        raise
+    return len(newly)
+
+
+async def _debit_scene(db, *, store: dict, user_id: str, asset_ids: list, reason: str) -> int:
+    """Debit the primary balance, then the legacy ff_credits mirror (best effort)."""
+    charged = await _debit_committed_attachments(
+        db, collection=store["collection"], balance_filter=store["filter"], field=store["field"],
+        user_id=user_id, asset_ids=asset_ids, reason=reason,
+    )
+    if store["collection"] == "subscriptions" and charged:
+        try:
+            await _debit_committed_attachments(
+                db, collection="ff_credits", balance_filter={"tenant_id": user_id}, field="credits",
+                user_id=user_id, asset_ids=asset_ids, reason=reason,
+            )
+        except Exception:  # noqa: BLE001 - legacy mirror never blocks an attachment
+            import logging
+            logging.getLogger("facelessforge.routes").warning("auto-attach legacy ff_credits mirror skipped", exc_info=True)
+    return charged
+
+
+def _auto_stock_query(project: dict, scene: dict) -> str:
+    terms = scene.get("search_terms") or []
+    visual = (scene.get("visual_direction") or scene.get("visual") or "").strip()
+    if terms and isinstance(terms, list) and str(terms[0]).strip():
+        raw = str(terms[0]).strip()[:60]
+    elif visual:
+        raw = visual.split(",")[0].strip()[:60] if "," in visual else visual.split(".")[0].strip()[:60]
+        raw = raw or visual[:60]
+    else:
+        raw = (project.get("topic") or "ancient Rome").strip()[:60]
+    return raw.strip() or "ancient Rome"
+
+
+async def _asset_write(db, lease, collection, method, *args, **kwargs):
+    async def write(fenced_db):
+        return await getattr(getattr(fenced_db, collection), method)(*args, **kwargs)
+    return await asset_commit.run(db, lease, write)
+
+
+async def _attach_scene_stock(db, *, lease, project, scene, replace_existing, user, store,
+                              visual_titles, media_type, op_id=None):
+    """Slow lookup is revocable; the entire mutation/compensation phase is pinned."""
+    originals = await db.assets.find(
+        _stock_scene_query(project["id"], str(scene.get("id") or scene.get("_id"))), {"_id": 0},
+    ).to_list(500)
+    carried = [o for o in originals if op_id and o.get("attach_op") == op_id]
+    needed = max(1, math.ceil(_get_scene_duration(scene) / 3))
+    needs_search = not (
+        (replace_existing and carried and len(carried) == len(originals))
+        or (not replace_existing and len(originals) >= needed)
+    )
+    result, search_error = None, None
+    if needs_search:
+        remaining = needed if replace_existing else max(1, needed - len(originals))
+        per_page = min(max(remaining * 2, remaining + 5), 40)
+        try:
+            query = _auto_stock_query(project, scene)
+            if hasattr(stock_service, "search_stock_aggregated"):
+                result = await stock_service.search_stock_aggregated(query=query, media_type="both", per_page=per_page)
+            else:
+                result = await stock_service.search_stock(query, "both", per_page)
+        except Exception as exc:  # noqa: BLE001
+            search_error = exc
+
+    async def commit(fenced_db):
+        return await _attach_scene_stock_committing(
+            fenced_db, project=project, scene=scene, replace_existing=replace_existing, user=user,
+            store=store, visual_titles=visual_titles, media_type=media_type, op_id=op_id,
+            stock_result=result, search_error=search_error,
+        )
+    return await asset_commit.run(db, lease, commit)
+
+
+async def _attach_scene_stock_committing(
+    db, *, project: dict, scene: dict, replace_existing: bool, user: dict, store: dict,
+    visual_titles: list, media_type: str, stock_result, search_error, op_id: Optional[str] = None,
+) -> dict:
+    """Select and commit stock assets for one scene. Never raises for scene-level failures.
+
+    Insert-first: the new candidates are written before the scene's previous stock
+    selection is removed. Any storage failure rolls the scene back to its previous
+    selection and charges nothing. Duplicate-key conflicts are actual duplicates and
+    are skipped; every other write error is a failure.
+    """
+    import logging
+    logger = logging.getLogger("facelessforge.routes")
+    project_id = project["id"]
+    scene_id = str(scene.get("id") or scene.get("_id"))
+    duration = _get_scene_duration(scene)
+    num_needed = max(1, math.ceil(duration / 3))
+    outcome: dict = {
+        "scene_id": scene_id, "status": "failed", "attached": 0, "charged": 0, "skipped": 0,
+        "near_duplicates": 0, "details": [], "reason": None,
+    }
+
+    def _detail(status: str, **extra) -> None:
+        outcome["details"].append({"scene_id": scene_id, "scene_number": scene.get("scene_number"), "status": status, **extra})
+
+    originals = await db.assets.find(_stock_scene_query(project_id, scene_id), {"_id": 0}).to_list(500)
+    intent = {
+        "kind": "auto_attach", "scene_id": scene_id, "replace_existing": replace_existing,
+        "op_id": op_id, "originals": originals, "account": store,
+    }
+    await asset_commit.set_intent(db, intent)
+    # Rows tagged with this operation were committed by an earlier attempt that stopped
+    # before recording the scene. Finish their accounting (idempotent) instead of
+    # selecting and charging the scene again.
+    carried = [o for o in originals if op_id and o.get("attach_op") == op_id]
+    carried_committed = False
+    if carried and (not replace_existing or len(carried) == len(originals)):
+        # Replacement: every original is ours, so the earlier attempt had already removed
+        # the old selection and written the whole replacement. Top-up: these rows are
+        # committed attachments that stay. Either way they are paid for exactly once.
+        try:
+            charged_now = await _debit_scene(
+                db, store=store, user_id=user["id"], asset_ids=[o["id"] for o in carried],
+                reason=f"auto-attach scene {scene.get('scene_number')} {duration}s",
+            )
+        except _CreditsExhausted:
+            # Carried rows belong to an earlier committed attempt, and may already
+            # be paid. Never delete them on a resume failure (top-up OR replacement).
+            # This call's partial debits are reversed by the debit helper; a same-key
+            # retry completes the remaining IDs without losing the paid selection.
+            outcome.update(reason="credits_exhausted", attached=0)
+            _detail("failed", reason="credits_exhausted")
+            return outcome
+        except Exception:  # noqa: BLE001
+            import logging as _logging
+            _logging.getLogger("facelessforge.routes").error("auto-attach resume debit failed project=%s scene=%s", project_id, scene_id, exc_info=True)
+            outcome.update(reason="charge_failed", attached=0)
+            _detail("failed", reason="charge_failed")
+            return outcome
+        for doc in carried:
+            visual_titles.append(str(doc.get("name") or ""))
+            _detail("attached", asset_id=doc["id"], order=doc.get("order"), start_offset=doc.get("start_offset"))
+        outcome.update(attached=len(carried), charged=charged_now)
+        if replace_existing:
+            outcome["status"] = "attached"
+            return outcome
+        carried_committed = True
+    if originals and not replace_existing:
+        if len(originals) >= num_needed:
+            if carried_committed:
+                outcome["status"] = "attached"
+            else:
+                outcome.update(status="skipped", skipped=1)
+                _detail("skipped", reason="already_has_stock")
+            return outcome
+        remaining = num_needed - len(originals)
+        start_order = len(originals)
+        excluded = originals
+    else:
+        remaining = num_needed
+        start_order = 0
+        # A replacement set must be disjoint from the selection it replaces: the
+        # unique stock index would otherwise reject the same clip while the original
+        # still exists, and that would be indistinguishable from a real duplicate.
+        excluded = originals if replace_existing else []
+
+    query = _auto_stock_query(project, scene)
+
+    excluded_ids: set[str] = set()
+    for ea in excluded:
+        if ea.get("external_id"):
+            excluded_ids.add(str(ea.get("external_id")))
+        if ea.get("preview_url"):
+            excluded_ids.add(str(ea.get("preview_url")))
+
+    if search_error is not None:
+        logger.warning("auto-attach search failed scene=%s: %s", scene_id, search_error)
+        outcome["reason"] = "search_failed"
+        _detail("failed", reason=str(search_error)[:120])
+        return outcome
+
+    results = (stock_result.get("results") or []) if stock_result else []
+    filtered = []
+    for r in results:
+        ext = str(r.get("external_id") or "")
+        prev = str(r.get("preview_url") or "")
+        if ext in excluded_ids or prev in excluded_ids:
+            continue
+        filtered.append(r)
+    unique = _dedup_by_preview(filtered)
+    unique, near_duplicates = filter_distinct_titles(unique, visual_titles)
+    for dup in near_duplicates:
+        outcome["near_duplicates"] += 1
+        _detail("skipped", reason="near_duplicate", title=dup.get("title") or dup.get("name"))
+    unique = unique[:remaining]
+    if not unique:
+        # Nothing usable: the scene keeps its current selection untouched.
+        outcome["reason"] = "no_stock_results"
+        _detail("failed", reason="no_stock_results")
+        return outcome
+
+    new_docs: list[dict] = []
+    for i, asset in enumerate(unique):
+        order = start_order + i
+        new_docs.append({
+            "id": str(uuid.uuid4()),
+            "project_id": project_id,
+            "scene_id": scene_id,
+            "name": asset.get("title") or asset.get("name") or f"Asset {order+1}",
+            "asset_type": asset.get("media_type") or asset.get("asset_type") or "stock_image",
+            "file_path": None,
+            "source": asset.get("source") or "pexels",
+            "external_id": asset.get("external_id") or str(uuid.uuid4()),
+            "preview_url": asset.get("preview_url"),
+            "source_url": asset.get("source_url"),
+            "download_url": asset.get("download_url"),
+            "attribution_name": asset.get("attribution_name"),
+            "attribution_url": asset.get("attribution_url"),
+            "width": asset.get("width"),
+            "height": asset.get("height"),
+            "duration": 3,
+            "tags": asset.get("tags") or [],
+            "query": query,
+            "status": "attached",
+            "order": order,
+            "start_offset": order * 3,  # 0,3,6,9...
+            "scene_duration": duration,
+            "attach_op": op_id,
+            "created_at": _now(),
+            "updated_at": _now(),
+        })
+
+    await asset_commit.set_intent(db, {**intent, "candidates": new_docs})
+    committed: list[dict] = []
+    for doc in new_docs:
+        try:
+            await db.assets.insert_one(dict(doc))
+        except Exception as exc:  # noqa: BLE001
+            if _is_duplicate_key_error(exc):
+                outcome["skipped"] += 1
+                _detail("skipped", reason="duplicate")
+                continue
+            logger.error("auto-attach insert failed project=%s scene=%s", project_id, scene_id, exc_info=True)
+            await _rollback_scene_assets(db, project_id, committed, restore=[])
+            outcome.update(reason="storage_error", attached=0)
+            _detail("failed", reason="storage_error")
+            return outcome
+        committed.append(doc)
+
+    if committed and replace_existing and originals:
+        # Originals go only now that the replacement is fully written. Delete by
+        # captured id, never by scene, so another writer's rows are never removed.
+        try:
+            await db.assets.delete_many({"project_id": project_id, "id": {"$in": [o["id"] for o in originals]}})
+        except Exception:  # noqa: BLE001
+            logger.error("auto-attach replacement cleanup failed project=%s scene=%s", project_id, scene_id, exc_info=True)
+            await _rollback_scene_assets(db, project_id, committed, restore=originals)
+            outcome.update(reason="storage_error", attached=0)
+            _detail("failed", reason="storage_error")
+            return outcome
+
+    if committed:
+        try:
+            charged_now = await _debit_scene(
+                db, store=store, user_id=user["id"], asset_ids=[d["id"] for d in committed],
+                reason=f"auto-attach scene {scene.get('scene_number')} {duration}s",
+            )
+        except _CreditsExhausted:
+            await _rollback_scene_assets(db, project_id, committed, restore=originals if replace_existing else [])
+            outcome.update(reason="credits_exhausted", attached=0)
+            _detail("failed", reason="credits_exhausted")
+            return outcome
+        except Exception:  # noqa: BLE001
+            logger.error("auto-attach debit failed project=%s scene=%s", project_id, scene_id, exc_info=True)
+            await _rollback_scene_assets(db, project_id, committed, restore=originals if replace_existing else [])
+            outcome.update(reason="charge_failed", attached=0)
+            _detail("failed", reason="charge_failed")
+            return outcome
+        outcome["charged"] += charged_now
+
+    for doc in committed:
+        visual_titles.append(doc["name"])
+        _detail("attached", asset_id=doc["id"], order=doc["order"], start_offset=doc["start_offset"])
+    outcome["attached"] += len(committed)
+    if carried_committed or committed:
+        outcome["status"] = "attached"
+    else:
+        outcome["status"] = "skipped"
+    logger.info(
+        "auto-attach scene %s duration=%s num_needed=%s committed=%d skipped=%d status=%s",
+        scene.get("scene_number"), duration, num_needed, len(committed), outcome["skipped"], outcome["status"],
+    )
+    return outcome
+
+
+def _auto_attach_summary(*, total: int, ordered: list, mock: bool, aborted: Optional[str]) -> dict:
+    return {
+        "total": total,
+        "attached": sum(r["attached"] for r in ordered),
+        "skipped": sum(r["skipped"] for r in ordered),
+        "near_duplicates_skipped": sum(r["near_duplicates"] for r in ordered),
+        "failed": sum(1 for r in ordered if r["status"] == "failed"),
+        "credits_charged": sum(r["charged"] for r in ordered),
+        "details": [d for r in ordered for d in r["details"]],
+        "mock": mock,
+        "aborted": aborted,
+        "replayed": False,
+    }
+
+
 @router.post("/projects/{project_id}/auto-attach-assets")
 async def auto_attach_assets(project_id: str, body: AutoAttachRequest, user=Depends(get_current_user)):
-    """3-second rule: ceil(duration/3) assets per scene (10 for 30s), 3s each, order/start_offset."""
+    """3-second rule: ceil(duration/3) assets per scene (10 for 30s), 3s each, order/start_offset.
 
+    Writers of a project's stock selection (this route, manual scene attach) share
+    one fenced asset lease, so a replacement, top-up or manual attach can never
+    interleave with another. Replacement is insert-first and rolls back on failure,
+    so a failed replacement leaves the previous selection in place. Credits are
+    debited only for attachments that committed. With an ``idempotency_key`` a
+    repeated request replays its stored outcome, and a failed request resumes
+    without re-processing scenes it already finished.
+    """
     db = get_db()
     project = await db.projects.find_one({"id": project_id}, {"_id": 0})
     _ensure_project_access(project, user, write=True)
     if user["role"] == "viewer":
         raise HTTPException(status_code=403, detail="Viewer cannot attach assets")
+    if body.replace_existing and not body.idempotency_key:
+        raise HTTPException(
+            status_code=422,
+            detail="replace_existing requires an idempotency_key so a repeated request cannot replace or charge twice.",
+        )
+    op_id = f"{project_id}:{body.idempotency_key}" if body.idempotency_key else None
+    if op_id:
+        prior = await db.asset_operations.find_one({"_id": op_id}, {"_id": 0})
+        if prior and prior.get("status") == "completed":
+            return {**(prior.get("summary") or {}), "replayed": True}
 
-    scenes = await db.scenes.find({"project_id": project_id}).sort("scene_number", 1).to_list(500)
-    if not scenes:
-        raise HTTPException(status_code=400, detail="Generate scenes before auto-attach.")
+    lease = await project_lease.acquire(
+        db, project_id, project_lease.ASSET_LEASE, ttl_seconds=project_lease.ASSET_LEASE_TTL_SECONDS,
+    )
+    if lease is None:
+        raise HTTPException(status_code=409, detail="Another asset update is running for this project; retry shortly.")
+    try:
+        return await _auto_attach_under_lease(db, lease, project_id, project, body, user, op_id)
+    except asset_commit.LeaseLost as exc:
+        raise HTTPException(status_code=409, detail="Asset ownership changed; retry with the same idempotency key.") from exc
+    except asset_commit.CommitUncertain as exc:
+        raise HTTPException(status_code=503, detail="Asset commit requires reconciliation; retry after recovery.") from exc
+    finally:
+        await project_lease.release(db, lease)
 
-    total = len(scenes)
-    attached = 0
-    skipped = 0
-    failed = 0
-    near_duplicates_skipped = 0
-    details: list[dict] = []
-    # On replace, every existing stock asset is deleted as its scene is
-    # processed, so its title must not block the replacement.
-    project_visual_titles = [] if body.replace_existing else [
-        str(a.get("name") or "")
-        for a in await db.assets.find(
-            {"project_id": project_id, "asset_type": {"$in": ["stock_video", "stock_image"]}},
-            {"_id": 0, "name": 1},
-        ).to_list(1000)
-        if a.get("name")
-    ]
 
-    # --- Credits check: sum needed for scenes that will be attached ---
-    total_needed = 0
-    for _s in scenes:
-        _d = _get_scene_duration(_s)
-        _n = max(1, math.ceil(_d / 3))
-        _sid = str(_s.get("id") or _s.get("_id"))
-        _cnt = await db.assets.count_documents({"project_id": project_id, "scene_id": _sid, "asset_type": {"$in": ["stock_video", "stock_image"]}})
-        if _cnt > 0 and not body.replace_existing:
-            if _cnt >= _n:
-                continue
-            total_needed += (_n - _cnt)
-        else:
-            total_needed += _n
-    # ensure subscription exists and check
-    sub = await db.subscriptions.find_one({"user_id": user["id"]}, {"_id": 0})
-    if not sub:
-        # fallback to ff_credits for backward compat, else create free 30
-        ff = await db.ff_credits.find_one({"tenant_id": user["id"]}, {"_id": 0}) or await db.ff_credits.find_one({"user_id": user["id"]}, {"_id": 0})
-        if ff:
-            sub = {"credits_remaining": int(ff.get("credits", 30)), "credits_monthly": int(ff.get("credits", 30))}
-        else:
-            # create free subscription 30 credits
-            sub_doc = {
-                "user_id": user["id"],
-                "paddle_customer_id": None,
-                "paddle_subscription_id": None,
-                "paddle_price_id": None,
-                "plan": "free",
-                "status": "active",
-                "credits_monthly": 30,
-                "credits_remaining": 30,
-                "current_period_end": _now() + timedelta(days=30),
-                "created_at": _now(),
-                "updated_at": _now(),
-            }
-            await db.subscriptions.insert_one(sub_doc)
-            sub = sub_doc
-    remaining = int(sub.get("credits_remaining", 30) if isinstance(sub, dict) else 30)
-    if total_needed > 0 and remaining < total_needed:
-        reset_at = sub.get("current_period_end") or _now() + timedelta(days=30)
-        if hasattr(reset_at, 'isoformat'):
-            reset_at = reset_at.isoformat()
-        raise HTTPException(status_code=402, detail={"code": "credits_exhausted", "reset_at": reset_at, "plan": sub.get("plan", "free"), "remaining": remaining, "required": total_needed, "quota": int(sub.get("credits_monthly", 30)), "message": f"Insufficient credits: {remaining} remaining, {total_needed} required. Need {total_needed} credits for {total_needed} assets (3s each)."})
-
-    for scene in scenes:
-        scene_id = str(scene.get("id") or scene.get("_id"))
-        # 3-second rule: ceil(duration/3) assets per scene (10 for 30s), 3s each
-        duration = _get_scene_duration(scene)
-        num_needed = max(1, math.ceil(duration / 3))
-        # Handle existing count and replace logic
-        existing_count = await db.assets.count_documents({
-            "project_id": project_id,
-            "scene_id": scene_id,
-            "asset_type": {"$in": ["stock_video", "stock_image"]},
-        })
-        if existing_count > 0 and not body.replace_existing:
-            if existing_count >= num_needed:
-                skipped += 1
-                details.append({"scene_id": scene_id, "scene_number": scene.get("scene_number"), "status": "skipped", "reason": "already_has_stock"})
-                continue
-            remaining = num_needed - existing_count
-        else:
-            # Replacement deletion is deferred to the moment the scene's
-            # replacement set is confirmed non-empty (after search + filters),
-            # so a futile search or a dedup collapse leaves the scene's
-            # current visuals in place rather than wiping them.
-            remaining = num_needed
-
-        # Build query from search_terms[0] as spec, truncated to 60 (stock.py will also truncate to 4 words)
+async def _auto_attach_under_lease(db, lease, project_id: str, project: dict, body: AutoAttachRequest, user: dict, op_id: Optional[str]) -> dict:
+    import logging
+    logger = logging.getLogger("facelessforge.routes")
+    now = _now()
+    resumed: dict = {}
+    if op_id:
         try:
-            import logging
-            logger = logging.getLogger("facelessforge.routes")
-            terms = scene.get("search_terms") or []
-            visual = (scene.get("visual_direction") or scene.get("visual") or "").strip()
-            if terms and isinstance(terms, list) and len(terms) > 0 and str(terms[0]).strip():
-                q_raw = str(terms[0]).strip()[:60]
-            elif visual:
-                q_raw = visual.split(",")[0].strip()[:60] if "," in visual else visual.split(".")[0].strip()[:60]
-                if not q_raw:
-                    q_raw = visual[:60]
-            else:
-                q_raw = (project.get("topic") or "ancient Rome").strip()[:60]
-            query = q_raw.strip()
-            if not query:
-                query = "ancient Rome"
-            # Gather existing ids to exclude (dedup). In replacement mode the
-            # originals are deleted once the fresh set is confirmed, so they
-            # must not block the replacement (matches the pre-refactor order
-            # where deletion preceded this read).
-            existing_assets = [] if body.replace_existing else await db.assets.find({"project_id": project_id, "scene_id": scene_id, "asset_type": {"$in": ["stock_video", "stock_image"]}}, {"_id": 0, "external_id": 1, "preview_url": 1}).to_list(100)
-            existing_ids = set()
-            for ea in existing_assets:
-                if ea.get("external_id"):
-                    existing_ids.add(str(ea.get("external_id")))
-                if ea.get("preview_url"):
-                    existing_ids.add(str(ea.get("preview_url")))
-            per_page = max(remaining * 2, remaining + 5)
-            per_page = min(per_page, 40)
-            result = None
-            if hasattr(stock_service, "search_stock_aggregated"):
-                result = await stock_service.search_stock_aggregated(query=query, media_type="both", per_page=per_page)
-            else:
-                result = await stock_service.search_stock(query, "both", per_page)
-            results = (result.get("results") or []) if result else []
-            # Filter out already attached
-            filtered = []
-            for r in results:
-                ext = str(r.get("external_id") or "")
-                prev = str(r.get("preview_url") or "")
-                if ext in existing_ids or prev in existing_ids:
-                    continue
-                filtered.append(r)
-            unique = _dedup_by_preview(filtered)
-            unique, near_duplicates = filter_distinct_titles(unique, project_visual_titles)
-            for duplicate in near_duplicates:
-                near_duplicates_skipped += 1
-                details.append({
-                    "scene_id": scene_id,
-                    "scene_number": scene.get("scene_number"),
-                    "status": "skipped",
-                    "reason": "near_duplicate",
-                    "title": duplicate.get("title") or duplicate.get("name"),
-                })
-            unique = unique[:remaining]
-            if not unique:
-                failed += 1
-                details.append({"scene_id": scene_id, "scene_number": scene.get("scene_number"), "status": "failed", "reason": "no_stock_results"})
-                continue
-            if body.replace_existing:
-                # Remove the scene's originals only now: the replacement set
-                # is non-empty, so the scene never ends up visually empty.
-                await db.assets.delete_many({
-                    "project_id": project_id,
-                    "scene_id": scene_id,
-                    "asset_type": {"$in": ["stock_video", "stock_image"]},
-                })
-                start_order = 0
-                existing_count = 0
-            else:
-                start_order = existing_count
-            scene_attached = 0
-            for i, asset in enumerate(unique):
-                order = start_order + i
-                start_offset = order * 3  # 0,3,6,9...
-                duration_asset = 3
-                doc = {
-                    "id": str(uuid.uuid4()),
-                    "project_id": project_id,
-                    "scene_id": scene_id,
-                    "name": asset.get("title") or asset.get("name") or f"Asset {order+1}",
-                    "asset_type": asset.get("media_type") or asset.get("asset_type") or "stock_image",
-                    "file_path": None,
-                    "source": asset.get("source") or "pexels",
-                    "external_id": asset.get("external_id") or str(uuid.uuid4()),
-                    "preview_url": asset.get("preview_url"),
-                    "source_url": asset.get("source_url"),
-                    "download_url": asset.get("download_url"),
-                    "attribution_name": asset.get("attribution_name"),
-                    "attribution_url": asset.get("attribution_url"),
-                    "width": asset.get("width"),
-                    "height": asset.get("height"),
-                    "duration": duration_asset,
-                    "tags": asset.get("tags") or [],
-                    "query": query,
-                    "status": "attached",
-                    "order": order,
-                    "start_offset": start_offset,
-                    "scene_duration": duration,
-                    "created_at": _now(),
-                    "updated_at": _now(),
-                }
-                try:
-                    await db.assets.insert_one(doc)
-                    attached += 1
-                    scene_attached += 1
-                    project_visual_titles.append(doc["name"])
-                    details.append({"scene_id": scene_id, "scene_number": scene.get("scene_number"), "status": "attached", "asset_id": doc["id"], "order": order, "start_offset": start_offset})
-                except Exception:
-                    skipped += 1
-                    # Concurrent writers can breach the (project, scene,
-                    # external_id, source) unique index — an insert failure is
-                    # not a dedupe-near miss, so label it correctly.
-                    details.append({"scene_id": scene_id, "scene_number": scene.get("scene_number"), "status": "skipped", "reason": "insert_failed"})
-            # Deduct credits for this scene's actually attached assets — not
-            # the search result count: inserts can fail after the replacement
-            # originals were already deleted, and billing then must not
-            # charge for assets that never landed.
-            if scene_attached:
-                await db.subscriptions.update_one({"user_id": user["id"]}, {"$inc": {"credits_remaining": -scene_attached}, "$set": {"updated_at": _now()}})
-                for _ in range(scene_attached):
-                    await db.credit_transactions.insert_one({
-                        "id": str(uuid.uuid4()),
-                        "user_id": user["id"],
-                        "amount": -1,
-                        "reason": f"auto-attach scene {scene.get('scene_number')} {duration}s",
-                        "created_at": _now(),
-                    })
-                # also mirror to ff_credits for backward compat
-                try:
-                    await db.ff_credits.update_one({"tenant_id": user["id"]}, {"$inc": {"credits": -scene_attached}})
-                except: pass
-            logger.info("auto-attach scene %s duration=%s num_needed=%s remaining=%s query='%s' -> %d unique attached %d", scene.get("scene_number"), duration, num_needed, remaining, query[:60], len(unique), scene_attached)
-        except Exception as e:
-            failed += 1
-            details.append({"scene_id": scene_id, "scene_number": scene.get("scene_number"), "status": "failed", "reason": str(e)[:120]})
+            await _asset_write(db, lease, "asset_operations", "insert_one", {
+                "_id": op_id, "project_id": project_id, "user_id": user["id"], "status": "running",
+                "scene_results": {}, "created_at": now, "updated_at": now,
+            })
+        except Exception as exc:  # noqa: BLE001
+            if not _is_duplicate_key_error(exc):
+                raise
+            prior = await db.asset_operations.find_one({"_id": op_id}, {"_id": 0}) or {}
+            if prior.get("status") == "completed":
+                return {**(prior.get("summary") or {}), "replayed": True}
+            # The lease is ours, so no other writer is active: a non-completed record
+            # was left by an interrupted run. Resume it.
+            resumed = dict(prior.get("scene_results") or {})
+            await _asset_write(db, lease, "asset_operations", "update_one", {"_id": op_id}, {"$set": {"status": "running", "updated_at": now}})
 
-    # Required journalctl log for spec: [ATTACH] 18 attached 0 failed
-    import logging as _logging
-    _logging.getLogger("facelessforge.routes").info("[ATTACH] %s attached %s failed project=%s mock=%s", attached, failed, project_id, stock_service.is_mock_mode())
-    print(f"[ATTACH] {attached} attached {failed} failed project={project_id}", flush=True)
-    return {
-        "total": total,
-        "attached": attached,
-        "skipped": skipped,
-        "near_duplicates_skipped": near_duplicates_skipped,
-        "failed": failed,
-        "details": details,
-        "mock": stock_service.is_mock_mode(),
-    }
+    try:
+        scenes = await db.scenes.find({"project_id": project_id}).sort("scene_number", 1).to_list(500)
+        if not scenes:
+            raise HTTPException(status_code=400, detail="Generate scenes before auto-attach.")
+
+        # Credits check: include unpaid carried rows, but do not require a second
+        # balance for attachments this operation already committed and paid for.
+        total_needed = 0
+        carried_asset_ids: list[str] = []
+        for scene in scenes:
+            needed = max(1, math.ceil(_get_scene_duration(scene) / 3))
+            scene_id = str(scene.get("id") or scene.get("_id"))
+            if (resumed.get(scene_id) or {}).get("status") in ("attached", "skipped"):
+                continue  # finished and charged by an earlier attempt of this same operation
+            count = await db.assets.count_documents(_stock_scene_query(project_id, scene_id))
+            if op_id:
+                carried = await db.assets.find(
+                    {**_stock_scene_query(project_id, scene_id), "attach_op": op_id},
+                    {"_id": 0, "id": 1},
+                ).to_list(None)
+                if carried and (not body.replace_existing or len(carried) == count):
+                    carried_asset_ids.extend(row["id"] for row in carried)
+                    total_needed += len(carried)
+                    if body.replace_existing:
+                        continue  # finish the committed replacement, not a new selection
+            if count > 0 and not body.replace_existing:
+                if count >= needed:
+                    continue
+                total_needed += needed - count
+            else:
+                total_needed += needed
+
+        sub = await db.subscriptions.find_one({"user_id": user["id"]}, {"_id": 0})
+        if sub:
+            store = {"collection": "subscriptions", "filter": {"user_id": user["id"]}, "field": "credits_remaining"}
+            remaining = int(sub.get("credits_remaining", 30))
+            paid_asset_ids = set(sub.get("charged_attach_ids") or [])
+        else:
+            ff_filter = {"tenant_id": user["id"]}
+            ff = await db.ff_credits.find_one(ff_filter, {"_id": 0})
+            if ff is None:
+                ff_filter = {"user_id": user["id"]}
+                ff = await db.ff_credits.find_one(ff_filter, {"_id": 0})
+            if ff:
+                store = {"collection": "ff_credits", "filter": ff_filter, "field": "credits"}
+                remaining = int(ff.get("credits", 30))
+                paid_asset_ids = set(ff.get("charged_attach_ids") or [])
+                sub = {"credits_monthly": int(ff.get("credits", 30)), "plan": "free"}
+            else:
+                sub = {
+                    "user_id": user["id"], "paddle_customer_id": None, "paddle_subscription_id": None,
+                    "paddle_price_id": None, "plan": "free", "status": "active",
+                    "credits_monthly": 30, "credits_remaining": 30,
+                    "current_period_end": _now() + timedelta(days=30),
+                    "created_at": _now(), "updated_at": _now(),
+                }
+                await _asset_write(db, lease, "subscriptions", "insert_one", dict(sub))
+                store = {"collection": "subscriptions", "filter": {"user_id": user["id"]}, "field": "credits_remaining"}
+                remaining = 30
+                paid_asset_ids = set()
+        total_needed -= sum(asset_id in paid_asset_ids for asset_id in carried_asset_ids)
+        if total_needed > 0 and remaining < total_needed:
+            reset_at = sub.get("current_period_end") or _now() + timedelta(days=30)
+            if hasattr(reset_at, 'isoformat'):
+                reset_at = reset_at.isoformat()
+            raise HTTPException(status_code=402, detail={"code": "credits_exhausted", "reset_at": reset_at, "plan": sub.get("plan", "free"), "remaining": remaining, "required": total_needed, "quota": int(sub.get("credits_monthly", 30)), "message": f"Insufficient credits: {remaining} remaining, {total_needed} required. Need {total_needed} credits for {total_needed} assets (3s each)."})
+
+        # Titles already in the project keep near-duplicate filtering honest. In replace
+        # mode only scenes finished by this same operation count; the rest are being replaced.
+        if body.replace_existing:
+            done_scene_ids = [sid for sid, r in resumed.items() if r.get("status") in ("attached", "skipped")]
+            visual_titles = []
+            if done_scene_ids:
+                done_assets = await db.assets.find(
+                    {"project_id": project_id, "scene_id": {"$in": done_scene_ids}, "asset_type": {"$in": STOCK_ASSET_TYPES}},
+                    {"_id": 0, "name": 1},
+                ).to_list(1000)
+                visual_titles = [str(a.get("name") or "") for a in done_assets if a.get("name")]
+        else:
+            visual_titles = [
+                str(a.get("name") or "")
+                for a in await db.assets.find(
+                    {"project_id": project_id, "asset_type": {"$in": STOCK_ASSET_TYPES}}, {"_id": 0, "name": 1},
+                ).to_list(1000)
+                if a.get("name")
+            ]
+
+        results: dict = {}
+        aborted = None
+        for scene in scenes:
+            scene_id = str(scene.get("id") or scene.get("_id"))
+            if (resumed.get(scene_id) or {}).get("status") in ("attached", "skipped"):
+                results[scene_id] = resumed[scene_id]
+                continue
+            if not await project_lease.renew(db, lease, ttl_seconds=project_lease.ASSET_LEASE_TTL_SECONDS):
+                aborted = "lease_lost"
+                break
+            try:
+                outcome = await _attach_scene_stock(
+                    db, lease=lease, project=project, scene=scene, replace_existing=body.replace_existing, user=user,
+                    store=store, visual_titles=visual_titles, media_type=body.media_type, op_id=op_id,
+                )
+            except asset_commit.LeaseLost:
+                aborted = "lease_lost"
+                break
+            except asset_commit.CommitUncertain:
+                raise
+            except Exception:  # noqa: BLE001 - one scene must not abort the rest of the operation
+                logger.error("auto-attach scene failed project=%s scene=%s", project_id, scene_id, exc_info=True)
+                outcome = {
+                    "scene_id": scene_id, "status": "failed", "attached": 0, "charged": 0, "skipped": 0,
+                    "near_duplicates": 0, "reason": "scene_error",
+                    "details": [{"scene_id": scene_id, "scene_number": scene.get("scene_number"),
+                                 "status": "failed", "reason": "scene_error"}],
+                }
+            results[scene_id] = outcome
+            if op_id:
+                await _asset_write(db, lease, "asset_operations", "update_one", {"_id": op_id},
+                    {"$set": {"scene_results": {**resumed, **results}, "updated_at": _now()}},
+                )
+
+        ordered = [results[str(s.get("id") or s.get("_id"))] for s in scenes if str(s.get("id") or s.get("_id")) in results]
+        complete = aborted is None and len(ordered) == len(scenes) and all(r["status"] in ("attached", "skipped") for r in ordered)
+        summary = _auto_attach_summary(total=len(scenes), ordered=ordered, mock=stock_service.is_mock_mode(), aborted=aborted)
+        if op_id and aborted != "lease_lost":
+            # Only a fully processed operation is final. Anything else stays resumable
+            # with the same key and never re-charges scenes already committed.
+            await _asset_write(db, lease, "asset_operations", "update_one", {"_id": op_id},
+                {"$set": {"status": "completed" if complete else "failed", "summary": summary, "updated_at": _now()}},
+            )
+        import logging as _logging
+        _logging.getLogger("facelessforge.routes").info(
+            "[ATTACH] %s attached %s failed project=%s mock=%s", summary["attached"], summary["failed"], project_id, summary["mock"],
+        )
+        return summary
+    except (asset_commit.LeaseLost, asset_commit.CommitUncertain):
+        raise
+    except BaseException:
+        if op_id:
+            try:
+                await _asset_write(db, lease, "asset_operations", "update_one", {"_id": op_id}, {"$set": {"status": "failed", "updated_at": _now()}})
+            except Exception:  # noqa: BLE001
+                logger.critical("could not mark auto-attach operation failed op=%s", op_id, exc_info=True)
+        raise
 
 
 # ============================ THUMBNAIL IMAGE GENERATION ============================
@@ -2345,28 +2774,40 @@ async def upload_music(project_id: str, file: UploadFile = File(...),
     ext = (Path(file.filename or "").suffix or "").lower()
     if ext not in MUSIC_ALLOWED_EXTS:
         raise HTTPException(status_code=422, detail=f"Unsupported audio type {ext or 'unknown'}")
+    # Same pre-read guard as client assets: an oversized declared body is refused
+    # before it is buffered.
+    if file.size is not None and file.size > MUSIC_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="Music file exceeds 20 MB")
     raw = await file.read()
     if len(raw) > MUSIC_MAX_BYTES:
         raise HTTPException(status_code=413, detail="Music file exceeds 20 MB")
     if len(raw) < 1024:
         raise HTTPException(status_code=422, detail="Music file is empty")
     tmp = Path(tempfile.gettempdir()) / f"music-upload-{uuid.uuid4().hex}{ext}"
-    tmp.write_bytes(raw)
     try:
-        info = await asyncio.to_thread(audio_mix_service.probe_audio, tmp)
+        tmp.write_bytes(raw)
+        # Same probe contract as narration uploads: a missing or failing ffprobe is a 422, not a 500.
+        duration = await asyncio.to_thread(_inspect_client_audio, tmp)
     finally:
         try:
             tmp.unlink(missing_ok=True)
         except Exception:  # noqa: BLE001
             pass
-    if not info.get("sample_rate") or not info.get("duration"):
-        raise HTTPException(status_code=422, detail="File is not decodable audio")
-    if info["duration"] > MUSIC_MAX_SECONDS:
+    if duration > MUSIC_MAX_SECONDS:
         raise HTTPException(status_code=422, detail="Music track exceeds 600 seconds")
     from ..storage import get_storage as _gs
     asset_id = str(uuid.uuid4())
     key = f"music/{project_id}/{asset_id}{ext}"
-    saved = _gs().save_file(_stage_upload_copy(raw, key, ext), key, "audio/mpeg")
+    staged = _stage_upload_copy(raw, key, ext)
+    try:
+        saved = _gs().save_file(staged, key, "audio/mpeg")
+    except Exception:
+        # A storage outage must not orphan the staged copy in $TMPDIR.
+        try:
+            staged.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
+        raise
     doc = {
         "id": asset_id,
         "project_id": project_id,
@@ -2376,7 +2817,7 @@ async def upload_music(project_id: str, file: UploadFile = File(...),
         "storage_key": saved.key,
         "preview_url": saved.preview_path or saved.url,
         "source": "upload",
-        "duration": info["duration"],
+        "duration": duration,
         "rights_confirmed": bool(rights_confirmed),
         "rights_note": (rights_note or "")[:200],
         "mock": False,
@@ -2396,10 +2837,21 @@ async def upload_music(project_id: str, file: UploadFile = File(...),
 
 
 def _stage_upload_copy(raw: bytes, key: str, ext: str, prefix: str = "music-store"):
-    """Persist upload bytes to a temp path for the storage backend."""
+    """Persist upload bytes to a temp path for the storage backend.
+
+    The caller owns the returned path and must unlink it when storage fails. A
+    partial write here is removed before the error propagates.
+    """
     import tempfile
     tmp = Path(tempfile.gettempdir()) / f"{prefix}-{uuid.uuid4().hex}{ext}"
-    tmp.write_bytes(raw)
+    try:
+        tmp.write_bytes(raw)
+    except BaseException:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
+        raise
     return tmp
 
 
@@ -2584,7 +3036,11 @@ async def render_start(project_id: str,
         raise HTTPException(status_code=400, detail=detail)
     # Pass burn_subtitles and aspect to queue (burn defaults False as per user request — not during production)
     try:
-        job = await render_service.queue_render(project_id, requested_by=user["id"], burn_subtitles=bool(body.burn_subtitles), aspect_ratio=body.aspect_ratio)
+        job = await render_service.queue_render(
+            project_id, requested_by=user["id"], burn_subtitles=bool(body.burn_subtitles),
+            aspect_ratio=body.aspect_ratio,
+            expected_inputs=project_lease.render_input_snapshot(project),
+        )
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=_scrub_email(str(e)))
     import logging as _logging

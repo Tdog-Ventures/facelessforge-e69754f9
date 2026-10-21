@@ -262,6 +262,12 @@ class AssetStatusUpdate(BaseModel):
 class AutoAttachRequest(BaseModel):
     replace_existing: bool = False
     media_type: Literal["both", "videos", "photos"] = "both"
+    # Client-generated key for this operation. Replacement requires one; a repeated
+    # request with the same key replays the stored outcome instead of attaching or
+    # charging again, and a failed one resumes without re-charging finished scenes.
+    idempotency_key: Optional[str] = Field(
+        default=None, min_length=8, max_length=80, pattern=r"^[A-Za-z0-9._:-]+$",
+    )
 
 
 class GenerateThumbnailImagesRequest(BaseModel):

@@ -10,6 +10,10 @@ from fastapi import UploadFile
 from app import storage as storage_module
 from app.render import _order_scene_candidates
 from app.routes import api as api_routes
+import subprocess
+
+# The real probe, captured before fixtures replace it with fakes.
+_REAL_INSPECT_CLIENT_AUDIO = api_routes._inspect_client_audio
 
 
 class FakeResult:
@@ -264,13 +268,21 @@ def test_client_visuals_are_preferred_over_stock_for_rendering():
     assert [a["id"] for a in ordered] == ["client", "stock", "brand"]
 
 
+class _NoReadUpload(UploadFile):
+    """An upload whose body must never be read: any read() fails the test."""
+
+    async def read(self, size=-1):  # noqa: D401 - UploadFile API
+        raise AssertionError("oversized upload body was read before the size guard ran")
+
+
 @pytest.mark.asyncio
 async def test_oversized_body_rejected_before_read(monkeypatch, fake_media):
-    # Regression for the #18 review: the whole body used to be read into
-    # memory before the size check, so an oversized upload spiked RAM.
+    # Regression for the #18 review: the whole body used to be read into memory
+    # before the size check. Here reading would fail the test outright, so the
+    # 413 can only come from the declared-size guard that runs first.
     db = FakeDB(_project())
     monkeypatch.setattr(api_routes, "get_db", lambda: db)
-    oversized = UploadFile(
+    oversized = _NoReadUpload(
         filename="clip.mp4", file=io.BytesIO(b"x"),
         size=api_routes.CLIENT_VIDEO_MAX_BYTES + 1,
     )
@@ -283,6 +295,26 @@ async def test_oversized_body_rejected_before_read(monkeypatch, fake_media):
 
     assert getattr(exc.value, "status_code", None) == 413
     assert fake_media.calls == [], "oversized body must never reach the storage layer"
+    assert db.assets.docs == []
+
+
+@pytest.mark.asyncio
+async def test_oversized_before_after_image_rejected_before_read(monkeypatch, fake_media):
+    db = FakeDB(_project(), scenes=[_scene()])
+    monkeypatch.setattr(api_routes, "get_db", lambda: db)
+    oversized = _NoReadUpload(
+        filename="half.jpg", file=io.BytesIO(b"x"),
+        size=api_routes.CLIENT_IMAGE_MAX_BYTES + 1,
+    )
+
+    with pytest.raises(Exception) as exc:
+        await api_routes.upload_client_asset(
+            "p1", file=oversized, scene_id="s1",
+            asset_type="before_after", user=_user(),
+        )
+
+    assert getattr(exc.value, "status_code", None) == 413
+    assert fake_media.calls == []
 
 
 @pytest.mark.asyncio
@@ -381,3 +413,133 @@ async def test_staged_temp_copy_is_removed_when_storage_save_fails(monkeypatch, 
     assert "storage outage" in str(exc.value)
     after = set(p.name for p in tmpdir.glob("client-asset-*"))
     assert after == before, f"orphaned staged files: {after - before}"
+
+
+# ---------------------------------------------------------------- music uploads
+
+def _music_upload(name: str = "bed.mp3", data: bytes = b"m" * 4096, **over) -> UploadFile:
+    return UploadFile(filename=name, file=io.BytesIO(data), **over)
+
+
+@pytest.fixture
+def music_env(monkeypatch, fake_media):
+    db = FakeDB(_project())
+    monkeypatch.setattr(api_routes, "get_db", lambda: db)
+    # Music uploads exercise the real probe contract, not the narration fake.
+    monkeypatch.setattr(api_routes, "_inspect_client_audio", _REAL_INSPECT_CLIENT_AUDIO)
+
+    async def passthrough(_db, project):
+        return project
+
+    monkeypatch.setattr(api_routes, "_attach_project_view", passthrough)
+    monkeypatch.setattr(api_routes.audio_mix_service, "probe_audio",
+                        lambda _p: {"sample_rate": 44100, "channels": 2, "duration": 42.0, "peak_db": -3.0})
+    return db
+
+
+@pytest.mark.asyncio
+async def test_music_oversized_body_rejected_before_read(music_env, fake_media):
+    oversized = _NoReadUpload(
+        filename="bed.mp3", file=io.BytesIO(b"x"),
+        size=api_routes.MUSIC_MAX_BYTES + 1,
+    )
+
+    with pytest.raises(Exception) as exc:
+        await api_routes.upload_music("p1", file=oversized, rights_confirmed=False,
+                                      rights_note="", user=_user())
+
+    assert getattr(exc.value, "status_code", None) == 413
+    assert fake_media.calls == []
+
+
+@pytest.mark.asyncio
+async def test_music_probe_missing_ffprobe_degrades_to_422(monkeypatch, music_env, fake_media):
+    # Regression: upload_music called probe_audio directly, so a missing ffprobe
+    # surfaced as a bare 500. Narration uploads already returned 422.
+    def missing_binary(_path):
+        raise FileNotFoundError("ffprobe")
+
+    monkeypatch.setattr(api_routes.audio_mix_service, "probe_audio", missing_binary)
+
+    with pytest.raises(Exception) as exc:
+        await api_routes.upload_music("p1", file=_music_upload(), rights_confirmed=False,
+                                      rights_note="", user=_user())
+
+    assert getattr(exc.value, "status_code", None) == 422
+    assert fake_media.calls == []
+    assert music_env.assets.docs == []
+
+
+@pytest.mark.asyncio
+async def test_music_probe_timeout_degrades_to_422(monkeypatch, music_env, fake_media):
+    def hung(_path):
+        raise subprocess.TimeoutExpired(cmd="ffprobe", timeout=60)
+
+    monkeypatch.setattr(api_routes.audio_mix_service, "probe_audio", hung)
+
+    with pytest.raises(Exception) as exc:
+        await api_routes.upload_music("p1", file=_music_upload(), rights_confirmed=False,
+                                      rights_note="", user=_user())
+
+    assert getattr(exc.value, "status_code", None) == 422
+
+
+@pytest.mark.asyncio
+async def test_music_probe_none_report_degrades_to_422(monkeypatch, music_env):
+    monkeypatch.setattr(api_routes.audio_mix_service, "probe_audio", lambda _p: None)
+
+    with pytest.raises(Exception) as exc:
+        await api_routes.upload_music("p1", file=_music_upload(), rights_confirmed=False,
+                                      rights_note="", user=_user())
+
+    assert getattr(exc.value, "status_code", None) == 422
+
+
+@pytest.mark.asyncio
+async def test_music_storage_failure_removes_staged_copy(monkeypatch, music_env, fake_media):
+    import tempfile
+
+    def outage(path, key, content_type):
+        raise RuntimeError("storage outage")
+
+    fake_media.save_file = outage
+    tmpdir = Path(tempfile.gettempdir())
+    before = set(p.name for p in tmpdir.glob("music-store-*"))
+
+    with pytest.raises(Exception) as exc:
+        await api_routes.upload_music("p1", file=_music_upload(), rights_confirmed=False,
+                                      rights_note="", user=_user())
+
+    assert "storage outage" in str(exc.value), "the original error must not be masked"
+    after = set(p.name for p in tmpdir.glob("music-store-*"))
+    assert after == before, f"orphaned staged music copies: {after - before}"
+    assert music_env.assets.docs == []
+
+
+@pytest.mark.asyncio
+async def test_music_upload_records_probed_duration_and_selects_when_rights_confirmed(music_env, fake_media):
+    doc = await api_routes.upload_music(
+        "p1", file=_music_upload(), rights_confirmed=True, rights_note="own track", user=_user(),
+    )
+
+    assert doc["music_enabled"] is True
+    assert music_env.assets.docs[0]["duration"] == 42.0
+    assert music_env.assets.docs[0]["asset_type"] == "music_audio"
+    assert fake_media.calls[0]["key"].startswith("music/p1/")
+
+
+def test_stage_upload_copy_leaves_nothing_behind_when_write_fails(monkeypatch):
+    import tempfile
+
+    tmpdir = Path(tempfile.gettempdir())
+    before = set(p.name for p in tmpdir.glob("music-store-*"))
+
+    def failing_write(self, data, *a, **kw):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Path, "write_bytes", failing_write)
+    with pytest.raises(OSError):
+        api_routes._stage_upload_copy(b"x" * 10, "music/p1/a.mp3", ".mp3")
+    monkeypatch.undo()
+    after = set(p.name for p in tmpdir.glob("music-store-*"))
+    assert after == before

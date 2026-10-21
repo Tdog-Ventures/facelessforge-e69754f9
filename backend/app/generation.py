@@ -487,11 +487,13 @@ Do not include BEAT markers, section headers, or structural labels (such as "BEA
             # generic opening ("Today we are looking at what") and drops the
             # topic entirely. Ship a concise, topic-bearing script instead.
             topic_words = len(re.findall(r"\b\w+\b", topic))
-            narration = (
-                f"What the science says about {topic}"
-                if topic_words + 5 <= target_words
-                else topic
-            )
+            if topic_words + 5 <= target_words:
+                narration = f"What the science says about {topic}"
+            else:
+                # An over-budget topic is cut to the budget itself. Finalization tolerates
+                # a 50% overrun, but render timing only absorbs a 5% tempo change, so a
+                # full 7-9 word topic against a 6-word budget would fail render preflight.
+                narration = " ".join(re.findall(r"\b\w+\b", topic)[: max(1, target_words)])
             return _finalize_script({
                 "hook_option_one": f"What science says about {topic}",
                 "hook_option_two": f"The science of {topic}, truthfully",
