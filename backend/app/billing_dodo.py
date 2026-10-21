@@ -234,6 +234,27 @@ async def dodo_webhook(
         logger.warning(f"Webhook signature failed id={webhook_id}: {e}")
         raise HTTPException(status_code=401, detail=f"Invalid signature: {e}")
 
+    # Persist reviews before the Redis grant guard: a crash must not acknowledge
+    # a refund for which no durable review exists. Mongo _id provides dedupe.
+    try:
+        review_payload = json.loads(body)
+    except (ValueError, TypeError):
+        review_payload = {}
+    review_type = str(review_payload.get("type") or "") if isinstance(review_payload, dict) else ""
+    from .dodo_reversals import REVERSAL_EVENTS, REVIEW_EVENTS, handle_reversal
+    if review_type in REVERSAL_EVENTS | REVIEW_EVENTS:
+        if not webhook_id:
+            raise HTTPException(400, "Webhook identity required")
+        try:
+            from .db import get_db
+            review_data = review_payload.get("data") or {}
+            if not isinstance(review_data, dict):
+                review_data = {}
+            return await handle_reversal(get_db(), r, review_type, review_data, webhook_id)
+        except Exception:
+            logger.exception("Dodo review persistence failed id=%s", webhook_id)
+            raise HTTPException(503, "Billing review pending; retry required")
+
     # 2. Idempotency - check before processing
     # Use helper that does SET NX; also check legacy SISMEMBER
     if webhook_id:
