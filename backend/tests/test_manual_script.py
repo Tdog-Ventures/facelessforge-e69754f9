@@ -145,6 +145,36 @@ async def test_manual_script_update(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_script_update_can_replace_retention_beats(monkeypatch):
+    # Regression for CodeRabbit P5 in PR #17: ScriptUpdate dropped
+    # retention_beats entirely, so every material edit persisted [] even when
+    # the caller supplied a fresh set.
+    _llm_guard(monkeypatch)
+    old = {"id": "s1", "project_id": "project-1", "full_script": "word " * 60,
+           "word_count": 60, "source": "manual", "retention_beats": ["stale beat"]}
+    db = FakeDB(_project(), scripts=[old])
+    monkeypatch.setattr(api_routes, "get_db", lambda: db)
+    view = await _patch(db, "project-1", {
+        "full_script": "term " * 40,
+        "retention_beats": ["fresh beat one", "fresh beat two"],
+    }, _user())
+
+    assert view["script"]["retention_beats"] == ["fresh beat one", "fresh beat two"]
+
+
+@pytest.mark.asyncio
+async def test_material_script_edit_still_clears_unsupplied_beats(monkeypatch):
+    _llm_guard(monkeypatch)
+    old = {"id": "s1", "project_id": "project-1", "full_script": "word " * 60,
+           "word_count": 60, "source": "manual", "retention_beats": ["stale beat"]}
+    db = FakeDB(_project(), scripts=[old])
+    monkeypatch.setattr(api_routes, "get_db", lambda: db)
+    view = await _patch(db, "project-1", {"full_script": "term " * 40}, _user())
+
+    assert view["script"]["retention_beats"] == []
+
+
+@pytest.mark.asyncio
 async def test_cross_user_script_write_forbidden(monkeypatch):
     db = FakeDB(_project(uid="owner-1"))
     monkeypatch.setattr(api_routes, "get_db", lambda: db)

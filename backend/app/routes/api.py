@@ -602,9 +602,35 @@ async def update_project(project_id: str, body: ProjectUpdate, user=Depends(get_
     if "target_duration" in patch and not (5 <= int(patch["target_duration"]) <= 3600):
         raise HTTPException(status_code=422, detail="Target duration must be 5..3600s")
     commercial_fields = {"production_mode", "client_name", "structured_brief", "verified_cta"}
+    if "production_mode" in patch and patch["production_mode"] != project.get("production_mode"):
+        # The render worker snapshots production_mode when the job starts and
+        # gates release/auto-post with it; re-reading the (patched) project
+        # only refreshes surrounding fields. A mid-render mode switch could
+        # therefore ungated auto-post an editorial render or record commercial
+        # post-QA metadata the new mode never validated. Block until idle.
+        from .. import render as render_service
+
+        if await render_service.is_render_active(project_id):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Cannot change production_mode while a render is active; "
+                    "wait for the render to finish or cancel it first."
+                ),
+            )
     if commercial_fields.intersection(patch):
         merged = {**project, **patch}
-        errors = commercial_project_errors(merged)
+        # Creation parity: an editorial project must not carry commercial
+        # ground truth, so a later commercial switch validates against fresh
+        # client data instead of inheriting stale values.
+        if merged.get("production_mode") == "editorial":
+            patch.update({
+                "client_name": None,
+                "structured_brief": None,
+                "verified_cta": None,
+                "brand_assets_supplied": False,
+            })
+        errors = commercial_project_errors({**project, **patch})
         if errors:
             raise HTTPException(
                 status_code=422,

@@ -275,7 +275,10 @@ async def external_render_video(
         )
         target_duration = int(max(5, min(3600, round(last_end))))
     else:
-        words = max(50, len(body.script.split()))
+        # Duration from actual script length; no 50-word floor or a short
+        # script would be padded to an over-long 20s target and then
+        # auto-corrected only by the render-side duration autofit.
+        words = len(body.script.split())
         target_duration = int(max(5, min(3600, round(words / 2.5))))
 
     project_id = str(uuid.uuid4())
