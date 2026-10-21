@@ -215,3 +215,82 @@ def test_run_render_can_read_environment_before_script_lookup(monkeypatch):
 
     with pytest.raises(_ReachedScriptLookup, match="script lookup reached"):
         asyncio.run(render._run_render("job-id", "project-id"))
+
+
+def _silence_tone_video(dest: Path, segments: list[tuple[str, float]]) -> Path:
+    """Video with concatenated ('tone'|'silence', seconds) audio segments."""
+    total = sum(seconds for _, seconds in segments)
+    inputs: list[str] = []
+    filters: list[str] = []
+    for index, (kind, seconds) in enumerate(segments, start=1):
+        if kind == "tone":
+            inputs += ["-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}"]
+        else:
+            inputs += ["-f", "lavfi", "-i", f"anullsrc=r=44100:cl=mono:d={seconds}"]
+        filters.append(f"[{index}:a]")
+    graph = "".join(filters) + f"concat=n={len(segments)}:v=0:a=1[a]"
+    _run([ffmpeg, "-y",
+          "-f", "lavfi", "-i",
+          f"testsrc2=size={portrait_W}x{portrait_H}:rate=30:duration={total}",
+          *inputs,
+          "-filter_complex", graph,
+          "-map", "0:v", "-map", "[a]",
+          "-c:v", "libx264", "-pix_fmt", "yuv420p",
+          "-c:a", "aac", "-shortest", str(dest)])
+    return dest
+
+
+def test_check_b_allows_silence_within_intentional_intro(tmp_path: Path):
+    """Incident 2026-10-20: a correct 30.07s render failed because the 2.5s
+    silent title intro exceeded the fixed 5% skip (1.5s). The intro contract
+    must allow that exact leading window without weakening interior checks."""
+    video = _silence_tone_video(tmp_path / "intro_silence.mp4",
+                                [("silence", 2.5), ("tone", 27.57)])
+    result = asyncio.run(verify.check_b_silence_gaps(str(video), intro_seconds=2.5))
+    assert result["gaps_total"] == 1
+    assert result["gaps_offending"] == 0, result
+    assert result["passed"] is True
+
+
+def test_check_b_still_rejects_leading_silence_without_intro_contract(tmp_path: Path):
+    video = _silence_tone_video(tmp_path / "no_intro_contract.mp4",
+                                [("silence", 2.5), ("tone", 27.57)])
+    result = asyncio.run(verify.check_b_silence_gaps(str(video)))
+    assert result["gaps_offending"] == 1
+    assert result["passed"] is False
+
+
+def test_check_b_rejects_silence_that_runs_past_the_intro(tmp_path: Path):
+    video = _silence_tone_video(tmp_path / "long_intro_silence.mp4",
+                                [("silence", 4.0), ("tone", 26.07)])
+    result = asyncio.run(verify.check_b_silence_gaps(str(video), intro_seconds=2.5))
+    assert result["gaps_offending"] == 1
+    assert result["passed"] is False
+
+
+def test_check_b_rejects_interior_silence_even_with_intro(tmp_path: Path):
+    video = _silence_tone_video(tmp_path / "interior_silence.mp4",
+                                [("silence", 2.5), ("tone", 5.0),
+                                 ("silence", 3.0), ("tone", 5.0)])
+    result = asyncio.run(verify.check_b_silence_gaps(str(video), intro_seconds=2.5))
+    assert result["gaps_offending"] == 1
+    assert result["passed"] is False
+
+
+def test_verify_render_prefers_existing_local_artifact(tmp_path: Path, monkeypatch):
+    """A slow object-storage edge must not stall verification: the local copy
+    of the already-uploaded artifact is verified first."""
+    video = _uniform_tone_video(tmp_path / "local_artifact.mp4", duration_s=6.0)
+
+    async def _must_not_download(*_args, **_kwargs):
+        raise AssertionError("remote download attempted despite local artifact")
+
+    monkeypatch.setattr(verify, "_download_video", _must_not_download)
+    result = asyncio.run(verify.verify_render(
+        url="https://example.invalid/render.mp4",
+        local_fallback_path=str(video),
+        intro_seconds=2.5,
+    ))
+    assert "Failed to download" not in str(result.get("error", ""))
+    assert result["checks"], result
+    assert next(c for c in result["checks"] if c["check"] == "b")["passed"] is True
