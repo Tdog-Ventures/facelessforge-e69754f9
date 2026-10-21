@@ -683,7 +683,14 @@ def _split_script_exact(full_script: str, scene_count: int) -> list[str]:
         if remaining_scenes == 1:
             chunks.append(" ".join(words[start:]))
             break
-        target = (total - start) / remaining_scenes
+        words_left = total - start
+        # Not enough words to still hand every later scene at least one?
+        # Hand out at most one word per scene (empty chunks once they run
+        # out) instead of letting the clamps go negative and slice words
+        # twice, which used to raise IndexError for long scene plans over
+        # short scripts.
+        can_feed_all_later = words_left >= remaining_scenes
+        target = words_left / remaining_scenes
         end = start + max(1, int(round(target)))
         best = end
         for delta in range(0, 5):
@@ -694,7 +701,10 @@ def _split_script_exact(full_script: str, scene_count: int) -> list[str]:
             else:
                 continue
             break
-        best = min(max(best, start + 1), total - (remaining_scenes - 1))
+        if can_feed_all_later:
+            best = min(max(best, start + 1), total - (remaining_scenes - 1))
+        else:
+            best = min(start + 1, total)
         chunks.append(" ".join(words[start:best]))
         start = best
     return chunks

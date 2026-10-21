@@ -197,6 +197,18 @@ def test_exact_splitter_never_hands_empty_chunks_to_late_scenes():
     assert " ".join(chunks) == " ".join(text.split())
 
 
+def test_exact_splitter_stays_finite_when_words_fewer_than_scenes():
+    # Regression found while running PR #18's padding review test: with a
+    # short script against 120 scenes the word-splitting clamps went
+    # negative and sliced words twice, raising IndexError.
+    text = "A short b roll scene."
+    chunks = generation._split_script_exact(text, 120)
+
+    assert len(chunks) == 120
+    assert " ".join(chunks).split() == text.split()  # no word lost or duplicated
+    assert all(chunk is not None for chunk in chunks)
+
+
 def test_short_educational_budget_fallback_keeps_the_topic(monkeypatch):
     # Regression for CodeRabbit P7 in PR #15: a 5s editorial target leaves
     # ~6 narration words; truncating the long skeleton dropped the topic and
