@@ -920,6 +920,11 @@ async def update_script(project_id: str, body: ScriptUpdate, user=Depends(get_cu
         if existing and old_text != new_text:
             # Material change: dependent drafts derived from the old script go
             # stale (scenes, metadata, thumbnail briefs, voiceover audio).
+            # The old hook/beats/CTA must not survive as claims the new script
+            # no longer supports; callers may still send replacements explicitly.
+            patch.setdefault("selected_hook", "")
+            patch.setdefault("cta_block", "")
+            patch.setdefault("retention_beats", [])
             # History is preserved: render_jobs / master MP4 rows are never touched.
             scenes_res = await db.scenes.delete_many({"project_id": project_id})
             meta_res = await db.metadata_packages.delete_many({"project_id": project_id})

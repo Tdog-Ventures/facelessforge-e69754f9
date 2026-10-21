@@ -172,7 +172,10 @@ async def test_manual_script_validation(monkeypatch):
 async def test_material_change_invalidates_drafts_not_masters(monkeypatch):
     _llm_guard(monkeypatch)
     old = {"id": "s1", "project_id": "project-1", "full_script": "old text here " * 10,
-           "word_count": 30, "source": "ai_generated"}
+           "word_count": 30, "source": "ai_generated",
+           "selected_hook": "Zapier connects everything",
+           "retention_beats": ["Zapier connects everything smoothly"],
+           "cta_block": "Book a Zapier demo"}
     scenes = [{"id": "sc1", "project_id": "project-1"}]
     metadata = [{"id": "m1", "project_id": "project-1"}]
     assets = [
@@ -197,6 +200,9 @@ async def test_material_change_invalidates_drafts_not_masters(monkeypatch):
     assert db.render_jobs.docs[0]["output_storage_key"] == "renders/project-1/j1.mp4"
     assert all(c[0] != "delete_many" for c in db.render_jobs.calls)
     assert db.projects.docs[0].get("selected_voiceover_asset_id") is None
+    assert view["script"]["selected_hook"] == ""
+    assert view["script"]["retention_beats"] == []
+    assert view["script"]["cta_block"] == ""
     assert view["script_notice"].startswith("Script updated")
     assert view["script_invalidated"] == {"scenes": 1, "metadata": 1, "assets": 2}
 
