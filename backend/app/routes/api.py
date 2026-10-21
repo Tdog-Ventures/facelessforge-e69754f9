@@ -577,8 +577,8 @@ async def update_project(project_id: str, body: ProjectUpdate, user=Depends(get_
     project = await db.projects.find_one({"id": project_id}, {"_id": 0})
     _ensure_project_access(project, user, write=True)
     patch = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
-    if "target_duration" in patch and not (30 <= int(patch["target_duration"]) <= 3600):
-        raise HTTPException(status_code=422, detail="Target duration must be 30..3600s")
+    if "target_duration" in patch and not (5 <= int(patch["target_duration"]) <= 3600):
+        raise HTTPException(status_code=422, detail="Target duration must be 5..3600s")
     if patch:
         patch["updated_at"] = _now()
         await db.projects.update_one({"id": project_id}, {"$set": patch})
@@ -1714,7 +1714,8 @@ async def generate_full_voiceover(
         # (never truncated to fit). attempts_used counts this correction.
         factor = narration_budget / measured
         current_words = len(current_text.split())
-        corrected_target = max(30.0, min(3600.0, round((current_words * factor) / 2.5 + 2.5)))
+        intro_seconds = 0.0 if project.get("production_mode") == "commercial_ad" else 2.5
+        corrected_target = max(5.0, min(3600.0, round((current_words * factor) / 2.5 + intro_seconds)))
         actions.append(
             f"attempt {attempts_used}: measured {measured:.2f}s vs {narration_budget:.2f}s budget — "
             f"regenerating AI script at {corrected_target:.0f}s budget"

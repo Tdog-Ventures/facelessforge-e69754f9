@@ -18,9 +18,9 @@ DEFAULT_FPS = 30
 DEFAULT_SAMPLE_RATE = 48_000
 
 # Auto-fit loop bounds — mirror the product rule enforced on project updates
-# (target_duration 30..3600s). The loop may only move the selected duration
+# (target_duration 5..3600s). The loop may only move the selected duration
 # inside these bounds; anything else needs a script/voiceover rebuild.
-MIN_AUTOFIT_TARGET_SECONDS = 30
+MIN_AUTOFIT_TARGET_SECONDS = 5
 MAX_AUTOFIT_TARGET_SECONDS = 3600
 # A trailing fit is only worth applying when it actually moves the selection.
 MIN_AUTOFIT_MOVE_SECONDS = 1

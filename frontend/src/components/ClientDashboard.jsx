@@ -62,7 +62,7 @@ function IntakeForm({ onCreated }) {
       <input className="w-full border rounded px-3 py-2" placeholder="Tone (e.g. friendly, professional)" value={form.tone} onChange={handleChange("tone")} required />
       <label className="block text-sm">
         Target duration (seconds)
-        <input type="number" className="w-full border rounded px-3 py-2 mt-1" value={form.target_duration} onChange={handleChange("target_duration")} min={30} max={3600} />
+        <input type="number" className="w-full border rounded px-3 py-2 mt-1" value={form.target_duration} onChange={handleChange("target_duration")} min={5} max={3600} />
       </label>
       {error && <p className="text-red-600 text-sm">{error}</p>}
       <button type="submit" disabled={submitting} className="bg-black text-white px-4 py-2 rounded disabled:opacity-50">
