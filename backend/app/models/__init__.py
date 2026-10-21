@@ -184,6 +184,7 @@ class ThumbnailConcept(BaseModel):
 class ScriptUpdate(BaseModel):
     selected_hook: Optional[str] = None
     full_script: Optional[str] = None
+    retention_beats: Optional[List[str]] = None
     cta_block: Optional[str] = None
     source: Optional[str] = None  # "manual" | "ai_generated"; explicit wins, else preserved
 

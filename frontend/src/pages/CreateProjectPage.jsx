@@ -176,6 +176,18 @@ export default function CreateProjectPage() {
               </div>
               <label className="flex items-center gap-2 text-sm text-zinc-300 mt-3"><input type="checkbox" checked={form.verified_cta.verified} onChange={(e) => update("verified_cta", { ...form.verified_cta, verified: e.target.checked })} /> I verified this CTA with the client.</label>
             </Field>
+            <Field label="Brand assets supplied" name="brand_assets_supplied" hint="Feeds the release grounding gate" errors={errors}>
+              <label className="flex items-center gap-2 text-sm text-zinc-300">
+                <input
+                  type="checkbox"
+                  data-testid="field-brand-assets"
+                  checked={form.brand_assets_supplied}
+                  onChange={(e) => update("brand_assets_supplied", e.target.checked)}
+                  className="h-4 w-4 accent-[#00E5FF] bg-[#0A0A0A] border-zinc-700 rounded"
+                />
+                The client supplied their own brand assets (logo, footage, product shots).
+              </label>
+            </Field>
           </div>
           )}
 

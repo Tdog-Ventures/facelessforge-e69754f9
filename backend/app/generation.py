@@ -67,6 +67,12 @@ strip_beat_artifacts = strip_beat_markers
 
 UNSUPPORTED_TOOL_CLAIMS = ("zapier", "notion", "airtable", "canva", "airtasker")
 
+# Common words that are only "unsupported tool claims" when the brand itself
+# is named. Matching case-insensitively discarded scripts for trivial words —
+# e.g. every educational script about the *notion* of discipline died on the
+# lowercase token "notion".
+CASE_SENSITIVE_TOOL_CLAIMS = frozenset({"notion"})
+
 
 def find_unsupported_tool_claims(script: dict, project: dict) -> list[str]:
     """Return third-party tools the model invented for an unrelated topic.
@@ -79,20 +85,27 @@ def find_unsupported_tool_claims(script: dict, project: dict) -> list[str]:
         return []
     project = project or {}
     brief = project.get("structured_brief") or {}
-    grounded = " ".join(str(value or "") for value in (
+    raw_grounded = " ".join(str(value or "") for value in (
         project.get("topic"), project.get("niche"), project.get("audience"),
         project.get("name"), brief.get("service"), brief.get("offer"),
         brief.get("audience"), brief.get("location"), brief.get("problem"),
-    )).lower()
-    generated = " ".join(str(value or "") for value in (
+    ))
+    raw_generated = " ".join(str(value or "") for value in (
         script.get("full_script"), script.get("selected_hook"),
         script.get("cta_block"),
         " ".join(str(x) for x in (script.get("retention_beats") or [])),
-    )).lower()
+    ))
+
+    def _claims(term: str, raw: str) -> bool:
+        # Case-sensitive terms require the brand casing ("Notion"); all
+        # others match the lowercased text like before.
+        if term in CASE_SENSITIVE_TOOL_CLAIMS:
+            return bool(re.search(rf"\b{re.escape(term.capitalize())}\b", raw))
+        return bool(re.search(rf"\b{re.escape(term)}\b", raw.lower()))
+
     return [
         term for term in UNSUPPORTED_TOOL_CLAIMS
-        if re.search(rf"\b{re.escape(term)}\b", generated)
-        and not re.search(rf"\b{re.escape(term)}\b", grounded)
+        if _claims(term, raw_generated) and not _claims(term, raw_grounded)
     ]
 
 
@@ -468,6 +481,26 @@ Do not include BEAT markers, section headers, or structural labels (such as "BEA
     # Deterministic fallback - on-topic skeleton, never a canned unrelated story.
     topic = (project.get("topic") or project.get("title") or "this subject").strip().rstrip("?")
     if _is_edu:
+        if target_words <= 32:
+            # Short narration budgets (a 5s editorial target leaves ~2.5s of
+            # speech, i.e. ~6 words): the long skeleton below truncates to its
+            # generic opening ("Today we are looking at what") and drops the
+            # topic entirely. Ship a concise, topic-bearing script instead.
+            topic_words = len(re.findall(r"\b\w+\b", topic))
+            narration = (
+                f"What the science says about {topic}"
+                if topic_words + 5 <= target_words
+                else topic
+            )
+            return _finalize_script({
+                "hook_option_one": f"What science says about {topic}",
+                "hook_option_two": f"The science of {topic}, truthfully",
+                "hook_option_three": f"How {topic} affects us - the evidence",
+                "selected_hook": f"What science says about {topic}",
+                "full_script": narration,
+                "retention_beats": [f"The evidence on {topic}"],
+                "cta_block": f"Follow for more evidence on {topic}.",
+            }, narration_dur)
         return _finalize_script({
             "hook_option_one": f"What the research really says about {topic}",
             "hook_option_two": f"The science behind {topic} most people miss",
@@ -621,7 +654,16 @@ def _split_script_exact(full_script: str, scene_count: int) -> list[str]:
             group_len = 0
             while start < len(sentences):
                 candidate = sentences[start]
-                if group and group_len + len(candidate) + 1 > target and len(sentences) - start >= remaining_scenes - 1:
+                sentences_left = len(sentences) - start
+                over_budget = group_len + len(candidate) + 1 > target
+                # The old break only guarded the break path; consuming a
+                # sentence past the target when few sentences remained
+                # starved the later scenes into empty chunks. Two guards
+                # now: break when this group is over budget, and break
+                # when consuming would leave fewer sentences than there
+                # are remaining scenes (each later scene needs >= 1).
+                can_break = bool(group) and sentences_left >= remaining_scenes - 1
+                if can_break and (over_budget or sentences_left < remaining_scenes):
                     break
                 group.append(candidate)
                 group_len += len(candidate) + 1
@@ -641,7 +683,14 @@ def _split_script_exact(full_script: str, scene_count: int) -> list[str]:
         if remaining_scenes == 1:
             chunks.append(" ".join(words[start:]))
             break
-        target = (total - start) / remaining_scenes
+        words_left = total - start
+        # Not enough words to still hand every later scene at least one?
+        # Hand out at most one word per scene (empty chunks once they run
+        # out) instead of letting the clamps go negative and slice words
+        # twice, which used to raise IndexError for long scene plans over
+        # short scripts.
+        can_feed_all_later = words_left >= remaining_scenes
+        target = words_left / remaining_scenes
         end = start + max(1, int(round(target)))
         best = end
         for delta in range(0, 5):
@@ -652,7 +701,10 @@ def _split_script_exact(full_script: str, scene_count: int) -> list[str]:
             else:
                 continue
             break
-        best = min(max(best, start + 1), total - (remaining_scenes - 1))
+        if can_feed_all_later:
+            best = min(max(best, start + 1), total - (remaining_scenes - 1))
+        else:
+            best = min(start + 1, total)
         chunks.append(" ".join(words[start:best]))
         start = best
     return chunks
