@@ -37,6 +37,7 @@ try:
 except Exception:
     check_credits = None  # fallback if billing not yet patched
 from ..scoring import quality_score, quality_label, compute_project_status, scenes_to_csv
+from ..grounding import CLIENT_VISUAL_TYPES
 from ..timing import build_timing_status
 from ..storage import resolve_delivery_url
 from .. import generation as gen
@@ -965,6 +966,229 @@ async def update_metadata(project_id: str, body: MetadataUpdate, user=Depends(ge
 
 
 # ============================ ASSETS ============================
+
+CLIENT_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+CLIENT_VIDEO_EXTS = {".mp4", ".mov", ".webm"}
+CLIENT_AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".ogg", ".flac"}
+CLIENT_UPLOAD_TYPES = {
+    "client_image", "client_video", "before_after",
+    "brand_image", "brand_logo", "voiceover_audio",
+}
+BRAND_UPLOAD_TYPES = {"brand_image", "brand_logo"}
+CLIENT_IMAGE_MAX_BYTES = 15 * 1024 * 1024
+CLIENT_VIDEO_MAX_BYTES = 60 * 1024 * 1024
+CLIENT_AUDIO_MAX_BYTES = 20 * 1024 * 1024
+CLIENT_VIDEO_MAX_SECONDS = 600.0
+CLIENT_IMAGE_MAX_PIXELS = 50_000_000
+
+
+def _inspect_client_image(raw: bytes) -> tuple[int, int]:
+    """Validate image bytes and return (width, height)."""
+    from PIL import Image
+    try:
+        with Image.open(io.BytesIO(raw)) as image:
+            width, height = image.size
+            image.verify()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail="File is not a decodable image") from exc
+    if width <= 0 or height <= 0:
+        raise HTTPException(status_code=422, detail="Image has no usable dimensions")
+    if width * height > CLIENT_IMAGE_MAX_PIXELS:
+        raise HTTPException(status_code=422, detail="Image dimensions are too large")
+    return width, height
+
+
+async def _inspect_client_video(path: Path) -> tuple[int, int, float]:
+    """Validate video bytes with ffprobe and return (width, height, duration)."""
+    from ..verify import ffprobe_video_duration, ffprobe_video_stream
+    try:
+        stream = await ffprobe_video_stream(str(path))
+        duration = await ffprobe_video_duration(str(path))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail="File is not a decodable video") from exc
+    width, height = int(stream.get("width") or 0), int(stream.get("height") or 0)
+    if width <= 0 or height <= 0 or duration <= 0:
+        raise HTTPException(status_code=422, detail="Video has no usable stream")
+    if duration > CLIENT_VIDEO_MAX_SECONDS:
+        raise HTTPException(status_code=422, detail="Client video exceeds 600 seconds")
+    return width, height, duration
+
+
+def _inspect_client_audio(path: Path) -> float:
+    """Validate audio bytes and return duration in seconds."""
+    info = audio_mix_service.probe_audio(path)
+    duration = float((info or {}).get("duration") or 0)
+    if not info.get("sample_rate") or duration <= 0:
+        raise HTTPException(status_code=422, detail="File is not decodable audio")
+    return duration
+
+
+def _client_upload_kind(asset_type: str, ext: str, content_type: str) -> str:
+    """Resolve and validate the requested client asset kind."""
+    requested = (asset_type or "").strip().lower()
+    ctype = (content_type or "").lower()
+    if not requested:
+        if ctype.startswith("image/") or ext in CLIENT_IMAGE_EXTS:
+            requested = "client_image"
+        elif ctype.startswith("video/") or ext in CLIENT_VIDEO_EXTS:
+            requested = "client_video"
+        elif ctype.startswith("audio/") or ext in CLIENT_AUDIO_EXTS:
+            requested = "voiceover_audio"
+        else:
+            raise HTTPException(status_code=422, detail="Could not determine upload type")
+    if requested not in CLIENT_UPLOAD_TYPES:
+        raise HTTPException(status_code=422, detail=f"Unsupported asset type {requested}")
+    if requested in {"client_image", "brand_image", "brand_logo"} and ext not in CLIENT_IMAGE_EXTS:
+        raise HTTPException(status_code=422, detail=f"Unsupported image type {ext or 'unknown'}")
+    if requested == "client_video" and ext not in CLIENT_VIDEO_EXTS:
+        raise HTTPException(status_code=422, detail=f"Unsupported video type {ext or 'unknown'}")
+    if requested == "before_after" and ext not in (CLIENT_IMAGE_EXTS | CLIENT_VIDEO_EXTS):
+        raise HTTPException(status_code=422, detail=f"Unsupported before/after type {ext or 'unknown'}")
+    if requested == "voiceover_audio" and ext not in CLIENT_AUDIO_EXTS:
+        raise HTTPException(status_code=422, detail=f"Unsupported audio type {ext or 'unknown'}")
+    return requested
+
+
+@router.post("/projects/{project_id}/assets/upload")
+async def upload_client_asset(
+    project_id: str,
+    file: UploadFile = File(...),
+    scene_id: str = Form(""),
+    asset_type: str = Form(""),
+    user=Depends(get_current_user),
+):
+    """Upload a client image/video/brand asset or narration audio.
+
+    Client visuals are scene-bound. Brand assets may be project-level. A
+    project-level narration upload becomes the selected full voiceover only
+    when no full voiceover is already selected.
+    """
+    import hashlib
+    import mimetypes
+    import tempfile
+
+    db = get_db()
+    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    _ensure_project_access(project, user, write=True)
+    if user["role"] == "viewer":
+        raise HTTPException(status_code=403, detail="Viewer cannot upload assets")
+
+    ext = (Path(file.filename or "").suffix or "").lower()
+    kind = _client_upload_kind(asset_type, ext, file.content_type or "")
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=422, detail="Uploaded file is empty")
+    limit = (
+        CLIENT_IMAGE_MAX_BYTES if kind in {"client_image", "brand_image", "brand_logo"}
+        else CLIENT_VIDEO_MAX_BYTES if kind in {"client_video", "before_after"}
+        else CLIENT_AUDIO_MAX_BYTES
+    )
+    if len(raw) > limit:
+        raise HTTPException(status_code=413, detail=f"File exceeds {limit // (1024 * 1024)} MB")
+
+    scene = None
+    scene_id = (scene_id or "").strip()
+    if kind in {"client_image", "client_video", "before_after"} and not scene_id:
+        raise HTTPException(status_code=422, detail="scene_id is required for client visuals")
+    if scene_id:
+        scene = await db.scenes.find_one({"id": scene_id, "project_id": project_id}, {"_id": 0})
+        if not scene:
+            raise HTTPException(status_code=404, detail="Scene not found for this project")
+
+    width = height = None
+    duration = None
+    if kind in {"client_image", "brand_image", "brand_logo"}:
+        width, height = _inspect_client_image(raw)
+    elif kind == "client_video":
+        tmp = Path(tempfile.gettempdir()) / f"client-video-{uuid.uuid4().hex}{ext}"
+        tmp.write_bytes(raw)
+        try:
+            width, height, duration = await _inspect_client_video(tmp)
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:  # noqa: BLE001
+                pass
+    elif kind == "before_after":
+        if ext in CLIENT_VIDEO_EXTS:
+            tmp = Path(tempfile.gettempdir()) / f"client-before-after-{uuid.uuid4().hex}{ext}"
+            tmp.write_bytes(raw)
+            try:
+                width, height, duration = await _inspect_client_video(tmp)
+            finally:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except Exception:  # noqa: BLE001
+                    pass
+        else:
+            width, height = _inspect_client_image(raw)
+    else:
+        tmp = Path(tempfile.gettempdir()) / f"client-audio-{uuid.uuid4().hex}{ext}"
+        tmp.write_bytes(raw)
+        try:
+            duration = _inspect_client_audio(tmp)
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:  # noqa: BLE001
+                pass
+
+    from ..storage import get_storage as _gs
+    asset_id = str(uuid.uuid4())
+    key = f"assets/{project_id}/{asset_id}{ext}"
+    mime = mimetypes.guess_type(file.filename or "")[0] or file.content_type or "application/octet-stream"
+    saved = _gs().save_file(_stage_upload_copy(raw, key, ext, prefix="client-asset"), key, mime)
+
+    is_full_voice = kind == "voiceover_audio" and not scene_id
+    order = None
+    start_offset = None
+    scene_duration = None
+    if scene:
+        existing_count = await db.assets.count_documents({
+            "project_id": project_id,
+            "scene_id": scene_id,
+            "asset_type": {"$in": ["stock_video", "stock_image", *CLIENT_VISUAL_TYPES]},
+        })
+        order = int(existing_count or 0)
+        start_offset = order * 3
+        scene_duration = _get_scene_duration(scene)
+
+    doc = {
+        "id": asset_id,
+        "project_id": project_id,
+        "scene_id": scene_id or None,
+        "name": (file.filename or f"Client {kind}")[:200],
+        "asset_type": kind,
+        "file_path": str(saved.file_path) if saved.file_path else None,
+        "storage_key": saved.key,
+        "preview_url": saved.preview_path or saved.url,
+        "source": "client_upload",
+        "provenance": "client_upload",
+        "mime_type": mime,
+        "size_bytes": len(raw),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "width": width,
+        "height": height,
+        "duration": duration,
+        "tags": [],
+        "status": "selected" if is_full_voice else ("attached" if scene else "ready"),
+        "order": order,
+        "start_offset": start_offset,
+        "scene_duration": scene_duration,
+        "uploaded_at": _now(),
+        "created_at": _now(),
+        "updated_at": _now(),
+    }
+    await db.assets.insert_one(dict(doc))
+    project_patch = {"updated_at": _now()}
+    if kind in BRAND_UPLOAD_TYPES:
+        project_patch["brand_assets_supplied"] = True
+    if is_full_voice and not project.get("selected_voiceover_asset_id"):
+        project_patch["selected_voiceover_asset_id"] = asset_id
+    if len(project_patch) > 1:
+        await db.projects.update_one({"id": project_id}, {"$set": project_patch})
+    return _ser(doc)
+
 
 @router.post("/projects/{project_id}/assets")
 async def create_asset(project_id: str, body: AssetCreate, user=Depends(get_current_user)):
@@ -2030,10 +2254,10 @@ async def upload_music(project_id: str, file: UploadFile = File(...),
     return await _attach_project_view(db, await db.projects.find_one({"id": project_id}, {"_id": 0}))
 
 
-def _stage_upload_copy(raw: bytes, key: str, ext: str):
+def _stage_upload_copy(raw: bytes, key: str, ext: str, prefix: str = "music-store"):
     """Persist upload bytes to a temp path for the storage backend."""
     import tempfile
-    tmp = Path(tempfile.gettempdir()) / f"music-store-{uuid.uuid4().hex}{ext}"
+    tmp = Path(tempfile.gettempdir()) / f"{prefix}-{uuid.uuid4().hex}{ext}"
     tmp.write_bytes(raw)
     return tmp
 
