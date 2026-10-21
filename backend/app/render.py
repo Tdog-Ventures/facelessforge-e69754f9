@@ -766,6 +766,14 @@ async def _download_to(url: str, out_path: Path, *, max_bytes: int,
         return False
 
 
+def _order_scene_candidates(candidates: list[dict]) -> list[dict]:
+    """Prefer explicit client visuals over stock, preserving insertion order."""
+    return sorted(
+        candidates,
+        key=lambda asset: 0 if asset.get("asset_type") in CLIENT_VISUAL_TYPES else 1,
+    )
+
+
 def _local_path_for_asset(asset: dict) -> Optional[Path]:
     """If the asset already has a local file_path that exists, return it."""
     fp = asset.get("file_path")
@@ -952,8 +960,10 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
     if used_ext_ids is None:
         used_ext_ids = set()
     visual_tone = (project or {}).get("visual_tone") or ""
-    candidates = [a for a in attached_assets if a.get("scene_id") == scene.get("id")
-                  and a.get("asset_type") in ("stock_image", "stock_video", *CLIENT_VISUAL_TYPES)]
+    candidates = _order_scene_candidates([
+        a for a in attached_assets if a.get("scene_id") == scene.get("id")
+        and a.get("asset_type") in ("stock_image", "stock_video", *CLIENT_VISUAL_TYPES)
+    ])
     out_dir = work_dir / "scenes"
     out_dir.mkdir(parents=True, exist_ok=True)
     fallback_path = out_dir / f"scene_{idx:03d}_fallback.png"
@@ -1137,8 +1147,10 @@ async def _resolve_scene_visuals(scene: dict, attached_assets: list[dict],
         used_ext_ids = set()
     visuals: list[tuple[Path, str]] = []
     seen: set[str] = set()
-    candidates = [a for a in attached_assets if a.get("scene_id") == scene.get("id")
-                  and a.get("asset_type") in ("stock_image", "stock_video", *CLIENT_VISUAL_TYPES)]
+    candidates = _order_scene_candidates([
+        a for a in attached_assets if a.get("scene_id") == scene.get("id")
+        and a.get("asset_type") in ("stock_image", "stock_video", *CLIENT_VISUAL_TYPES)
+    ])
 
     # 1) Attached assets — skip ext_ids already claimed by earlier scenes
     for a in candidates:
