@@ -1302,7 +1302,18 @@ async def auto_attach_assets(project_id: str, body: AutoAttachRequest, user=Depe
     attached = 0
     skipped = 0
     failed = 0
+    near_duplicates_skipped = 0
     details: list[dict] = []
+    # On replace, every existing stock asset is deleted as its scene is
+    # processed, so its title must not block the replacement.
+    project_visual_titles = [] if body.replace_existing else [
+        str(a.get("name") or "")
+        for a in await db.assets.find(
+            {"project_id": project_id, "asset_type": {"$in": ["stock_video", "stock_image"]}},
+            {"_id": 0, "name": 1},
+        ).to_list(1000)
+        if a.get("name")
+    ]
 
     # --- Credits check: sum needed for scenes that will be attached ---
     total_needed = 0
@@ -1416,7 +1427,18 @@ async def auto_attach_assets(project_id: str, body: AutoAttachRequest, user=Depe
                 if ext in existing_ids or prev in existing_ids:
                     continue
                 filtered.append(r)
-            unique = _dedup_by_preview(filtered)[:remaining]
+            unique = _dedup_by_preview(filtered)
+            unique, near_duplicates = filter_distinct_titles(unique, project_visual_titles)
+            for duplicate in near_duplicates:
+                near_duplicates_skipped += 1
+                details.append({
+                    "scene_id": scene_id,
+                    "scene_number": scene.get("scene_number"),
+                    "status": "skipped",
+                    "reason": "near_duplicate",
+                    "title": duplicate.get("title") or duplicate.get("name"),
+                })
+            unique = unique[:remaining]
             if not unique:
                 failed += 1
                 details.append({"scene_id": scene_id, "scene_number": scene.get("scene_number"), "status": "failed", "reason": "no_stock_results"})
@@ -1455,6 +1477,7 @@ async def auto_attach_assets(project_id: str, body: AutoAttachRequest, user=Depe
                 try:
                     await db.assets.insert_one(doc)
                     attached += 1
+                    project_visual_titles.append(doc["name"])
                     details.append({"scene_id": scene_id, "scene_number": scene.get("scene_number"), "status": "attached", "asset_id": doc["id"], "order": order, "start_offset": start_offset})
                 except Exception:
                     skipped += 1
@@ -1487,6 +1510,7 @@ async def auto_attach_assets(project_id: str, body: AutoAttachRequest, user=Depe
         "total": total,
         "attached": attached,
         "skipped": skipped,
+        "near_duplicates_skipped": near_duplicates_skipped,
         "failed": failed,
         "details": details,
         "mock": stock_service.is_mock_mode(),
