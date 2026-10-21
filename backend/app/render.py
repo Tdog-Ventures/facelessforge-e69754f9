@@ -2630,6 +2630,7 @@ async def _run_render(job_id: str, project_id: str):
                     expect_captions=bool(burn_enabled),
                     aspect=aspect,
                     expected_duration=timing.target_seconds,
+                    intro_seconds=timing.intro_seconds,
                 )
                 verification_passed = bool(verification_result.get("overall_passed"))
                 if not verification_passed:

@@ -65,6 +65,37 @@ def strip_beat_markers(text: str) -> str:
 strip_beat_artifacts = strip_beat_markers
 
 
+UNSUPPORTED_TOOL_CLAIMS = ("zapier", "notion", "airtable", "canva", "airtasker")
+
+
+def find_unsupported_tool_claims(script: dict, project: dict) -> list[str]:
+    """Return third-party tools the model invented for an unrelated topic.
+
+    The old script prompt actively told the model to name Zapier/Notion/etc.
+    A generated script may only mention one of these when the project brief
+    already names it. Manual scripts are user-authored and are not rewritten.
+    """
+    if not isinstance(script, dict):
+        return []
+    project = project or {}
+    brief = project.get("structured_brief") or {}
+    grounded = " ".join(str(value or "") for value in (
+        project.get("topic"), project.get("niche"), project.get("audience"),
+        project.get("name"), brief.get("service"), brief.get("offer"),
+        brief.get("audience"), brief.get("location"), brief.get("problem"),
+    )).lower()
+    generated = " ".join(str(value or "") for value in (
+        script.get("full_script"), script.get("selected_hook"),
+        script.get("cta_block"),
+        " ".join(str(x) for x in (script.get("retention_beats") or [])),
+    )).lower()
+    return [
+        term for term in UNSUPPORTED_TOOL_CLAIMS
+        if re.search(rf"\b{re.escape(term)}\b", generated)
+        and not re.search(rf"\b{re.escape(term)}\b", grounded)
+    ]
+
+
 def _load_prompt_template(name: str) -> Optional[str]:
     """Load a prompt template from app/prompts/, None if missing/unreadable."""
     try:
@@ -293,7 +324,8 @@ async def _llm_json(system: str, user: str, cache_key: str = "") -> Optional[dic
 # ------------------------------ SCRIPT ------------------------------
 
 SCRIPT_SYSTEM = (
-    "You are a real business owner talking to a friend. Use contractions, short sentences, 8th grade words. No AI phrases. Start with personal story. For visuals: if you mention Zapier Notion Airtable Canva Airtasker, visual prompt MUST be 'Notion app interface' 'Zapier automation' 'Canva logo' not generic stressed man. Search 3 asset libraries first. "
+    "You are a real business owner talking to a friend. Use contractions, short sentences, 8th grade words. No AI phrases. Start with a personal story. "
+    "Never invent software, tools, integrations, brands, or product names that the user did not provide. "
     "Always respond with strict JSON, no commentary. All text in English."
 )
 
@@ -394,7 +426,11 @@ async def generate_script(project: dict) -> dict:
             if result:
                 coerced = _coerce_script(result)
                 if coerced and coerced.get("full_script"):
-                    return _finalize_script(coerced, narration_dur)
+                    unsupported = find_unsupported_tool_claims(coerced, project)
+                    if unsupported:
+                        logger.warning("Discarding generated script with unsupported tool claims: %s", unsupported)
+                    else:
+                        return _finalize_script(coerced, narration_dur)
             logger.warning("Educational template LLM failed - using on-topic deterministic fallback")
         # Educational topics never fall through to the generic business prompt:
         # straight to the on-topic deterministic fallback below.
@@ -423,7 +459,11 @@ Do not include BEAT markers, section headers, or structural labels (such as "BEA
         if result:
             coerced = _coerce_script(result)
             if coerced and coerced.get("full_script", "").strip():
-                return _finalize_script(coerced, narration_dur)
+                unsupported = find_unsupported_tool_claims(coerced, project)
+                if unsupported:
+                    logger.warning("Discarding generated script with unsupported tool claims: %s", unsupported)
+                else:
+                    return _finalize_script(coerced, narration_dur)
 
     # Deterministic fallback - on-topic skeleton, never a canned unrelated story.
     topic = (project.get("topic") or project.get("title") or "this subject").strip().rstrip("?")
@@ -555,6 +595,69 @@ async def generate_scenes(project: dict, full_script: str) -> list[dict]:
     return await generate_scene_plan(project, {"full_script": full_script or ""})
 
 
+def _split_script_exact(full_script: str, scene_count: int) -> list[str]:
+    """Split narration into scene chunks without changing a single word.
+
+    Scene planning is semantic only: the model may choose visuals and search
+    terms, but it must never rewrite the voiceover.  Concatenating the returned
+    chunks with single spaces reproduces the whitespace-normalised script.
+    """
+    count = max(1, int(scene_count))
+    text = " ".join(str(full_script or "").split())
+    if not text:
+        return [""] * count
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    if len(sentences) >= count:
+        chunks: list[str] = []
+        start = 0
+        remaining_chars = len(text)
+        for index in range(count):
+            remaining_scenes = count - index
+            if remaining_scenes == 1:
+                chunks.append(" ".join(sentences[start:]))
+                break
+            target = remaining_chars / remaining_scenes
+            group: list[str] = []
+            group_len = 0
+            while start < len(sentences):
+                candidate = sentences[start]
+                if group and group_len + len(candidate) + 1 > target and len(sentences) - start >= remaining_scenes - 1:
+                    break
+                group.append(candidate)
+                group_len += len(candidate) + 1
+                start += 1
+            chunks.append(" ".join(group))
+            remaining_chars -= group_len
+        return chunks
+
+    # Fewer sentences than scenes: split by words, preferring punctuation
+    # boundaries near the balanced target.
+    words = text.split(" ")
+    chunks = []
+    start = 0
+    total = len(words)
+    for index in range(count):
+        remaining_scenes = count - index
+        if remaining_scenes == 1:
+            chunks.append(" ".join(words[start:]))
+            break
+        target = (total - start) / remaining_scenes
+        end = start + max(1, int(round(target)))
+        best = end
+        for delta in range(0, 5):
+            for candidate in (end - delta, end + delta):
+                if start < candidate < total and words[candidate - 1].endswith((".", "!", "?", ";", ":")):
+                    best = candidate
+                    break
+            else:
+                continue
+            break
+        best = min(max(best, start + 1), total - (remaining_scenes - 1))
+        chunks.append(" ".join(words[start:best]))
+        start = best
+    return chunks
+
+
 async def generate_scene_plan(project: dict, script: dict) -> list[dict]:
     target_dur = int(project.get("target_duration", 300))
     timing = TimingContract.from_project(project)
@@ -565,6 +668,7 @@ async def generate_scene_plan(project: dict, script: dict) -> list[dict]:
     full_script = script.get("full_script", "")
     if not isinstance(full_script, str):
         full_script = ""
+    exact_chunks = _split_script_exact(full_script, scene_count)
 
     user = f"""Break this script into {scene_count} semantic scenes for a {narration_dur}s narration inside a {target_dur}s faceless YouTube video.
 Do not calculate timestamps. The application assigns an exact frame budget after generation.
@@ -601,7 +705,6 @@ Niche: {project.get('niche', 'business')}"""
                 if len(coerced) > scene_count:
                     coerced = coerced[:scene_count]
                 else:
-                    # Pad with deterministic scenes
                     while len(coerced) < scene_count:
                         idx = len(coerced)
                         start = idx * scene_duration
@@ -610,26 +713,40 @@ Niche: {project.get('niche', 'business')}"""
                             "start_time": float(start),
                             "end_time": float(start + scene_duration),
                             "duration": float(scene_duration),
-                            "narration_text": f"Part {idx + 1} of the video.",
-                            "visual_direction": f"stock b-roll illustrating scene {idx + 1}",
-                            "caption_text": f"Part {idx + 1}",
-                            "search_terms": derive_search_terms(f"Part {idx + 1}", idx, scene_count),
+                            "narration_text": "",
+                            "visual_direction": "",
+                            "caption_text": "",
+                            "search_terms": [],
                         })
-            return normalize_scene_timeline(
-                coerced,
-                narration_frames=timing.narration_frames,
-                fps=timing.fps,
-            )
+            # Code owns narration: model text may paraphrase or invent claims.
+            # Keep its visual planning, but lock every word to the approved script.
+            for idx, scene in enumerate(coerced):
+                scene["narration_text"] = exact_chunks[idx]
+                # Captions are viewer-facing too: derive them from the approved
+                # narration rather than a model paraphrase.
+                first_sentence = re.split(r'(?<=[.!?])\s+', exact_chunks[idx])[0]
+                scene["caption_text"] = truncate_words(first_sentence, 80)
+                if not scene.get("visual_direction"):
+                    scene["visual_direction"] = f"stock b-roll illustrating: {exact_chunks[idx][:80]}"
+                if not scene.get("search_terms"):
+                    scene["search_terms"] = derive_search_terms(exact_chunks[idx], idx, scene_count)
+            joined = " ".join(scene["narration_text"] for scene in coerced)
+            expected = " ".join(full_script.split())
+            if joined != expected:
+                logger.warning("LLM scene narration did not preserve script; using exact fallback split")
+            else:
+                return normalize_scene_timeline(
+                    coerced,
+                    narration_frames=timing.narration_frames,
+                    fps=timing.fps,
+                )
 
-    # Deterministic fallback — visuals derived from each scene's narration,
-    # never from the raw project topic/description text — LOCKED to sceneCount
+    # Deterministic fallback — visuals derived from each scene's exact
+    # narration chunk, never from the raw project topic/description text.
     scene_dur = narration_dur / scene_count
-    sentences = re.split(r'(?<=[.!?])\s+', full_script) if full_script else ["Scene content."] * scene_count
-    chunk = max(1, math.ceil(len(sentences) / scene_count)) if sentences else 1
     scenes = []
-    for i in range(scene_count):
+    for i, narration in enumerate(exact_chunks):
         start = i * scene_dur
-        narration = " ".join(sentences[i * chunk:(i + 1) * chunk]) or f"Part {i + 1} of the video."
         terms = derive_search_terms(narration, i, scene_count)
         scenes.append({
             "scene_number": i + 1,
@@ -638,7 +755,7 @@ Niche: {project.get('niche', 'business')}"""
             "duration": round(scene_dur, 1),
             "narration_text": narration,
             "visual_direction": f"stock b-roll illustrating: {terms[0]}",
-            "caption_text": f"Part {i + 1}",
+            "caption_text": truncate_words(narration, 80) or f"Part {i + 1}",
             "search_terms": terms,
         })
     return normalize_scene_timeline(

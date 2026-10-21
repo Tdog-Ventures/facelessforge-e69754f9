@@ -38,6 +38,7 @@ except Exception:
     check_credits = None  # fallback if billing not yet patched
 from ..scoring import quality_score, quality_label, compute_project_status, scenes_to_csv
 from ..timing import build_timing_status
+from ..grounding import commercial_project_errors
 from ..storage import resolve_delivery_url
 from .. import generation as gen
 from .. import stock as stock_service
@@ -456,12 +457,32 @@ async def create_project(body: ProjectCreate, user=Depends(get_current_user)):
         "cta_goal": body.cta_goal or "subscribe",
         "auto_post": body.auto_post if body.auto_post is not None else False,
         "platforms": body.platforms or [],
+        "production_mode": body.production_mode,
+        "client_name": body.client_name,
+        "structured_brief": body.structured_brief.model_dump() if body.structured_brief else None,
+        "verified_cta": body.verified_cta.model_dump() if body.verified_cta else None,
+        "brand_assets_supplied": bool(body.brand_assets_supplied),
+        "aspect_ratio": body.aspect_ratio or "9:16",
+        "resolution": body.resolution or "1080x1920",
         "status": "DRAFT",
         "quality_score": 0,
         "estimated_cost": 0.0,
         "created_at": _now(),
         "updated_at": _now(),
     }
+    if body.production_mode == "editorial":
+        proj.update({
+            "client_name": None,
+            "structured_brief": None,
+            "verified_cta": None,
+            "brand_assets_supplied": False,
+        })
+    errors = commercial_project_errors(proj)
+    if errors:
+        raise HTTPException(
+            status_code=422,
+            detail="Commercial project requires: " + ", ".join(errors),
+        )
     await db.projects.insert_one(proj)
     return _ser(proj)
 
@@ -579,6 +600,15 @@ async def update_project(project_id: str, body: ProjectUpdate, user=Depends(get_
     patch = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
     if "target_duration" in patch and not (5 <= int(patch["target_duration"]) <= 3600):
         raise HTTPException(status_code=422, detail="Target duration must be 5..3600s")
+    commercial_fields = {"production_mode", "client_name", "structured_brief", "verified_cta"}
+    if commercial_fields.intersection(patch):
+        merged = {**project, **patch}
+        errors = commercial_project_errors(merged)
+        if errors:
+            raise HTTPException(
+                status_code=422,
+                detail="Commercial project requires: " + ", ".join(errors),
+            )
     if patch:
         patch["updated_at"] = _now()
         await db.projects.update_one({"id": project_id}, {"$set": patch})
@@ -920,6 +950,11 @@ async def update_script(project_id: str, body: ScriptUpdate, user=Depends(get_cu
         if existing and old_text != new_text:
             # Material change: dependent drafts derived from the old script go
             # stale (scenes, metadata, thumbnail briefs, voiceover audio).
+            # The old hook/beats/CTA must not survive as claims the new script
+            # no longer supports; callers may still send replacements explicitly.
+            patch.setdefault("selected_hook", "")
+            patch.setdefault("cta_block", "")
+            patch.setdefault("retention_beats", [])
             # History is preserved: render_jobs / master MP4 rows are never touched.
             scenes_res = await db.scenes.delete_many({"project_id": project_id})
             meta_res = await db.metadata_packages.delete_many({"project_id": project_id})
@@ -1267,7 +1302,18 @@ async def auto_attach_assets(project_id: str, body: AutoAttachRequest, user=Depe
     attached = 0
     skipped = 0
     failed = 0
+    near_duplicates_skipped = 0
     details: list[dict] = []
+    # On replace, every existing stock asset is deleted as its scene is
+    # processed, so its title must not block the replacement.
+    project_visual_titles = [] if body.replace_existing else [
+        str(a.get("name") or "")
+        for a in await db.assets.find(
+            {"project_id": project_id, "asset_type": {"$in": ["stock_video", "stock_image"]}},
+            {"_id": 0, "name": 1},
+        ).to_list(1000)
+        if a.get("name")
+    ]
 
     # --- Credits check: sum needed for scenes that will be attached ---
     total_needed = 0
@@ -1381,7 +1427,18 @@ async def auto_attach_assets(project_id: str, body: AutoAttachRequest, user=Depe
                 if ext in existing_ids or prev in existing_ids:
                     continue
                 filtered.append(r)
-            unique = _dedup_by_preview(filtered)[:remaining]
+            unique = _dedup_by_preview(filtered)
+            unique, near_duplicates = filter_distinct_titles(unique, project_visual_titles)
+            for duplicate in near_duplicates:
+                near_duplicates_skipped += 1
+                details.append({
+                    "scene_id": scene_id,
+                    "scene_number": scene.get("scene_number"),
+                    "status": "skipped",
+                    "reason": "near_duplicate",
+                    "title": duplicate.get("title") or duplicate.get("name"),
+                })
+            unique = unique[:remaining]
             if not unique:
                 failed += 1
                 details.append({"scene_id": scene_id, "scene_number": scene.get("scene_number"), "status": "failed", "reason": "no_stock_results"})
@@ -1420,6 +1477,7 @@ async def auto_attach_assets(project_id: str, body: AutoAttachRequest, user=Depe
                 try:
                     await db.assets.insert_one(doc)
                     attached += 1
+                    project_visual_titles.append(doc["name"])
                     details.append({"scene_id": scene_id, "scene_number": scene.get("scene_number"), "status": "attached", "asset_id": doc["id"], "order": order, "start_offset": start_offset})
                 except Exception:
                     skipped += 1
@@ -1452,6 +1510,7 @@ async def auto_attach_assets(project_id: str, body: AutoAttachRequest, user=Depe
         "total": total,
         "attached": attached,
         "skipped": skipped,
+        "near_duplicates_skipped": near_duplicates_skipped,
         "failed": failed,
         "details": details,
         "mock": stock_service.is_mock_mode(),

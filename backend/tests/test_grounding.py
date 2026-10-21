@@ -39,3 +39,28 @@ def test_commercial_grounding_requires_client_assets_for_every_scene():
     result = validate_commercial_grounding(_project(), script, scenes, assets)
     assert result["ok"] is False
     assert any("client visual" in issue.lower() for issue in result["issues"])
+
+
+def test_editorial_project_is_not_blocked_by_client_fields():
+    from backend.app.grounding import commercial_project_errors
+
+    assert commercial_project_errors({
+        "production_mode": "editorial",
+        "client_name": "",
+        "structured_brief": None,
+        "verified_cta": None,
+    }) == []
+
+
+def test_commercial_project_reports_each_missing_ground_truth_field():
+    from backend.app.grounding import commercial_project_errors
+
+    errors = commercial_project_errors({
+        "production_mode": "commercial_ad",
+        "client_name": "",
+        "structured_brief": {"service": "pressure washing"},
+        "verified_cta": {"text": "Call", "destination": "", "verified": False},
+    })
+    assert "Client business name" in errors
+    assert "Offer" in errors
+    assert "Verified CTA" in errors

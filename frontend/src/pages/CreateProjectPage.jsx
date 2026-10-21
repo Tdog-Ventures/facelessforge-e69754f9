@@ -49,7 +49,7 @@ export default function CreateProjectPage() {
     cta_goal: CTAS[0],
     auto_post: false,
     platforms: PLATFORMS.map((p) => p.key),
-    production_mode: "commercial_ad",
+    production_mode: "editorial",
     client_name: "",
     structured_brief: { service: "", offer: "", audience: "", location: "", problem: "" },
     verified_cta: { text: "", destination: "", verified: false },
@@ -61,6 +61,7 @@ export default function CreateProjectPage() {
   const [loading, setLoading] = useState(false);
 
   const update = (k, v) => setForm({ ...form, [k]: v });
+  const isCommercial = form.production_mode === "commercial_ad";
 
   const validate = () => {
     const e = {};
@@ -71,11 +72,13 @@ export default function CreateProjectPage() {
     if (!form.tone) e.tone = "Pick a tone";
     const d = Number(form.target_duration);
     if (!(d >= 5 && d <= 3600)) e.target_duration = "5–3600 seconds";
-    if (!form.client_name.trim()) e.client_name = "Client name is required";
-    for (const key of ["service", "offer", "audience", "location"]) {
-      if (!form.structured_brief[key].trim()) e[`brief_${key}`] = "Required for a commercial brief";
+    if (isCommercial) {
+      if (!form.client_name.trim()) e.client_name = "Client name is required";
+      for (const key of ["service", "offer", "audience", "location"]) {
+        if (!form.structured_brief[key].trim()) e[`brief_${key}`] = "Required for a commercial brief";
+      }
+      if (!form.verified_cta.text.trim() || !form.verified_cta.destination.trim() || !form.verified_cta.verified) e.verified_cta = "Enter and verify the CTA destination";
     }
-    if (!form.verified_cta.text.trim() || !form.verified_cta.destination.trim() || !form.verified_cta.verified) e.verified_cta = "Enter and verify the CTA destination";
     setErrors(e);
     return Object.keys(e).length === 0;
   };
@@ -85,7 +88,14 @@ export default function CreateProjectPage() {
     if (!validate()) return;
     setLoading(true);
     try {
-      const { data } = await api.post("/projects", { ...form, target_duration: Number(form.target_duration) });
+      const payload = { ...form, target_duration: Number(form.target_duration) };
+      if (!isCommercial) {
+        payload.client_name = "";
+        payload.structured_brief = null;
+        payload.verified_cta = null;
+        payload.brand_assets_supplied = false;
+      }
+      const { data } = await api.post("/projects", payload);
       toast.success("Project created", { description: data.name });
       navigate(`/app/projects/${data.id}`);
     } catch (err) {
@@ -126,6 +136,24 @@ export default function CreateProjectPage() {
             </Field>
           </div>
 
+          <div className="border border-zinc-800 bg-[#121212] p-6 rounded-sm space-y-4">
+            <div className="flex items-start gap-3">
+              <input
+                id="commercial-mode"
+                data-testid="field-commercial"
+                type="checkbox"
+                checked={isCommercial}
+                onChange={(e) => update("production_mode", e.target.checked ? "commercial_ad" : "editorial")}
+                className="mt-0.5 h-4 w-4 accent-[#00E5FF] bg-[#0A0A0A] border-zinc-700 rounded"
+              />
+              <div>
+                <label htmlFor="commercial-mode" className="text-sm text-zinc-200">This is a paid client ad (commercial)</label>
+                <p className="text-xs text-zinc-500 mt-1">Leave unchecked for an editorial YouTube video. Commercial ads require client ground truth and verified CTA details.</p>
+              </div>
+            </div>
+          </div>
+
+          {isCommercial && (
           <div className="border border-[#00E5FF]/30 bg-[#121212] p-6 rounded-sm space-y-5">
             <div className="flex items-center gap-2 text-[#00E5FF] mb-2">
               <Sparkles size={14} strokeWidth={1.5} />
@@ -149,6 +177,7 @@ export default function CreateProjectPage() {
               <label className="flex items-center gap-2 text-sm text-zinc-300 mt-3"><input type="checkbox" checked={form.verified_cta.verified} onChange={(e) => update("verified_cta", { ...form.verified_cta, verified: e.target.checked })} /> I verified this CTA with the client.</label>
             </Field>
           </div>
+          )}
 
           <div className="border border-zinc-800 bg-[#121212] p-6 rounded-sm space-y-5">
             <div className="flex items-center gap-2 text-[#7B61FF] mb-2">

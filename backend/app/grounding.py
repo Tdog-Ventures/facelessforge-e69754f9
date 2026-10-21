@@ -101,6 +101,36 @@ def build_asset_manifest(assets: list[dict]) -> list[dict]:
     return [asset_provenance(asset) for asset in assets if asset.get("status") != "rejected"]
 
 
+def commercial_project_errors(project: dict | None) -> list[str]:
+    """Return missing required fields for a commercial project.
+
+    Editorial projects are not client ads and must not be blocked by client
+    brief fields.  The frontend exposes this as a commercial/non-commercial
+    choice; the API enforces the same rule so a crafted request cannot create
+    an ungrounded ad.
+    """
+    project = project or {}
+    if project.get("production_mode") != "commercial_ad":
+        return []
+    errors: list[str] = []
+    if not str(project.get("client_name") or "").strip():
+        errors.append("Client business name")
+    brief = project.get("structured_brief") or {}
+    for key, label in (
+        ("service", "Advertised service"),
+        ("offer", "Offer"),
+        ("audience", "Client audience"),
+        ("location", "Location"),
+    ):
+        if not str(brief.get(key) or "").strip():
+            errors.append(label)
+    cta = project.get("verified_cta") or {}
+    if not (cta.get("verified") and str(cta.get("text") or "").strip()
+            and str(cta.get("destination") or "").strip()):
+        errors.append("Verified CTA")
+    return errors
+
+
 def validate_commercial_grounding(
     project: dict | None,
     script: dict | None,

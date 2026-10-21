@@ -34,7 +34,8 @@ MAX_DURATION_DIFF = 2.0          # legacy fallback when no project target is sup
 EXPECTED_DURATION_TOLERANCE = 0.25
 SILENCE_NOISE_DB = -35           # check b: silencedetect threshold
 SILENCE_MIN_DURATION = 2.0      # check b: minimum silence gap to flag
-SILENCE_SKIP_PCT = 0.05          # check b: ignore gaps before 5% runtime
+SILENCE_SKIP_PCT = 0.05          # check b: legacy fallback when no intro contract
+SILENCE_INTRO_TOLERANCE = 0.1    # check b: encoder rounding on the intro boundary
 VOL_SEGMENT_SEC = 10.0           # check c: per-10s volume check
 MAX_VOL_DIFF_DB = 12.0           # check c: max segment-to-segment diff
 MIN_VOL_SEGMENT_SEC = 2.0        # check c: ignore trailing slivers shorter than this
@@ -239,17 +240,33 @@ async def check_a_timing(
 
 
 # ---------------------------------------------------------------------------
-# Check b: Silence gaps — silencedetect -35dB d=2, zero gaps after 5% runtime
+# Check b: Silence gaps — silencedetect -35dB d=2, zero gaps outside intro
 # ---------------------------------------------------------------------------
 
-async def check_b_silence_gaps(video_path: str) -> dict[str, Any]:
+async def check_b_silence_gaps(
+    video_path: str,
+    intro_seconds: Optional[float] = None,
+) -> dict[str, Any]:
     """
     Constitution §6b:
     silencedetect=noise=-35dB:d=2
-    Zero gaps ≥2s after first 5% of runtime.
+    Zero gaps ≥2s outside the intentional intro window.
+
+    The render contract may intentionally place a silent title intro before
+    narration starts (DEFAULT_INTRO_SECONDS=2.5).  A fixed 5% skip is shorter
+    than that intro on short videos and falsely fails a correct render.
+    When ``intro_seconds`` is supplied it is the only leading silence allowed;
+    gaps that run past the intro, or start later, are still blockers.
     """
     video_dur = await ffprobe_video_duration(video_path)
-    skip_until = video_dur * SILENCE_SKIP_PCT
+    legacy_skip_until = video_dur * SILENCE_SKIP_PCT
+    if intro_seconds is None:
+        allowed_leading_end = legacy_skip_until
+    else:
+        allowed_leading_end = max(
+            legacy_skip_until,
+            max(0.0, float(intro_seconds)) + SILENCE_INTRO_TOLERANCE,
+        )
 
     stdout, stderr, rc = await _run_cmd(
         FFMPEG_BIN,
@@ -262,14 +279,18 @@ async def check_b_silence_gaps(video_path: str) -> dict[str, Any]:
         pass  # continue; silencedetect often exits non-zero with -f null
 
     gaps = _parse_silence_gaps(stderr)
-    offending = [g for g in gaps if g["end"] > skip_until and g["duration"] >= SILENCE_MIN_DURATION]
+    offending = [
+        g for g in gaps
+        if g["end"] > allowed_leading_end and g["duration"] >= SILENCE_MIN_DURATION
+    ]
 
     passed = len(offending) == 0
     return {
         "check": "b",
         "name": "silence_gaps",
         "video_duration_s": round(video_dur, 2),
-        "skip_before_s": round(skip_until, 2),
+        "intro_seconds": round(float(intro_seconds), 2) if intro_seconds is not None else None,
+        "skip_before_s": round(allowed_leading_end, 2),
         "gaps_total": len(gaps),
         "gaps_offending": len(offending),
         "gaps_detail": offending[:10],  # cap detail
@@ -753,6 +774,7 @@ async def verify_render(
     expect_captions: Optional[bool] = None,
     aspect: Optional[str] = None,
     expected_duration: Optional[float] = None,
+    intro_seconds: Optional[float] = None,
 ) -> dict[str, Any]:
     """
     Constitution §6 — Full verification suite.
@@ -767,6 +789,8 @@ async def verify_render(
         aspect: "9:16"/"1:1"/"16:9" (or None) so check f inspects the correct edges.
         expected_duration: User-selected final runtime; when supplied it is the
             timing authority rather than the raw narration file.
+        intro_seconds: Intentional silent title intro at the start of the render.
+            check b allows leading silence only within this window.
 
     Returns:
         A dict with keys:
@@ -779,23 +803,27 @@ async def verify_render(
     is_remote = url.startswith("http://") or url.startswith("https://")
     temp_video = Path(tempfile.gettempdir()) / f"ff_verify_{int(time.time() * 1000)}_video.mp4"
     video_path = None
-    
-    if is_remote:
+    downloaded_remote = False
+
+    # The render pipeline has already uploaded this exact artifact and kept a
+    # local copy.  Verifying that copy avoids a second full network download
+    # and a 3x300s stall when the object-storage edge is slow.  This is not a
+    # quality bypass: every check still runs against the rendered bytes.
+    if local_fallback_path and Path(local_fallback_path).exists():
+        video_path = local_fallback_path
+        temp_video = Path(local_fallback_path)
+    elif is_remote:
         try:
             await _download_video(url, temp_video)
             video_path = str(temp_video)
+            downloaded_remote = True
         except Exception as exc:
-            # Fallback to local file if provided
-            if local_fallback_path and Path(local_fallback_path).exists():
-                video_path = local_fallback_path
-                temp_video = Path(local_fallback_path)  # don't delete fallback
-            else:
-                return {
-                    "overall_passed": False,
-                    "error": f"Failed to download video from URL: {exc}",
-                    "checks": [],
-                    "report": {},
-                }
+            return {
+                "overall_passed": False,
+                "error": f"Failed to download video from URL: {exc}",
+                "checks": [],
+                "report": {},
+            }
     else:
         # url is actually a local path
         if Path(url).exists():
@@ -835,8 +863,8 @@ async def verify_render(
                 "diff_s": 0,
             })
 
-        # b — silence gaps
-        checks.append(await check_b_silence_gaps(video_path))
+        # b — silence gaps (intro-aware)
+        checks.append(await check_b_silence_gaps(video_path, intro_seconds=intro_seconds))
 
         # c — volume consistency
         checks.append(await check_c_volume_consistency(video_path))
@@ -868,7 +896,7 @@ async def verify_render(
         }
     finally:
         # Only cleanup if we downloaded a temp file (not local fallback)
-        if cleanup and temp_video.exists() and is_remote and str(temp_video).startswith(tempfile.gettempdir()):
+        if cleanup and downloaded_remote and temp_video.exists() and str(temp_video).startswith(tempfile.gettempdir()):
             try:
                 temp_video.unlink(missing_ok=True)
             except Exception:
