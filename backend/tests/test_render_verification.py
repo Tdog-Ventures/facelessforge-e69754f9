@@ -277,6 +277,63 @@ def test_check_b_rejects_interior_silence_even_with_intro(tmp_path: Path):
     assert result["passed"] is False
 
 
+def _fast_video_with_audio_segments(dest: Path, segments: list[tuple[str, float]],
+                                    duration_s: float) -> Path:
+    """Low-resolution/fast variant of _silence_tone_video for long renders.
+
+    check_b only analyses audio, so a 320x240/10fps video track keeps the
+    240-second render cheap to synthesise while exercising real silence
+    detection timing.
+    """
+    inputs: list[str] = []
+    filters: list[str] = []
+    for index, (kind, seconds) in enumerate(segments, start=1):
+        if kind == "tone":
+            inputs += ["-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}"]
+        else:
+            inputs += ["-f", "lavfi", "-i", f"anullsrc=r=44100:cl=mono:d={seconds}"]
+        filters.append(f"[{index}:a]")
+    graph = "".join(filters) + f"concat=n={len(segments)}:v=0:a=1[a]"
+    _run([ffmpeg, "-y",
+          "-f", "lavfi", "-i",
+          f"color=c=black:size=320x240:rate=10:duration={duration_s}",
+          *inputs,
+          "-filter_complex", graph,
+          "-map", "0:v", "-map", "[a]",
+          "-c:v", "libx264", "-pix_fmt", "yuv420p",
+          "-c:a", "aac", "-shortest", str(dest)])
+    return dest
+
+
+def test_check_b_intro_contract_supersedes_legacy_5pct_window(tmp_path: Path):
+    """CodeRabbit PR13 R1: the legacy 5% skip must not be combined with the
+    intro contract. On a 240s render with a 2.5s intro, keeping max() makes
+    the allowance 12s, so an interior 6-9s silence gap would wrongly pass.
+    The intro boundary alone must apply when intro_seconds is supplied."""
+    video = _fast_video_with_audio_segments(
+        tmp_path / "long_interior_gap.mp4",
+        [("tone", 6.0), ("silence", 3.0), ("tone", 231.0)],
+        duration_s=240.0,
+    )
+    result = asyncio.run(verify.check_b_silence_gaps(str(video), intro_seconds=2.5))
+    assert result["gaps_offending"] == 1, result
+    assert result["passed"] is False
+
+
+def test_check_b_leading_allowance_requires_leading_start(tmp_path: Path):
+    """CodeRabbit PR13 R2: only silence that starts at the beginning of the
+    render is leading silence. Brief audible audio (0-0.3s) followed by an
+    in-window gap (0.3-2.4s) must not receive the intro allowance."""
+    video = _fast_video_with_audio_segments(
+        tmp_path / "post_audio_gap.mp4",
+        [("tone", 0.3), ("silence", 2.1), ("tone", 27.6)],
+        duration_s=30.0,
+    )
+    result = asyncio.run(verify.check_b_silence_gaps(str(video), intro_seconds=2.5))
+    assert result["gaps_offending"] == 1, result
+    assert result["passed"] is False
+
+
 def test_verify_render_prefers_existing_local_artifact(tmp_path: Path, monkeypatch):
     """A slow object-storage edge must not stall verification: the local copy
     of the already-uploaded artifact is verified first."""
