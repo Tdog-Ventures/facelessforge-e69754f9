@@ -1,5 +1,74 @@
 # PR #19 — asset fencing candidate evidence
 
+## Latest follow-up — 5–3600-second timing contract resolved
+
+Continues `c82560ec1130fbb04895ba69f1db6698e9a02172`. The previous sole gate
+failure is resolved. The obsolete
+`test_short_voiceover_has_no_inbounds_fit` was replaced with behavioral coverage,
+not skipped/xfail'd or reduced to an existence check:
+
+- 19s narration fits an editorial 22s target: reserve 2.5s intro, leaving a 19.5s
+  narration slot (about 2.56% tempo adjustment). Commercial projects reserve no
+  intro; the same narration fits 19s. Tests also cover the 5s and 3600s endpoints.
+- Exactly ±5% is inclusive. The new tests reproduced binary-float rejection of
+  both endpoints; a shared decimal-duration comparison now applies the same policy
+  to suggestions, preflight, voice generation and actual audio fitting. Immediate
+  representable values outside the boundary are still rejected; no epsilon widens
+  the accepted range. Offline tone tests verify exact fitted sample budgets.
+- Integer rounding alone missed valid fits: 10s voice plus editorial intro fails
+  at the rounded 12s target but fits 13s; 3600s voice can fit the 3600s cap. The helper
+  now checks adjacent whole-second targets clamped to the agreed legal bounds.
+- Truly impossible short/long fits, gaps between legal whole-second tempo windows,
+  and non-finite measurements fail explicitly. Impossible explicit API fits write
+  neither a new target nor a render job.
+- Caller tests also exposed stale response timing: explicit auto-fit persisted the
+  new target but returned preflight for the old one. The response now validates
+  the fitted selection. Short-target retry remains idempotent, and manual scripts
+  are not rewritten or their selected duration silently changed.
+
+### Verification of this follow-up
+
+Affected timing/voice-fit tests **and preserved fencing/accounting regressions**:
+
+```bash
+PYTHONPATH=backend STORAGE_DIR=/tmp/opencode/ff-review-candidate PYTHONDONTWRITEBYTECODE=1 timeout --kill-after=5s 90s /root/ff-review/venv/bin/python -m pytest backend/tests/test_voice_fit.py backend/tests/test_duration_autofit.py backend/tests/test_duration_bounds.py backend/tests/test_authoritative_timing.py backend/tests/test_caption_music_acceptance.py backend/tests/test_forge_fit_gate.py backend/tests/test_asset_commit_fencing.py backend/tests/test_auto_attach_assets.py backend/tests/test_render_mode_lease.py -q --tb=short -p no:cacheprovider
+```
+
+**131 passed**, 5 warnings, **7.36s**. The first six modules account for 74 timing /
+voice-fit / audio / caller tests; the three preserved asset/render-lease modules
+account for 57 passing regressions.
+
+The required combined gate was run **after** the affected suite passed:
+
+```bash
+PYTHONPATH=backend STORAGE_DIR=/tmp/opencode/ff-review-candidate PYTHONDONTWRITEBYTECODE=1 timeout --kill-after=5s 240s /root/ff-review/venv/bin/python -m pytest backend/tests/test_*.py -q -p no:cacheprovider -o faulthandler_timeout=30
+```
+
+**406 passed, 1 skipped**, 9 warnings, **187.24s**. No failures. The existing skip
+is retained; this follow-up adds no skip or xfail. Local logs:
+`/root/ff-review/logs/candidate-timing-affected.log` and
+`/root/ff-review/logs/candidate-timing-combined-gate.log`.
+
+The pinned-commit [operator runbook](asset-commit-fencing.md) now explains how to
+establish quiescence: exclude producers/retries, close old writer connections,
+and drain server-side operations with full-privilege `$currentOp`/connection-log
+evidence. It includes retained-pin recovery ownership/fence CAS, asset/account/ID
+reconciliation and exact-pin release. If attribution or drainage cannot be proven,
+the project stays pinned. No production recovery was performed. Automatic recovery
+and transactional reader snapshots remain unimplemented.
+
+Fencing/accounting mutation paths are preserved. This follow-up changes timing,
+two timing-related API paths, audio fitting, tests and documentation. The independent
+review below pertains to the earlier fencing candidate; no new independent review
+is claimed for this timing follow-up. No merge, deployment, production restart,
+paid generation/render or changes to VideoForge/Revenue Swarm were performed.
+The live Notion fetch still returns a JavaScript shell; no SOT update/export is
+claimed. The prior TestSprite linkage/credential limitation remains.
+
+---
+
+## Historical evidence — fencing candidate at c82560e
+
 ## Result and scope
 
 Confirmed stale-holder defect fixed for auto-attach/top-up/replacement and manual

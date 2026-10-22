@@ -38,7 +38,7 @@ except Exception:
     check_credits = None  # fallback if billing not yet patched
 from ..scoring import quality_score, quality_label, compute_project_status, scenes_to_csv
 from ..grounding import CLIENT_VISUAL_TYPES
-from ..timing import build_timing_status
+from ..timing import build_timing_status, narration_fits_budget
 from ..grounding import commercial_project_errors
 from ..storage import resolve_delivery_url
 from .. import generation as gen
@@ -2475,8 +2475,7 @@ async def generate_full_voiceover(
         measured = float(payload.get("duration") or 0)
         if measured <= 0:
             raise HTTPException(status_code=502, detail="Voiceover provider returned invalid audio (no measurable duration).")
-        drift_ratio = measured / narration_budget if narration_budget > 0 else 1.0
-        if abs(drift_ratio - 1.0) <= 0.05:
+        if narration_fits_budget(measured, narration_budget):
             actions.append(f"attempt {attempts_used}: measured {measured:.2f}s fits {narration_budget:.2f}s budget")
             break
         # Outside tolerance: manual scripts are never rewritten — stop with numbers.
@@ -2948,6 +2947,9 @@ async def render_autofit_duration(project_id: str, user=Depends(get_current_user
         suggestion = await render_service.autofit_project_duration(project_id)
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e)[:300])
+    # The write succeeded. Validate the newly selected duration in the response,
+    # not the stale project snapshot read before the explicit fit.
+    project = {**project, "target_duration": suggestion["to"]}
     try:
         project_after = await db.projects.find_one({"id": project_id}, {"_id": 0}) or {}
         fit = dict(project_after.get("voice_fit") or {})

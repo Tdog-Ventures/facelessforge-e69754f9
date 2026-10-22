@@ -4,7 +4,7 @@ Incident: two E2E renders each needed manual target_duration patches
 (27->30, 30->35) because preflight hard-failed "Voiceover fits selected
 duration" whenever measured narration drifted >5% from the selection.
 The loop below moves the selection to fit measured narration within the
-30..3600s product bounds; anything else still fails closed.
+5..3600s product bounds; anything else still fails closed.
 """
 import pytest
 
