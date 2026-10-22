@@ -77,7 +77,20 @@ async def test_youtube_provider_exception_never_leaks_secret(monkeypatch, caplog
     assert 'DO_NOT_DISCLOSE' not in caplog.text
 
 
-def test_external_upload_provider_error_is_not_echoed(monkeypatch, caplog):
+@pytest.mark.parametrize('release_fields,allowed', [
+    ({'release_eligible': True, 'deterministic_qa_blocked': [], 'current_step': 'completed'}, True),
+    ({'release_eligible': True, 'deterministic_qa_blocked': ['freeze']}, False),
+    ({'release_eligible': True, 'deterministic_qa_blocked': ['silence']}, False),
+    ({'release_eligible': True, 'deterministic_qa_blocked': ['loudnorm']}, False),
+    ({'release_eligible': False, 'deterministic_qa_blocked': []}, False),
+    ({'release_eligible': True, 'current_step': 'qa_blocked'}, False),
+    ({'release_eligible': 'true', 'deterministic_qa_blocked': []}, False),
+    ({}, False),
+    ({'release_eligible': True, 'output_path': None}, False),
+    ({'release_eligible': True, 'output_path': None, '_object_copy': True}, True),
+    ({'release_eligible': True, 'output_path': '/missing-approved-artifact.mp4'}, False),
+])
+def test_external_upload_provider_error_is_not_echoed(monkeypatch, caplog, release_fields, allowed, tmp_path):
     # Drive the real auto-upload task with a provider exception carrying a
     # distinctive secret; it must not surface in logs or the persisted job error.
     import asyncio
@@ -86,6 +99,9 @@ def test_external_upload_provider_error_is_not_echoed(monkeypatch, caplog):
     SECRET = 'SECRET_REFRESH_TOKEN_DO_NOT_DISCLOSE'
 
     captured = {}
+    approved_path = tmp_path / 'approved-job.mp4'
+    approved_path.write_bytes(b'video test fixture')
+    monkeypatch.setattr(external_api.render_service, 'STATIC_RENDERS', tmp_path / 'renders')
 
     def _fake_create_task(coro):
         captured['coro'] = coro
@@ -160,7 +176,12 @@ def test_external_upload_provider_error_is_not_echoed(monkeypatch, caplog):
         return None
 
     async def _completed_job(_q, _p=None):
-        return {'id': 'job-1', 'status': 'completed'}
+        if release_fields.get('_object_copy'):
+            pid = fake_db.projects.inserted[0]['id']
+            copy_path = tmp_path / 'renders' / pid / 'job-1_verify.mp4'
+            copy_path.parent.mkdir(parents=True, exist_ok=True)
+            copy_path.write_bytes(b'approved object verification copy')
+        return {'id': 'job-1', 'status': 'completed', 'output_path': str(approved_path), **release_fields}
 
     async def _run():
         original_sleep = asyncio.sleep
@@ -173,7 +194,10 @@ def test_external_upload_provider_error_is_not_echoed(monkeypatch, caplog):
 
     asyncio.run(_run())
 
-    assert reached, 'auto-upload did not reach the provider call — test would not detect a leak'
+    assert bool(reached) is allowed, 'QA-blocked render reached provider'
+    if not allowed:
+        assert fake_db.forge_runs.inserted == []
+        assert 'YouTube upload blocked' in str(fake_db.forge_runs.updated)
     assert SECRET not in caplog.text, 'secret leaked into logs'
     recorded = str(fake_db.forge_runs.updated) + str(fake_db.forge_runs.inserted)
     assert SECRET not in recorded, 'secret leaked into persisted job error'

@@ -456,8 +456,14 @@ async def external_render_video(
                 st = j.get("status")
                 if st == "completed":
                     try:
+                        # Artifact completion is not permission to publish. QA may
+                        # deliberately retain a completed but blocked render.
+                        if (j.get("release_eligible") is not True
+                                or j.get("deterministic_qa_blocked")
+                                or j.get("current_step") == "qa_blocked"):
+                            raise RuntimeError("YouTube upload blocked by render QA")
                         # call youtube upload helper directly (bypasses auth, uses project owner)
-                        from .routes.youtube import _get_youtube_credentials, _resolve_video_path
+                        from .routes.youtube import _get_youtube_credentials
 
                         # ensure refresh token present else mock upload still records
                         logger.info("auto_upload: render %s completed, triggering YouTube upload for project %s", jid, pid)
@@ -472,7 +478,16 @@ async def external_render_video(
                         if "Faceless Forge" not in _title:
                             _title = f"{_title} | Faceless Forge"
                         # direct mock-aware upload path
-                        _video_path = _resolve_video_path(pid)
+                        # Bind publication to the exact approved job, never an
+                        # arbitrary older project file found by directory scan.
+                        from pathlib import Path
+                        _video_path = Path(j.get("output_path") or "")
+                        if not j.get("output_path") or not _video_path.is_file():
+                            # Object storage removes the upload source; the
+                            # renderer retains this exact job's verification copy.
+                            _video_path = render_service.STATIC_RENDERS / pid / f"{jid}_verify.mp4"
+                        if not _video_path.is_file():
+                            raise RuntimeError("YouTube upload blocked: approved artifact unavailable")
                         _creds = _get_youtube_credentials()
                         if not _creds:
                             try:
