@@ -1324,6 +1324,10 @@ async def upload_client_asset(
 
 @router.post("/projects/{project_id}/assets")
 async def create_asset(project_id: str, body: AssetCreate, user=Depends(get_current_user)):
+    # Server filesystem paths are minted by generation/upload services, never
+    # accepted from client metadata. Use the validated upload route for files.
+    if body.file_path is not None:
+        raise HTTPException(status_code=422, detail="Upload asset files instead of supplying a server path")
     db = get_db()
     project = await db.projects.find_one({"id": project_id}, {"_id": 0})
     _ensure_project_access(project, user, write=True)
