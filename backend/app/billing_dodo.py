@@ -23,6 +23,25 @@ import redis
 logger = logging.getLogger("billing_dodo")
 router = APIRouter(prefix="/api/billing/dodo", tags=["dodo"])
 
+# Atomic Redis grant: record the payment_id in a per-tenant fulfillment hash,
+# then increment the tenant credit balance. HSETNX guarantees exactly-once
+# Redis crediting even for concurrent deliveries or different webhook IDs.
+_REDIS_GRANT_LUA = """
+local fulfillment_key = KEYS[1]
+local payment_id = ARGV[1]
+local credits = ARGV[2]
+local account_key = KEYS[2]
+local now_iso = ARGV[3]
+
+if redis.call('HSETNX', fulfillment_key, payment_id, credits) == 0 then
+    return 0
+end
+redis.call('HINCRBY', account_key, 'credits', credits)
+redis.call('HSET', account_key, 'status', 'ACTIVE')
+redis.call('HSET', account_key, 'last_payment', now_iso)
+return 1
+"""
+
 # --- Redis (sync,decode) ---
 r = redis.Redis(
     host=os.getenv("REDIS_HOST", "localhost"),
@@ -255,31 +274,7 @@ async def dodo_webhook(
             logger.exception("Dodo review persistence failed id=%s", webhook_id)
             raise HTTPException(503, "Billing review pending; retry required")
 
-    # 2. Idempotency - check before processing
-    # Use helper that does SET NX; also check legacy SISMEMBER
-    if webhook_id:
-        try:
-            # Try atomic SET NX
-            was_new = r.set(f"dodo:webhooks:processed:{webhook_id}", "1", nx=True, ex=86400)
-            if not was_new:
-                return {"status": "already_processed", "webhook_id": webhook_id}
-            # Also maintain set for backward compat / audit
-            r.sadd("dodo:webhooks:processed", webhook_id)
-        except Exception:
-            # Fallback to SISMEMBER
-            try:
-                if r.sismember("dodo:webhooks:processed", webhook_id):  # type: ignore
-                    return {"status": "already_processed", "webhook_id": webhook_id}
-            except Exception:
-                pass
-    else:
-        # No webhook-id: use body hash as idempotency key (not ideal, but prevents double-processing)
-        import hashlib as _hl
-
-        fallback_id = _hl.sha256(body).hexdigest()[:16]
-        webhook_id = fallback_id
-
-    # 3. Parse payload (after verification, using raw body)
+    # 2. Parse payload (after verification, using raw body)
     try:
         payload = json.loads(body.decode("utf-8") if isinstance(body, bytes) else body)  # type: ignore
     except Exception:
@@ -291,16 +286,27 @@ async def dodo_webhook(
     if not isinstance(data, dict):
         data = {}
 
-    # 4. Only grant on the two requested events (exact match, per credit-based-billing skill)
-    # payment.succeeded -> one-time / top-up grants; subscription.active -> recurring grant
-    ALLOWED_EVENTS = {"payment.succeeded", "subscription.active"}
+    # 3. Only grant on payment.succeeded. subscription.active fires for trial
+    # activations and, for paid subscriptions, is followed by payment.succeeded.
+    # Using payment_id as the durable grant identity prevents double crediting.
+    ALLOWED_EVENTS = {"payment.succeeded"}
     if event_type not in ALLOWED_EVENTS:
         logger.info(f"Dodo webhook ignored event={event_type} id={webhook_id}")
         return {"status": "ignored", "event": event_type, "webhook_id": webhook_id}
 
-    # 5. Resolve tenant_id and product_id (finite credits)
+    payment_id = data.get("payment_id") if isinstance(data.get("payment_id"), str) else None
+    if not payment_id:
+        logger.info(f"Dodo {event_type} without payment_id ignored id={webhook_id}")
+        return {"status": "ignored_no_payment_id", "event": event_type, "webhook_id": webhook_id}
+
+    if not webhook_id:
+        # No webhook-id: derive a stable placeholder from the payment identity.
+        import hashlib as _hl
+        webhook_id = _hl.sha256(payment_id.encode()).hexdigest()[:16]
+
+    # 4. Resolve tenant_id and product_id (finite credits)
     # Priority: pending session -> custom_data.tenant_id -> data.customer.customer_id mapping -> metadata.tenant_id -> custom_id
-    session_id = data.get("session_id") or data.get("checkout_session_id") or payload.get("session_id") or data.get("payment_id") or data.get("subscription_id")
+    session_id = data.get("session_id") or data.get("checkout_session_id") or payload.get("session_id") or data.get("subscription_id")
     # Also check nested customer
     customer = data.get("customer") if isinstance(data.get("customer"), dict) else {}
     custom_data = data.get("custom_data") or data.get("customData") or payload.get("custom_data") or {}
@@ -371,14 +377,6 @@ async def dodo_webhook(
         logger.warning(f"Tenant fallback to email={tenant_id} for event={event_type} - ensure checkout sets custom_data.tenant_id")
 
     if not tenant_id:
-        try:
-            r.delete(f"dodo:webhooks:processed:{webhook_id}")
-        except Exception:
-            pass
-        try:
-            r.srem("dodo:webhooks:processed", webhook_id)
-        except Exception:
-            pass
         raise HTTPException(status_code=400, detail="tenant_id not resolved, grant nothing")
 
     # Normalize tenant_id: if it looks like email, try to keep but Redis key will be tenant:{email} - still hash
@@ -413,51 +411,21 @@ async def dodo_webhook(
         logger.warning(f"Zero credits resolved for product={product_id} event={event_type}, using DEFAULT {DEFAULT_CREDITS}")
         credits = DEFAULT_CREDITS
 
-    # 6. Finite credit grant to tenant:{tenant_id} hash (atomic pipeline + audit)
-    # Use HINCRBY for credits, HSET for status/last_payment, LPUSH audit
-    now_iso = datetime.now(timezone.utc).isoformat()
-    pipe = r.pipeline()
-    pipe.hincrby(f"tenant:{tenant_id}", "credits", credits)
-    pipe.hset(
-        f"tenant:{tenant_id}",
-        mapping={
-            "status": "ACTIVE",
-            "last_payment": now_iso,
-            "last_transaction": webhook_id or session_id or "unknown",
-            "last_event": event_type,
-            "last_product": product_id or "unknown",
-        },
-    )
-    # Expire credits hash? No - finite credits persist until consumed; only audit has TTL
-    pipe.sadd("dodo:webhooks:processed", webhook_id or session_id or str(time.time()))
-    pipe.hset(
-        f"audit:dodo:{webhook_id or session_id}",
-        mapping={
-            "tenant_id": tenant_id,
-            "product_id": product_id or "unknown",
-            "credits": str(credits),
-            "event_type": event_type,
-            "timestamp": now_iso,
-        },
-    )
-    pipe.expire(f"audit:dodo:{webhook_id or session_id}", 2592000)  # 30d audit retention
-    pipe.lpush(
-        f"tenant:{tenant_id}:billing_audit",
-        json.dumps(
-            {
-                "provider": "dodo",
-                "credits": credits,
-                "event": event_type,
-                "product_id": product_id,
-                "webhook_id": webhook_id,
-                "timestamp": now_iso,
-            }
-        ),
-    )
-    pipe.ltrim(f"tenant:{tenant_id}:billing_audit", 0, 999)  # cap audit list
-    pipe.execute()
-
-    logger.info(f"Dodo webhook granted finite {credits} credits to tenant:{tenant_id} for {event_type} product={product_id} webhook_id={webhook_id}")
+    # 5b. Durable, retry-safe fulfillment. Do not acknowledge the webhook
+    # until the grant is recorded; Dodo retries on non-2xx/timeout.
+    try:
+        result = await _fulfill_dodo_grant(
+            tenant_id=tenant_id,
+            product_id=product_id,
+            credits=credits,
+            payment_id=payment_id,
+            event_type=event_type,
+            customer_email=(customer or {}).get("email"),
+            webhook_id=webhook_id,
+        )
+    except Exception:
+        logger.exception("Dodo fulfillment failed id=%s payment_id=%s; not acknowledged", webhook_id, payment_id)
+        raise
 
     # Clean up pending after successful grant
     if session_id:
@@ -466,22 +434,16 @@ async def dodo_webhook(
         except Exception:
             pass
 
-    # Mirror into the Mongo ledger (subscriptions / ff_credits) that the
-    # render credit gate (billing.check_credits) reads. Best-effort: a
-    # Mongo failure must never fail the webhook acknowledgement.
+    # Record the webhook ID only after successful fulfillment. Dodo retries
+    # are bounded to ~22.5 hours; keep the marker for 7 days as a guardrail.
     try:
-        await _mirror_grant_to_mongo(
-            tenant_id=tenant_id,
-            product_id=product_id,
-            credits=credits,
-            transaction_id=webhook_id or session_id or "unknown",
-            event_type=event_type,
-            customer_email=(customer or {}).get("email"),
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"Dodo mongo mirror failed tenant={tenant_id}: {e}")
+        r.set(f"dodo:webhooks:processed:{webhook_id}", "1", ex=604800)
+        r.sadd("dodo:webhooks:processed", webhook_id)
+    except Exception:
+        pass
 
-    return {"status": "ACTIVE", "tenant_id": tenant_id, "credits_granted": credits, "event": event_type, "webhook_id": webhook_id}
+    logger.info(f"Dodo webhook fulfilled {credits} credits to tenant:{tenant_id} for payment_id={payment_id} webhook_id={webhook_id}")
+    return result
 
 
 def _dodo_plan_label(product_id: Optional[str]) -> str:
@@ -497,6 +459,99 @@ def _dodo_plan_label(product_id: Optional[str]) -> str:
         if pid and pid == (configured or "").strip():
             return label
     return "creator"
+
+
+def _apply_redis_grant(redis_client, tenant_id: str, payment_id: str, credits: int) -> bool:
+    """Atomically credit a tenant once per payment_id. Returns True on first grant."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    result = redis_client.eval(
+        _REDIS_GRANT_LUA,
+        2,
+        f"tenant:{tenant_id}:dodo_fulfillments",
+        f"tenant:{tenant_id}",
+        payment_id,
+        str(credits),
+        now_iso,
+    )
+    return bool(result)
+
+
+async def _fulfill_dodo_grant(*, tenant_id: str, product_id: Optional[str],
+                              credits: int, payment_id: str, event_type: str,
+                              customer_email: Optional[str],
+                              webhook_id: Optional[str]) -> dict:
+    """Durable fulfillment: Redis + Mongo mirror, recoverable after crashes.
+
+    A Mongo record keyed by payment_id drives recovery. It is created in the
+    pending state, then Redis and Mongo are updated idempotently, then the
+    record is marked completed. Retries with the same payment_id (whether
+    from Dodo replays or different webhook IDs) find the record and do not
+    re-grant.
+    """
+    from .db import get_db
+    db = get_db()
+    now = datetime.now(timezone.utc)
+
+    # 1. Ensure a durable fulfillment record exists. Upsert-on-insert lets
+    # concurrent deliveries race safely; only one creates the pending record.
+    await db.ff_dodo_fulfillments.update_one(
+        {"_id": payment_id},
+        {"$setOnInsert": {
+            "payment_id": payment_id,
+            "tenant_id": tenant_id,
+            "product_id": product_id,
+            "credits": credits,
+            "event_type": event_type,
+            "status": "pending",
+            "attempts": 0,
+            "webhook_id": webhook_id,
+            "created_at": now,
+            "updated_at": now,
+        }},
+        upsert=True,
+    )
+    fulfillment = await db.ff_dodo_fulfillments.find_one({"_id": payment_id}, {"_id": 0})
+    if fulfillment and fulfillment.get("status") == "completed":
+        return {
+            "status": "already_fulfilled",
+            "tenant_id": tenant_id,
+            "credits_granted": fulfillment["credits"],
+            "payment_id": payment_id,
+        }
+
+    # 2. Track this attempt.
+    await db.ff_dodo_fulfillments.update_one(
+        {"_id": payment_id},
+        {"$inc": {"attempts": 1}, "$set": {"updated_at": datetime.now(timezone.utc)}},
+    )
+
+    # 3. Redis grant (atomic once-per-payment via Lua HSETNX + HINCRBY).
+    _apply_redis_grant(r, tenant_id, payment_id, credits)
+
+    # 4. Mongo mirror (idempotent per payment_id).
+    await _mirror_grant_to_mongo(
+        tenant_id=tenant_id,
+        product_id=product_id,
+        credits=credits,
+        transaction_id=payment_id,
+        event_type=event_type,
+        customer_email=customer_email,
+    )
+
+    # 5. Mark completed.
+    await db.ff_dodo_fulfillments.update_one(
+        {"_id": payment_id},
+        {"$set": {"status": "completed", "updated_at": datetime.now(timezone.utc)}},
+    )
+
+    return {
+        "status": "ACTIVE",
+        "tenant_id": tenant_id,
+        "credits_granted": credits,
+        "payment_id": payment_id,
+        "event": event_type,
+        "webhook_id": webhook_id,
+    }
 
 
 async def _mirror_grant_to_mongo(*, tenant_id: str, product_id: Optional[str],
@@ -570,19 +625,33 @@ async def _mirror_grant_to_mongo(*, tenant_id: str, product_id: Optional[str],
 
 async def _apply_mongo_grant(collection, identity: dict, transaction_id: str, *,
                              defaults: dict, increments: dict, updates: dict) -> None:
-    """Create once, then atomically increment once per Dodo webhook identity."""
+    """Create-or-update and increment in one atomic, idempotent write.
+
+    Using a single upsert with $setOnInsert plus $inc/$addToSet removes the
+    zero-balance window where a crash between account creation and increment
+    could leave an authoritative subscription doc with no credits.
+    """
     from pymongo.errors import DuplicateKeyError
 
     try:
-        await collection.update_one(identity, {"$setOnInsert": defaults}, upsert=True)
+        await collection.update_one(
+            {**identity, "processed_dodo_transactions": {"$ne": transaction_id}},
+            {
+                "$setOnInsert": defaults,
+                "$inc": increments,
+                "$set": updates,
+                "$addToSet": {"processed_dodo_transactions": transaction_id},
+            },
+            upsert=True,
+        )
     except DuplicateKeyError:
-        # A concurrent initial grant created this same uniquely indexed account.
-        # Do not retry with a transaction predicate plus upsert: that would try
-        # inserting a second account when this transaction was already applied.
-        if not await collection.find_one(identity, {"_id": 1}):
-            raise
-    await collection.update_one(
-        {**identity, "processed_dodo_transactions": {"$ne": transaction_id}},
-        {"$inc": increments, "$set": updates,
-         "$addToSet": {"processed_dodo_transactions": transaction_id}},
-    )
+        # A concurrent initial grant won the upsert race. Retry the update
+        # side only; the transaction marker prevents double incrementing.
+        await collection.update_one(
+            {**identity, "processed_dodo_transactions": {"$ne": transaction_id}},
+            {
+                "$inc": increments,
+                "$set": updates,
+                "$addToSet": {"processed_dodo_transactions": transaction_id},
+            },
+        )
