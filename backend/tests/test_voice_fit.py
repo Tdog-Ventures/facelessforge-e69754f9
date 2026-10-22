@@ -9,6 +9,7 @@ import pytest
 from app import render
 from app.routes import api as api_routes
 from app.timing import TimingContract, build_timing_status, suggest_fitted_duration
+from backend.tests.fake_db import FakeCollection as ProjectCollection
 
 
 def _match(doc, query):
@@ -97,7 +98,15 @@ class _FakeCursor:
 
 class FakeDB:
     def __init__(self, project, script, assets=None):
-        self.projects = FakeCollection([project])
+        self.projects = ProjectCollection("projects", [project])
+        self.projects.calls = []
+        update_project = self.projects.update_one
+
+        async def tracked_update(query, update, **kwargs):
+            self.projects.calls.append(("update_one", dict(query), dict(update.get("$set", {}))))
+            return await update_project(query, update, **kwargs)
+
+        self.projects.update_one = tracked_update
         self.scripts = FakeCollection([script] if script else [])
         self.assets = FakeCollection(assets)
         self.scenes = FakeCollection([{"id": "sc1", "project_id": project["id"],
@@ -428,7 +437,8 @@ async def test_explicit_impossible_fit_fails_without_duration_or_job_writes(monk
     assert exc.value.status_code == 400
     assert "No in-bounds duration" in exc.value.detail
     assert db.projects.docs[0]["target_duration"] == 30
-    assert db.projects.calls == [] and db.render_jobs.docs == []
+    assert not [call for call in db.projects.calls if "target_duration" in call[2]]
+    assert db.render_jobs.docs == []
     assert db.assets.docs == [voice]
 
 

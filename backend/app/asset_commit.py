@@ -20,7 +20,7 @@ import asyncio
 import logging
 import uuid
 
-from pymongo.errors import DuplicateKeyError, PyMongoError
+from pymongo.errors import DuplicateKeyError, PyMongoError, WriteError
 
 from . import project_lease
 
@@ -58,7 +58,7 @@ class _Collection:
                     self._state["uncertain"] = True
                     raise CommitUncertain("Unacknowledged asset commit write")
                 return result
-            except DuplicateKeyError:
+            except (DuplicateKeyError, WriteError):
                 raise  # acknowledged rejection, not an ambiguous write
             except PyMongoError:
                 self._state["uncertain"] = True

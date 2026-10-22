@@ -1520,10 +1520,15 @@ async def attach_scene_asset(project_id: str, scene_id: str, body: StockAttachRe
             import logging as _logging
             _logging.getLogger("facelessforge.routes").error("manual attach insert failed project=%s scene=%s", project_id, scene_id, exc_info=True)
             raise HTTPException(status_code=503, detail="Asset storage is unavailable; the attachment was not saved. Retry.") from exc
-        await db.scenes.update_one(
+        scene_update = await db.scenes.update_one(
             {"id": scene_id, "project_id": project_id},
             {"$set": {"status": "assets_attached", "updated_at": _now()}},
         )
+        if getattr(scene_update, "matched_count", 0) != 1:
+            # Regeneration can remove this scene ID while attachment is in flight.
+            # The insert was acknowledged; compensate only our row under the pin.
+            await db.assets.delete_one({"project_id": project_id, "id": doc["id"]})
+            raise HTTPException(status_code=409, detail="Scene changed during attachment; refresh the scene plan and retry.")
         return doc
 
     try:
@@ -2945,11 +2950,14 @@ async def render_autofit_duration(project_id: str, user=Depends(get_current_user
         raise HTTPException(status_code=403, detail="Viewer cannot change duration")
     try:
         suggestion = await render_service.autofit_project_duration(project_id)
+    except render_service.RenderSubmissionBusy as e:
+        raise HTTPException(status_code=409, detail=str(e)[:300])
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e)[:300])
     # The write succeeded. Validate the newly selected duration in the response,
     # not the stale project snapshot read before the explicit fit.
-    project = {**project, "target_duration": suggestion["to"]}
+    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    _ensure_project_access(project, user, write=True)
     try:
         project_after = await db.projects.find_one({"id": project_id}, {"_id": 0}) or {}
         fit = dict(project_after.get("voice_fit") or {})

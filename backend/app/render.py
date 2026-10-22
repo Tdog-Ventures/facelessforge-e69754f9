@@ -546,9 +546,28 @@ async def autofit_project_duration(project_id: str) -> dict:
     callers must surface that instead of queueing.
     """
     db = get_db()
+    # The selected target is a render input, just like mode/ground truth. Read,
+    # calculate and CAS it under the same lease as submission and project edits.
     project = await db.projects.find_one({"id": project_id}, {"_id": 0})
     if not project:
         raise RuntimeError(f"Project {project_id} not found for duration auto-fit.")
+    lease = await project_lease.acquire(
+        db, project_id, project_lease.RENDER_LEASE, ttl_seconds=project_lease.RENDER_LEASE_TTL_SECONDS,
+    )
+    if lease is None:
+        raise RenderSubmissionBusy("Project inputs are being updated; retry the explicit duration fit.")
+    try:
+        return await _autofit_project_duration_locked(db, lease, project_id)
+    finally:
+        await project_lease.release(db, lease)
+
+
+async def _autofit_project_duration_locked(db, lease, project_id: str) -> dict:
+    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    if not project:
+        raise RuntimeError(f"Project {project_id} not found for duration auto-fit.")
+    if await is_render_active(project_id):
+        raise RenderSubmissionBusy("A render is active; wait before changing its selected duration.")
     full_voice = await db.assets.find_one(
         {
             "project_id": project_id,
@@ -567,10 +586,12 @@ async def autofit_project_duration(project_id: str) -> dict:
             "No in-bounds duration fits the measured narration; "
             "regenerate the script and voiceover."
         )
-    await db.projects.update_one(
-        {"id": project_id},
+    updated = await db.projects.update_one(
+        {"id": project_id, **lease.guard()},
         {"$set": {"target_duration": suggestion["to"], "updated_at": _now()}},
     )
+    if getattr(updated, "matched_count", 0) != 1:
+        raise RenderSubmissionBusy("Project inputs changed during duration fit; retry.")
     logger.info(
         "duration autofit project=%s %ss -> %ss (VO %.2fs)",
         project_id, suggestion["from"], suggestion["to"],
