@@ -6,7 +6,7 @@ Port: 8081 (Forge) - same tenant isolation as PayPal module
 Redis: ethinx-redis localhost:6379, keys tenant:{tenant_id} hash (finite credits)
 Env: DODO_PAYMENTS_API_KEY, DODO_PAYMENTS_WEBHOOK_KEY, DODO_PAYMENTS_ENVIRONMENT
 Webhook: POST /api/billing/dodo/webhook  -> Standard Webhooks verification
-Events: payment.succeeded, subscription.active (finite credit grants only)
+Events: payment.succeeded (finite credit grants only); subscription.active is not a charge event
 SDK: pip install dodopayments (optional, fallback to manual verify via standardwebhooks)
 """
 import os
@@ -218,8 +218,9 @@ async def dodo_webhook(
     """
     Dodo webhook endpoint at /api/billing/dodo/webhook
     - Verifies Standard Webhooks signature (webhook-id.webhook-timestamp.raw_body)
-    - Idempotent via dodo:webhooks:processed (SET NX / SISMEMBER)
-    - Grants FINITE credits to tenant:{tenant_id} Redis hash only for payment.succeeded and subscription.active
+    - Idempotent by payment_id via durable Mongo fulfillment record + atomic Redis HSETNX
+    - Grants FINITE credits to tenant:{tenant_id} Redis hash only for payment.succeeded
+    - Acknowledges the webhook only after fulfillment succeeds so Dodo retries on failure
     - No JWT required for webhook (Dodo server-to-server), but credits grant is finite and audited
     """
     secret = os.getenv("DODO_PAYMENTS_WEBHOOK_KEY") or os.getenv("DODO_WEBHOOK_SECRET") or os.getenv("DODO_PAYMENTS_WEBHOOK_SECRET") or ""
