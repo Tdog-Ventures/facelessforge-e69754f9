@@ -435,7 +435,8 @@ async def _generate_thumbnail(project: dict):
 async def _youtube_upload(project: dict) -> dict:
     """Step f) YouTube upload via internal youtube route logic (direct service call to avoid auth)."""
     from ..db import get_db
-    from ..routes.youtube import _resolve_video_path, _get_youtube_credentials
+    from ..routes.youtube import _get_youtube_credentials
+    from ..publish_gate import assert_publishable, find_approved_job
     import uuid as _uuid
     db = get_db()
     from ..publishing_access import ensure_operator_project
@@ -452,9 +453,12 @@ async def _youtube_upload(project: dict) -> dict:
     import asyncio as _asyncio, tempfile as _tmp, urllib.request as _ur
     if os.environ.get("YOUTUBE_MOCK", "false").lower() == "true":
         raise RuntimeError("YOUTUBE_MOCK=true: mock uploads are disabled in the forge pipeline")
-    rj = await db.render_jobs.find_one({"project_id": project["id"], "status": {"$in": ["completed", "COMPLETED"]}}, {"_id": 0}, sort=[("created_at", -1)])
+    rj = await find_approved_job(db=db, project_id=project["id"])
     if not rj:
         raise RuntimeError("no completed render job for project")
+    # Publication requires the same release gate as every other upload channel:
+    # a completed render is not permission to publish a QA-blocked artifact.
+    assert_publishable(rj)
     video_path = None
     dl_tmp = None
     lp = rj.get("output_path")

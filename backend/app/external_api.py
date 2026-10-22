@@ -26,6 +26,7 @@ from fastapi import APIRouter, Body, Header, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 
 from . import generation as gen
+from . import publish_gate
 from . import render as render_service
 from . import thumbnail_images as thumb_images
 from . import tts as tts_service
@@ -506,10 +507,7 @@ async def _prepare_external_render(
                     try:
                         # Artifact completion is not permission to publish. QA may
                         # deliberately retain a completed but blocked render.
-                        if (j.get("release_eligible") is not True
-                                or j.get("deterministic_qa_blocked")
-                                or j.get("current_step") == "qa_blocked"):
-                            raise RuntimeError("YouTube upload blocked by render QA")
+                        publish_gate.assert_publishable(j)
                         # call youtube upload helper directly (bypasses auth, uses project owner)
                         from .routes.youtube import _get_youtube_credentials
 
@@ -528,14 +526,8 @@ async def _prepare_external_render(
                         # direct mock-aware upload path
                         # Bind publication to the exact approved job, never an
                         # arbitrary older project file found by directory scan.
-                        from pathlib import Path
-                        _video_path = Path(j.get("output_path") or "")
-                        if not j.get("output_path") or not _video_path.is_file():
-                            # Object storage removes the upload source; the
-                            # renderer retains this exact job's verification copy.
-                            _video_path = render_service.STATIC_RENDERS / pid / f"{jid}_verify.mp4"
-                        if not _video_path.is_file():
-                            raise RuntimeError("YouTube upload blocked: approved artifact unavailable")
+                        _video_path = publish_gate.resolve_approved_artifact(
+                            job=j, project_id=pid, static_renders=render_service.STATIC_RENDERS)
                         _creds = _get_youtube_credentials()
                         if not _creds:
                             try:
