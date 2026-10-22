@@ -163,14 +163,35 @@ def test_external_upload_provider_error_is_not_echoed(monkeypatch, caplog, relea
     monkeypatch.setattr(external_api.render_service, 'validate_prerequisites', lambda *a: {'ok': True, 'issues': []})
     monkeypatch.setattr(external_api.render_service, 'queue_render', AsyncMock(return_value={'id': 'job-1'}))
 
-    class BoomCreds:
+    class OKCreds:
         def refresh(self, req):
             reached.append(True)
+
+    class FakeUploadRequest:
+        def next_chunk(self):
             raise RuntimeError(f'provider failed with {SECRET}')
 
+    class FakeVideos:
+        def insert(self, **kwargs):
+            return FakeUploadRequest()
+
+    class FakeService:
+        def videos(self):
+            return FakeVideos()
+
+    import googleapiclient.discovery as _youtube_discovery
+    import googleapiclient.http as _youtube_http
+    uploaded_paths = []
+
+    class CapturingMediaFileUpload:
+        def __init__(self, filename, **kwargs):
+            uploaded_paths.append(filename)
+
+    monkeypatch.setattr(_youtube_http, 'MediaFileUpload', CapturingMediaFileUpload)
+    monkeypatch.setattr(_youtube_discovery, 'build', lambda *args, **kwargs: FakeService())
+
     reached = []
-    monkeypatch.setattr(_youtube_mod, '_get_youtube_credentials', lambda: BoomCreds())
-    monkeypatch.setattr(_youtube_mod, '_resolve_video_path', lambda pid: Path('/tmp/fake-render.mp4'))
+    monkeypatch.setattr(_youtube_mod, '_get_youtube_credentials', lambda: OKCreds())
     monkeypatch.setenv('EXTERNAL_RENDER_ENABLED', 'true')
     monkeypatch.setenv('EXTERNAL_RENDER_API_KEY', 'test-key')
 
@@ -208,7 +229,14 @@ def test_external_upload_provider_error_is_not_echoed(monkeypatch, caplog, relea
     asyncio.run(_run())
 
     assert bool(reached) is allowed, 'QA-blocked render reached provider'
-    if not allowed:
+    if allowed:
+        if release_fields.get('output_path') is None and release_fields.get('_object_copy'):
+            expected_path = str(tmp_path / 'renders' / fake_db.projects.inserted[0]['id'] / 'job-1_verify.mp4')
+        else:
+            expected_path = str(approved_path)
+        assert uploaded_paths == [expected_path], 'upload used an unbound artifact'
+    else:
+        assert uploaded_paths == [], 'upload reached provider for a blocked render'
         assert fake_db.forge_runs.inserted == []
         assert 'YouTube upload blocked' in str(fake_db.forge_runs.updated)
     assert SECRET not in caplog.text, 'secret leaked into logs'

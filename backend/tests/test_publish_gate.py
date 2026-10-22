@@ -46,6 +46,9 @@ def test_approved_job_passes_the_gate(job):
     ({**APPROVED_JOB, "deterministic_qa_blocked": ["freeze"]}, "qa"),
     ({**APPROVED_JOB, "deterministic_qa_blocked": ["silence"]}, "qa"),
     ({**APPROVED_JOB, "current_step": "qa_blocked"}, "qa"),
+    ({**APPROVED_JOB, "status": "failed"}, "status"),
+    ({**APPROVED_JOB, "status": "processing"}, "status"),
+    ({**APPROVED_JOB, "status": "cancelled"}, "status"),
     ({}, "qa"),
     (None, "job"),
 ])
@@ -55,6 +58,8 @@ def test_unapproved_job_is_refused(job, reason):
     assert "YouTube upload blocked" in str(error.value)
     if reason == "job":
         assert "no approved render job" in str(error.value)
+    elif reason == "status":
+        assert "not completed" in str(error.value)
 
 
 # --------------------------------------------------------------------------
@@ -293,6 +298,29 @@ async def test_forge_pipeline_refuses_a_qa_blocked_render(monkeypatch, job):
     with pytest.raises(PublicationBlocked):
         await forge_loop._youtube_upload({"id": "p", "user_id": "admin", "name": "Video"})
     assert provider_calls == [], "provider was contacted for a blocked render"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["failed", "processing", "cancelled"])
+async def test_forge_pipeline_refuses_an_incomplete_render(monkeypatch, status):
+    import app.db
+    from app.workers import forge_loop
+    job = {**APPROVED_JOB, "status": status}
+    db = SimpleNamespace(
+        users=SimpleNamespace(find_one=AsyncMock(return_value={"role": "admin"})),
+        metadata_packages=SimpleNamespace(find_one=AsyncMock(return_value={})),
+        projects=SimpleNamespace(find_one=AsyncMock(return_value={"id": "p"})),
+        render_jobs=SimpleNamespace(find_one=AsyncMock(return_value=job)),
+    )
+    monkeypatch.setattr(app.db, "get_db", lambda: db)
+    provider_calls = []
+    from app.routes import youtube as route_module
+    monkeypatch.setattr(route_module, "_get_youtube_credentials",
+                        lambda: provider_calls.append(True))
+    with pytest.raises(PublicationBlocked) as error:
+        await forge_loop._youtube_upload({"id": "p", "user_id": "admin", "name": "Video"})
+    assert "not completed" in str(error.value)
+    assert provider_calls == [], "provider was contacted for an incomplete render"
 
 
 # --------------------------------------------------------------------------
