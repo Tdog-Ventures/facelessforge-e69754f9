@@ -2,7 +2,8 @@
 
 **Prepared:** 2026-10-22
 **Combined candidate branch:** `review/security-combined-20261022`
-**Combined candidate commit:** `a58f237a21daf278dc20477453bbf4eca050a83c`
+**Candidate source commit (code + tests):** `a58f237a21daf278dc20477453bbf4eca050a83c`
+**Branch head including this packet:** current `HEAD` of `review/security-combined-20261022`
 **Status:** Source approved for build; candidate container image pending.
 
 ---
