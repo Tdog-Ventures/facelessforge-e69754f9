@@ -6,7 +6,6 @@ import pytest
 from fastapi import HTTPException
 
 from app import storage, tts
-from app.models import AssetCreate
 from app.routes import api
 
 
@@ -69,11 +68,19 @@ async def test_registered_file_path_does_not_authorize_deletion(context, tmp_pat
         "other_asset": context.root / "audio" / "p1" / "victim.wav",
     }
     victim = write_file(paths[target])
-    asset = await api.create_asset("p1", AssetCreate(
-        name="untrusted", asset_type="voiceover_audio", file_path=str(victim)),
-        user=context.user)
+    # PR21 rejects client-supplied server paths at creation, so seed the
+    # dangerous record directly to keep this test focused on deletion behavior.
+    asset_id = "registered-a1"
+    context.db.assets.docs.append({
+        "id": asset_id,
+        "project_id": "p1",
+        "asset_type": "voiceover_audio",
+        "file_path": str(victim),
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+    })
 
-    await api.delete_voiceover("p1", asset["id"], user=context.user)
+    await api.delete_voiceover("p1", asset_id, user=context.user)
 
     assert victim.read_bytes() == b"keep me"
     assert context.db.assets.docs == []
