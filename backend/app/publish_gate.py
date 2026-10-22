@@ -28,10 +28,12 @@ def assert_publishable(job: Optional[dict]) -> None:
     """Refuse publication unless the render job cleared every release gate.
 
     Same semantics as the external auto-upload gate, so no channel can be
-    weaker than another.
+    weaker than another. A non-completed or expired job is never publishable.
     """
     if not job:
         raise PublicationBlocked("YouTube upload blocked: no approved render job")
+    if job.get("status") not in ("completed", "COMPLETED"):
+        raise PublicationBlocked("YouTube upload blocked: render job is not completed")
     if (job.get("release_eligible") is not True
             or job.get("deterministic_qa_blocked")
             or job.get("current_step") == "qa_blocked"):

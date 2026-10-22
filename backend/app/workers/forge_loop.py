@@ -450,27 +450,19 @@ async def _youtube_upload(project: dict) -> dict:
     if forge_link not in description:
         description = f"{description}\n\nCreate your own faceless videos at {forge_link}"
     tags = (meta or {}).get("tags") or ["faceless", "AI"]
-    import asyncio as _asyncio, tempfile as _tmp, urllib.request as _ur
+    import asyncio as _asyncio
     if os.environ.get("YOUTUBE_MOCK", "false").lower() == "true":
         raise RuntimeError("YOUTUBE_MOCK=true: mock uploads are disabled in the forge pipeline")
+    from ..publish_gate import resolve_approved_artifact
     rj = await find_approved_job(db=db, project_id=project["id"])
     if not rj:
         raise RuntimeError("no completed render job for project")
-    # Publication requires the same release gate as every other upload channel:
-    # a completed render is not permission to publish a QA-blocked artifact.
+    # Publication requires the same release gate and artifact binding as every
+    # other upload channel: a completed render is not permission to publish a
+    # QA-blocked artifact, and the file must be this job's own artifact.
     assert_publishable(rj)
-    video_path = None
-    dl_tmp = None
-    lp = rj.get("output_path")
-    if lp and Path(lp).exists():
-        video_path = Path(lp)
-    elif str(rj.get("output_url") or "").startswith("http"):
-        dl_tmp = Path(_tmp.gettempdir()) / f"forge_{project['id']}.mp4"
-        def _dl():
-            _ur.urlretrieve(rj["output_url"], str(dl_tmp))
-        await _asyncio.to_thread(_dl)
-        video_path = dl_tmp
-    if not video_path or not video_path.exists() or video_path.stat().st_size < 100000:
+    video_path = resolve_approved_artifact(job=rj, project_id=project["id"])
+    if not video_path.exists() or video_path.stat().st_size < 100000:
         raise RuntimeError("rendered video missing or too small to upload")
     creds = _get_youtube_credentials()
     if not creds:
@@ -500,8 +492,6 @@ async def _youtube_upload(project: dict) -> dict:
         raise RuntimeError("YouTube upload failed - mock IDs forbidden per BOOT.md HARD RULE 3")
     youtube_url = f"https://www.youtube.com/watch?v={youtube_video_id}"
     is_mock = False
-    if dl_tmp:
-        dl_tmp.unlink(missing_ok=True)
 
     # forge_runs per spec
     run_doc = {
