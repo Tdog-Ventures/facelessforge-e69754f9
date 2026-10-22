@@ -58,11 +58,24 @@ async def test_production_reset_never_returns_token(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_youtube_provider_exception_never_leaks_secret(monkeypatch, caplog):
+async def test_youtube_provider_exception_never_leaks_secret(monkeypatch, caplog, tmp_path):
     import app.db
     from app.adapters.posters import youtube as adapter
     from app.routes import youtube
-    monkeypatch.setattr(app.db, 'get_db', lambda: SimpleNamespace(users=SimpleNamespace(find_one=AsyncMock(return_value={'role': 'admin'}))))
+    # The publication gate runs before any provider interaction, so this
+    # scenario needs an approved render job and its own artifact.
+    import app.publish_gate as publish_gate
+    artifact = tmp_path / 'approved.mp4'
+    artifact.write_bytes(b'approved artifact')
+    monkeypatch.setattr(publish_gate, 'STATIC_RENDERS', tmp_path / 'renders')
+    monkeypatch.setattr(app.db, 'get_db', lambda: SimpleNamespace(
+        users=SimpleNamespace(find_one=AsyncMock(return_value={'role': 'admin'})),
+        projects=SimpleNamespace(find_one=AsyncMock(return_value={'id': 'p'})),
+        render_jobs=SimpleNamespace(find_one=AsyncMock(return_value={
+            'id': 'job-1', 'project_id': 'p', 'status': 'completed',
+            'release_eligible': True, 'deterministic_qa_blocked': [],
+            'current_step': 'completed', 'output_path': str(artifact)})),
+    ))
     monkeypatch.setattr(adapter, 'rate_limit_check', lambda *a: (True, 5))
     monkeypatch.setenv('YOUTUBE_REFRESH_TOKEN', 'configured')
     reached = []
