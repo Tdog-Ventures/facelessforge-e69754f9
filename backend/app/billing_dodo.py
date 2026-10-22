@@ -508,7 +508,6 @@ async def _mirror_grant_to_mongo(*, tenant_id: str, product_id: Optional[str],
     tenant_id/user_id. Without this mirror, Dodo-paid credits would sit in
     Redis only and renders would still 402.
     """
-    import uuid as _uuid
     from datetime import timedelta as _td
 
     from .db import get_db
@@ -525,53 +524,65 @@ async def _mirror_grant_to_mongo(*, tenant_id: str, product_id: Optional[str],
     user_id = (user or {}).get("id") or tenant_id
     email = ((user or {}).get("email") or customer_email or "").lower().strip()
 
-    ff = await db.ff_credits.find_one({"tenant_id": user_id}, {"_id": 0})
-    if ff:
-        new_credits = int(ff.get("credits") or 0) + int(credits)
-        await db.ff_credits.update_one(
-            {"tenant_id": user_id},
-            {"$set": {
-                "credits": new_credits, "plan": plan, "updated_at": now,
-                "last_transaction_id": transaction_id,
-            }},
-        )
-    else:
-        new_credits = int(credits)
-        await db.ff_credits.insert_one({
-            "tenant_id": user_id, "user_id": user_id, "email": email,
-            "plan": plan, "credits": new_credits,
-            "transaction_id": transaction_id, "customer_id": "dodo",
-            "created_at": now, "updated_at": now,
-            "last_transaction_id": transaction_id,
-        })
+    # Enforce one account before any balance mutation. Index errors (including
+    # legacy duplicate accounts) must abort rather than silently weaken safety.
+    await db.ff_credits.create_index(
+        "tenant_id", unique=True, partialFilterExpression={"tenant_id": {"$type": "string"}},
+        name="ff_credits_tenant_unique",
+    )
+    await db.subscriptions.create_index(
+        "user_id", unique=True, partialFilterExpression={"user_id": {"$type": "string"}},
+        name="subscriptions_user_unique",
+    )
 
     period_end = now + _td(days=30)
-    sub = await db.subscriptions.find_one({"user_id": user_id}, {"_id": 0})
-    if sub:
-        await db.subscriptions.update_one(
-            {"user_id": user_id},
-            {"$set": {
-                "plan": plan, "status": "active",
-                "credits_remaining": int(sub.get("credits_remaining") or 0) + int(credits),
-                "credits_monthly": int(sub.get("credits_monthly") or 0) + int(credits),
-                "current_period_end": period_end, "updated_at": now,
-                "dodo_transaction_id": transaction_id,
-            }},
-        )
-    else:
-        await db.subscriptions.insert_one({
-            "user_id": user_id, "plan": plan, "status": "active",
-            "credits_remaining": int(credits), "credits_monthly": int(credits),
-            "current_period_end": period_end, "created_at": now, "updated_at": now,
-            "dodo_transaction_id": transaction_id,
-            "paddle_customer_id": None, "paddle_subscription_id": None,
-            "paddle_price_id": None,
-        })
+    await _apply_mongo_grant(
+        db.ff_credits, {"tenant_id": user_id}, transaction_id,
+        defaults={"user_id": user_id, "email": email, "credits": 0,
+                  "transaction_id": transaction_id, "customer_id": "dodo", "created_at": now},
+        increments={"credits": int(credits)},
+        updates={"plan": plan, "updated_at": now, "last_transaction_id": transaction_id},
+    )
+    await _apply_mongo_grant(
+        db.subscriptions, {"user_id": user_id}, transaction_id,
+        defaults={"credits_remaining": 0, "credits_monthly": 0, "created_at": now,
+                  "paddle_customer_id": None, "paddle_subscription_id": None, "paddle_price_id": None},
+        increments={"credits_remaining": int(credits), "credits_monthly": int(credits)},
+        updates={"plan": plan, "status": "active", "current_period_end": period_end,
+                 "updated_at": now, "dodo_transaction_id": transaction_id},
+    )
 
-    await db.ff_billing_events.insert_one({
-        "id": str(_uuid.uuid4()), "tenant_id": user_id, "email": email,
+    # Each account records the transaction in the same atomic write as its
+    # increment. A retry can therefore finish a partial Mongo mirror safely.
+    # This does not make the earlier Redis grant/acknowledgement transactional.
+    import hashlib
+    audit_id = "dodo:" + hashlib.sha256(
+        json.dumps([user_id, transaction_id], separators=(",", ":")).encode()
+    ).hexdigest()
+    await db.ff_billing_events.update_one({"_id": audit_id}, {"$setOnInsert": {
+        "id": audit_id, "tenant_id": user_id, "email": email,
         "plan": plan, "transaction_id": transaction_id, "customer_id": "dodo",
         "event_type": f"dodo:{event_type}", "credits_added": int(credits),
         "created_at": now,
-    })
+    }}, upsert=True)
     logger.info(f"Dodo mongo mirror ok tenant={user_id} plan={plan} credits={credits}")
+
+
+async def _apply_mongo_grant(collection, identity: dict, transaction_id: str, *,
+                             defaults: dict, increments: dict, updates: dict) -> None:
+    """Create once, then atomically increment once per Dodo webhook identity."""
+    from pymongo.errors import DuplicateKeyError
+
+    try:
+        await collection.update_one(identity, {"$setOnInsert": defaults}, upsert=True)
+    except DuplicateKeyError:
+        # A concurrent initial grant created this same uniquely indexed account.
+        # Do not retry with a transaction predicate plus upsert: that would try
+        # inserting a second account when this transaction was already applied.
+        if not await collection.find_one(identity, {"_id": 1}):
+            raise
+    await collection.update_one(
+        {**identity, "processed_dodo_transactions": {"$ne": transaction_id}},
+        {"$inc": increments, "$set": updates,
+         "$addToSet": {"processed_dodo_transactions": transaction_id}},
+    )
