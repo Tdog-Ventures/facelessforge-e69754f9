@@ -2,9 +2,10 @@
 
 **Prepared:** 2026-10-22
 **Combined candidate branch:** `review/security-combined-20261022`
-**Candidate source commit (code + tests):** `a58f237a21daf278dc20477453bbf4eca050a83c`
+**Candidate source commit (code + tests):** `34fa7d61bedbd30eecae2d32248cbcb041d96906`
 **Branch head including this packet:** current `HEAD` of `review/security-combined-20261022`
-**Status:** Source approved for build; candidate container image pending.
+**Candidate image:** `facelessforge:candidate-34fa7d6` / `sha256:8bbdf0dd07305e6da880d2c1d4f1e8ae0bb919df55b59a6c92aad7fec7418d1c`
+**Status:** Candidate built and verified offline; deployment blocked only by duplicate-account reconciliation.
 
 ---
 
@@ -15,128 +16,148 @@
 | #19 | `review/combined-20261022` | `0ecca886ceadd12b0d305efb29a79d60f4988ef0` | Release-review base (reconciled shared-render + duration fixes) |
 | #20 | `codex/security-external-release-gate` | `cf92afab66e029a7b280250bb1ea315134f06479` | Shared artifact-bound publish gate + CodeRabbit follow-up |
 | #21 | `codex/security-manifest-paths` | `ca81319d8f33b9861833cb6ddcb939c849a75a3d` | Manifest read containment + reject client server paths |
-| #22 | `codex/security-billing-grant-race` | `df7496741e460c6d928c2edda3e8e725dbebbdaf` | Atomic concurrent Dodo Mongo credit grants |
-| **Combined** | `review/security-combined-20261022` | **`a58f237a21daf278dc20477453bbf4eca050a83c`** | Isolated integration of #19–#22 plus one test-alignment commit |
+| #22 | `codex/security-billing-grant-race` | `f8ef4103690e185f8b2002616282a106a4208296` | Atomic concurrent Dodo Mongo grants + durable payment_id fulfillment |
+| **Combined** | `review/security-combined-20261022` | **`34fa7d61bedbd30eecae2d32248cbcb041d96906`** | Isolated integration of #19–#22 plus test alignment + docs |
 
 All SHAs are exact, pushed to `origin`, and verified by `git rev-parse`.
+
+GitHub links:
+- PR #19: https://github.com/Tdog-Ventures/facelessforge-e69754f9/pull/19
+- PR #20: https://github.com/Tdog-Ventures/facelessforge-e69754f9/pull/20
+- PR #21: https://github.com/Tdog-Ventures/facelessforge-e69754f9/pull/21
+- PR #22: https://github.com/Tdog-Ventures/facelessforge-e69754f9/pull/22
+- Combined branch: https://github.com/Tdog-Ventures/facelessforge-e69754f9/tree/review/security-combined-20261022
 
 ---
 
 ## 2. Build / Image Status
 
-- **Candidate container image:** **pending**. No new candidate image has been built or verified from `a58f237`.
-- **Production image identity:** the existing production image is identified by the deployed runtime, not by this packet. The backup tar of the pre-deployment runtime image is:
+- **Candidate container image:** built and verified.
+  - Docker tag: `facelessforge:candidate-34fa7d6`
+  - Image ID: `sha256:8bbdf0dd07305e6da880d2c1d4f1e8ae0bb919df55b59a6c92aad7fec7418d1c`
+  - Size: 1,581,743,986 bytes
+  - Exported tar.gz: `/root/ff_backups/pr19-prep-inventory-20261022T003201Z/candidate/facelessforge-candidate-34fa7d6.tar.gz`
+  - Tar.gz SHA-256: `87f8769c2f399e4215d83fc2456a93aa2c54005c0688b42f88d160f01b26dc31`
+  - Bytes: 514 MB
+- **Production rollback image** (pre-deployment):
   - Path: `/root/ff_backups/pr19-prep-inventory-20261022T003201Z/runtime-image.tar`
   - SHA-256: `98518cb98ab574040668cabef28cfd1faff15211807b9cbca5491cf48f2ad80a`
-  - Bytes: 1,619,773,952
 - **Rollback source package:**
   - Path: `/root/ff_backups/pr19-prep-inventory-20261022T003201Z/release-config-source.tar.gz`
   - SHA-256: `78acf5311fc83045b4fadaedcf5386362d722f96f8032d7e702498bfeeae85a7`
-  - Bytes: 17,871,832
 
-> Correction from earlier checkpoint: the backup directory uses an underscore (`/root/ff_backups/...`), not a hyphen (`/root/ff-backups/...`).
+> Backup directory uses an underscore: `/root/ff_backups/...`
 
 ---
 
 ## 3. Independent Publishing-Path Review
 
-All four public YouTube upload channels now pass through one shared boundary in `backend/app/publish_gate.py`.
+All four public YouTube upload channels route through `backend/app/publish_gate.py`.
 
 | Channel | Ownership enforced? | QA gate? | Artifact binding? | Notes |
-|---|---|---|---|---|
-| **External auto-upload** (`external_api.py` `_auto_upload_task`) | Project created for the API-key user; uses queued job ID | `assert_publishable(j)` then `resolve_approved_artifact(job=j, project_id=pid)` | Job's `output_path` or renderer-retained `{job_id}_verify.mp4` | No arbitrary directory scan; no mock-ID fallback. |
-| **Operator manual upload** (`routes/youtube.py` `youtube_upload`) | `ensure_operator(user)` + project ownership check (`user_id`) | `find_approved_job` → `assert_publishable` → `resolve_approved_artifact` | Same job-bound artifact | Returns HTTP 409 on blocked/missing artifact. |
-| **Forge pipeline upload** (`workers/forge_loop.py` `_youtube_upload`) | `ensure_operator_project(project)` | `find_approved_job` → `assert_publishable` → `resolve_approved_artifact` | Same job-bound artifact | URL download fallback removed per CodeRabbit; fails closed if local artifact missing. |
-| **Autopost adapter** (`adapters/posters/youtube.py` `YoutubePoster.post`) | Caller (`trigger_autopost_for_project`) is admin-only; adapter re-binds to project | `find_approved_job` → `assert_publishable` → `resolve_approved_artifact` | Same job-bound artifact | `PublicationBlocked` re-raised distinctly from provider failure. |
+|---|---|---|---|---|---|
+| **External auto-upload** (`external_api.py`) | API-key user project | `assert_publishable` + `resolve_approved_artifact` | Job's own `output_path` or `{job_id}_verify.mp4` | No arbitrary scan; no mock-ID fallback. |
+| **Operator manual upload** (`routes/youtube.py`) | `ensure_operator` + `user_id` ownership | `find_approved_job` → gate → artifact | Same job-bound file | HTTP 409 on blocked/missing artifact. |
+| **Forge pipeline** (`workers/forge_loop.py`) | `ensure_operator_project` | Same shared gate | Same job-bound file | URL download fallback removed. |
+| **Autopost adapter** (`adapters/posters/youtube.py`) | Admin-only caller | Same shared gate | Same job-bound file | `PublicationBlocked` re-raised distinctly. |
 
-`assert_publishable` now also rejects jobs whose `status` is not `completed`/`COMPLETED`, closing the “expired job” gap.
-
-`find_approved_job` prefers the renderer-recorded `rendered_video_asset_id` and falls back to the newest completed job; the QA gate fails closed on whichever job is found.
+`assert_publishable` rejects non-completed jobs. `find_approved_job` prefers `rendered_video_asset_id` and falls back to newest completed, with the QA gate failing closed.
 
 ---
 
 ## 4. CodeRabbit Findings Addressed
 
-### PR #20 (publish gate)
+### PR #20
+- `assert_publishable` rejects non-completed jobs.
+- Forge `_youtube_upload` uses `resolve_approved_artifact`; URL fallback removed.
+- `test_security_exposure.py` asserts the artifact path passed to `MediaFileUpload`.
 
-| Finding | Resolution |
-|---|---|
-| `assert_publishable` should reject non-completed jobs | Added `status` check; tests added in `test_publish_gate.py`. |
-| Forge `_youtube_upload` should use `resolve_approved_artifact` and remove `output_url` download fallback | Rewrote artifact resolution; removed URL fallback and temp-download code. |
-| `test_security_exposure.py` should assert the artifact path passed to `MediaFileUpload` | Updated test to mock `build`/`MediaFileUpload`, reach the upload constructor, and assert the approved path (or verification-copy fallback) for allowed cases and no path for blocked cases. |
-
-### PR #21 / #22
-No actionable CodeRabbit comments. Architecture observations about legacy thumbnail reads and billing atomicity are retained as residual risks (see §7).
+### PR #22 billing follow-up
+- Webhook acknowledgement now happens only after fulfillment succeeds.
+- Durable Mongo fulfillment record keyed by `payment_id` enables crash recovery.
+- Redis grant is atomic via Lua `HSETNX` + `HINCRBY` (exactly-once per payment).
+- Mongo mirror uses a single atomic upsert+increment; no zero-balance window.
+- Only `payment.succeeded` grants credits; `subscription.active` is ignored.
 
 ---
 
 ## 5. Test Results
 
-### Final combined offline suite — commit `a58f237`
+### Final combined offline suite — commit `34fa7d6`
 ```
 pytest backend/tests/ --ignore=backend/tests/backend_test.py
-501 passed, 4 skipped, 0 failed
+513 passed, 4 skipped, 0 failed
 ```
-- The 4 skipped tests are pre-existing (optional Mongo integration / dependency cases).
-- `backend_test.py` is an integration suite that requires a running server and `MONGO_URL`; it was not run offline.
+Same result reproduced inside the candidate container.
 
-### Affected regression subset
-```
-pytest backend/tests/test_publish_gate.py backend/tests/test_security_exposure.py backend/tests/test_media_providers_fail_closed.py backend/tests/test_forge_scheduler.py
-67 passed, 0 failed
-```
+### Skip reasons (verified)
+- `RealMongoDodoGrants` ×3 in `test_dodo_grant_atomicity.py`: require `DODO_TEST_MONGO_URL` (opt-in disposable Mongo).
+- `test_configured_object_storage_endpoint_resolves` in `test_render_verification.py`: requires configured object-storage endpoint.
 
-### Integration test alignment
-`test_voiceover_deletion.py` was updated to seed asset documents directly because PR #21 now rejects client-supplied server paths at `create_asset`. The security property under test (deletion must not follow non-canonical paths) is preserved.
+No failures concealed; no tests weakened.
+
+### Billing behavioral regressions
+`test_dodo_fulfillment.py` (12 tests) covers:
+- normal grant once,
+- `subscription.active` ignored,
+- duplicate and different webhook IDs for the same payment,
+- separate payments both grant,
+- crashes after pending record / Redis grant / Mongo mirror,
+- concurrent duplicate delivery,
+- Redis/Mongo failure not acknowledged,
+- no zero-balance subscription after initial grant.
+
+### Independent review
+A second reviewer verified billing correctness and recovery behavior:
+- **Result:** 22 passed, 3 skipped, 0 failed.
+- **Verdict:** approved for deployment contingent on duplicate-account reconciliation.
+- **Minor notes:** stale comments fixed; low residual risks documented (Redis durability vs. flush, email tenant fallback edge case, refunds remain manual review).
 
 ---
 
 ## 6. Billing Residual Assessment
 
-PR #22 fixes the demonstrated Mongo concurrent-grant race (lost updates, duplicate first-account creation, repeated replays). The remaining gaps are architectural and documented in `docs/security-dodo-grant-race.md`.
+The demonstrated billing gaps are now closed in code:
 
-### Can purchased credits be lost?
-**Yes, in three ways:**
-1. The Redis processed marker (`dodo:webhooks:processed:{webhook_id}`) is set **before** the Redis credit grant. A crash after the marker but before/during the pipeline leaves the webhook marked “processed” and suppresses a retry, so credits are never granted in Redis.
-2. The Mongo mirror is best-effort and runs **after** the Redis grant. If the mirror fails or is interrupted after inserting a `subscriptions` doc with `credits_remaining: 0` but before the increment, `check_credits` (which reads `subscriptions` first and does not fall back) treats the account as exhausted. Redis may hold the credits, but generation is denied until manual repair.
-3. The Redis marker expires after 24 hours. A Dodo replay after expiry would be re-processed.
+| Gap | Fix |
+|---|---|
+| Crash after marking webhook processed loses grant | Acknowledgement + webhook-id marker set only after fulfillment; durable `ff_dodo_fulfillments` record keyed by `payment_id` enables retry-safe recovery. |
+| Interrupted Mongo mirror leaves zero-balance subscription | Single atomic upsert (`$setOnInsert` defaults + `$inc` credits) removes the zero-balance window. |
+| Different webhook IDs / late replays grant twice | Stable `payment_id` grant identity + atomic Redis HSETNX + Mongo transaction marker; `subscription.active` no longer grants. |
 
-### Can credits be granted repeatedly?
-**Yes, in two ways:**
-1. Different Dodo webhook IDs describing the same logical purchase are treated as distinct grant identities. If Dodo emits multiple IDs (e.g., `payment.succeeded` + `subscription.active`, or a retry with a fresh ID), each will grant credits.
-2. Redis and Mongo are not transactional. A partial failure can leave Redis granted without a Mongo transaction marker; a later reconciliation or repair could re-apply the same grant to Mongo.
+### Remaining deployment prerequisite
+Legacy duplicate Mongo accounts must be reconciled **before** the new unique partial indexes are created. This is a supervised data migration, not a code change.
 
-### Unresolved release blocker
-These crash/replay gaps are **blocking for a bulletproof billing release**. They do not block the source-merge of the security fixes, but they do block confident deployment of Dodo billing unless the following preconditions are met:
-1. Reconcile legacy duplicate Mongo accounts before applying the new unique partial indexes (already acknowledged in `security-dodo-grant-race.md`).
-2. Confirm Dodo webhook semantics: one unique webhook ID per purchase and retries within the 24-hour window.
-3. Have an operational reconciliation runbook (or a durable exactly-once workflow) to repair Redis/Mongo divergence and zero-balance subscription docs.
+- Read-only inventory script: `scripts/inventory_dodo_duplicate_accounts.py`
+- Reconciliation plan: `docs/dodo-duplicate-account-reconciliation.md`
 
-No production indexes or data were modified during this review.
+No production indexes, accounts, balances, or payment records were modified.
 
 ---
 
 ## 7. Remaining Risks / Follow-ups
 
 | Risk | Severity | Owner | Mitigation |
-|---|---|---|---|
-| Billing crash/replay gaps (lost or double grants) | High | Billing/platform | Reconcile duplicates; confirm Dodo semantics; implement durable exactly-once workflow or reconciliation runbook. |
-| Legacy thumbnail reads before manifest validation (PR #21 architecture note) | Medium | Renderer/security | Apply containment/ownership checks to earlier legacy thumbnail resolution paths. |
-| Auto-upload success persistence is not atomic with provider upload (CodeRabbit architecture note) | Medium | Publishing | Add idempotent success recording or duplicate-upload guard in a follow-up. |
-| Candidate image build & verification | Blocking | Build/CI | Build image from `a58f237` and run integration tests before deployment. |
-| Customer acceptance test | Not executed | QA/Owner | Execute the customer-test plan (see §9) against the built candidate on a non-production tenant. |
+|---|---|---|---|---|---|
+| Duplicate Mongo accounts block index creation | Blocking (deploy prereq) | Operator/DBA | Run inventory script, approve reconciliation plan, execute during maintenance window. |
+| Redis flush/eviction loses fulfillment hash while Mongo pending | Low | Platform | Startup reconciliation from `ff_dodo_fulfillments` (future enhancement). |
+| Email-based tenant fallback can split Redis/Mongo view | Low | Billing | Ensure checkout sets `custom_data.tenant_id` for all Dodo sessions. |
+| Refunds/disputes require manual review | Low | Billing ops | Existing `ff_billing_reviews` workflow preserved. |
+| Legacy thumbnail reads before manifest validation | Medium | Renderer/security | Apply containment to earlier thumbnail resolution paths in a follow-up. |
+| Auto-upload success not atomic with provider upload | Medium | Publishing | Add idempotent success recording or duplicate-upload guard in a follow-up. |
+| Customer acceptance test | Not executed | QA/Owner | Execute non-production test plan before full rollout. |
 
 ---
 
 ## 8. Protected-Code Preservation
 
-No changes were made to:
+No changes to:
 - `security/entrypoint/requirements`
 - `backend/app/qa.py`
 - `backend/app/routes/youtube_oauth.py`
-- `backend/app/render.py` credit/render-cost constants (`RENDER_CREDIT_COST`, `reverse_render_credits`, `STATIC_RENDERS`)
+- `backend/app/render.py` credit/render-cost constants
 
-All changes are confined to the publishing boundary, manifest-path hardening, billing Dodo mirror, and their tests.
+All changes are confined to publishing boundary, manifest hardening, billing Dodo fulfillment, and tests/docs.
 
 ---
 
@@ -144,21 +165,27 @@ All changes are confined to the publishing boundary, manifest-path hardening, bi
 
 ### Rollback
 1. Stop candidate service.
-2. Restore runtime image from `/root/ff_backups/pr19-prep-inventory-20261022T003201Z/runtime-image.tar` (sha256 `98518cb98ab574040668cabef28cfd1faff15211807b9cbca5491cf48f2ad80a`).
-3. Restore source config from `/root/ff_backups/pr19-prep-inventory-20261022T003201Z/release-config-source.tar.gz` (sha256 `78acf5311fc83045b4fadaedcf5386362d722f96f8032d7e702498bfeeae85a7`).
+2. Restore image from `/root/ff_backups/pr19-prep-inventory-20261022T003201Z/runtime-image.tar` (sha256 `98518cb...`).
+3. Restore source config from `/root/ff_backups/pr19-prep-inventory-20261022T003201Z/release-config-source.tar.gz` (sha256 `78acf5...`).
 4. Restart prior service.
+
+### Pre-deployment steps
+1. Run `scripts/inventory_dodo_duplicate_accounts.py` against production (read-only).
+2. Execute the reconciliation plan in `docs/dodo-duplicate-account-reconciliation.md` if duplicates exist.
+3. Confirm no duplicate `tenant_id` in `ff_credits` and no duplicate `user_id` in `subscriptions`.
 
 ### Customer test plan (unexecuted)
 - Create a non-production project.
-- Render a video and mark it QA-blocked (`deterministic_qa_blocked` / `current_step=qa_blocked`); verify all four upload channels refuse publication.
-- Mark the same render release-eligible; verify all four channels can upload the same approved artifact.
-- Attempt to publish from a different completed job while a newer approved job exists; verify the newer approved artifact is used.
-- No specific customer account is designated in this packet; assign a staging tenant before execution.
+- Render and QA-block it; verify all four upload channels refuse publication.
+- Mark release-eligible; verify all four channels can publish the same approved artifact.
+- Attempt to publish an older completed job while a newer approved job exists; verify the newer artifact is used.
+- Complete a Dodo test purchase; verify exactly one credit grant, idempotent replays, and `check_credits` reflects the balance.
+- Assign a staging tenant before execution; no production account assumed.
 
 ---
 
 ## 10. Approval Recommendation
 
-**Approve for build, not for production deployment.**
+**Approve for deployment after duplicate-account reconciliation.**
 
-The combined source at `a58f237a21daf278dc20477453bbf4eca050a83c` closes the sibling publishing bypasses, passes the offline regression suite (501/0), and addresses the actionable CodeRabbit findings. It should be built into a candidate image and subjected to integration / customer tests. Billing crash/replay gaps remain an unresolved release blocker for the Dodo payment flow.
+The combined source at `34fa7d61bedbd30eecae2d32248cbcb041d96906` closes the sibling publishing bypasses and the demonstrated Dodo billing gaps. The offline regression suite passes (513/4) both on the host and inside the built candidate image. The only remaining release blocker is the supervised Mongo duplicate-account reconciliation documented in `docs/dodo-duplicate-account-reconciliation.md`.
