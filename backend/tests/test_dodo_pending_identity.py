@@ -4,7 +4,7 @@ from unittest.mock import patch
 import pytest
 
 from app import billing_dodo
-from test_dodo_fulfillment import FakeRedis, _database
+from .test_dodo_fulfillment import FakeRedis, _database
 
 
 def pending_database(status="pending"):

@@ -8,7 +8,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 import pytest
 
 from app import billing_dodo
-from test_dodo_redis_integration import isolated_redis
+from .test_dodo_redis_integration import isolated_redis
 
 
 @pytest.mark.asyncio
