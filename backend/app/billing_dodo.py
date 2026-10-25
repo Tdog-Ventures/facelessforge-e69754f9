@@ -36,7 +36,13 @@ local now_iso = ARGV[3]
 if redis.call('HSETNX', fulfillment_key, payment_id, credits) == 0 then
     return 0
 end
-redis.call('HINCRBY', account_key, 'credits', credits)
+-- Lua execution is isolated, but Redis does not roll back earlier commands
+-- on a runtime error. A failed increment must not consume the payment marker.
+local increment = redis.pcall('HINCRBY', account_key, 'credits', credits)
+if type(increment) == 'table' and increment.err then
+    redis.call('HDEL', fulfillment_key, payment_id)
+    return redis.error_reply(increment.err)
+end
 redis.call('HSET', account_key, 'status', 'ACTIVE')
 redis.call('HSET', account_key, 'last_payment', now_iso)
 return 1
@@ -504,6 +510,7 @@ async def _fulfill_dodo_grant(*, tenant_id: str, product_id: Optional[str],
             "credits": credits,
             "event_type": event_type,
             "status": "pending",
+            "customer_email": customer_email,
             "attempts": 0,
             "webhook_id": webhook_id,
             "created_at": now,
@@ -512,6 +519,18 @@ async def _fulfill_dodo_grant(*, tenant_id: str, product_id: Optional[str],
         upsert=True,
     )
     fulfillment = await db.ff_dodo_fulfillments.find_one({"_id": payment_id}, {"_id": 0})
+    if not fulfillment:
+        raise RuntimeError("Dodo fulfillment record was not persisted")
+    if fulfillment.get("tenant_id") != tenant_id:
+        raise ValueError("Dodo payment tenant does not match its fulfillment record")
+
+    # The first durable record fixes the payment contract. Product mappings,
+    # quantities and customer resolution may change before a later retry.
+    tenant_id = fulfillment["tenant_id"]
+    product_id = fulfillment.get("product_id")
+    credits = int(fulfillment["credits"])
+    event_type = fulfillment["event_type"]
+    customer_email = fulfillment.get("customer_email", customer_email)
     if fulfillment and fulfillment.get("status") == "completed":
         return {
             "status": "already_fulfilled",
@@ -594,14 +613,14 @@ async def _mirror_grant_to_mongo(*, tenant_id: str, product_id: Optional[str],
     period_end = now + _td(days=30)
     await _apply_mongo_grant(
         db.ff_credits, {"tenant_id": user_id}, transaction_id,
-        defaults={"user_id": user_id, "email": email, "credits": 0,
+        defaults={"user_id": user_id, "email": email,
                   "transaction_id": transaction_id, "customer_id": "dodo", "created_at": now},
         increments={"credits": int(credits)},
         updates={"plan": plan, "updated_at": now, "last_transaction_id": transaction_id},
     )
     await _apply_mongo_grant(
         db.subscriptions, {"user_id": user_id}, transaction_id,
-        defaults={"credits_remaining": 0, "credits_monthly": 0, "created_at": now,
+        defaults={"created_at": now,
                   "paddle_customer_id": None, "paddle_subscription_id": None, "paddle_price_id": None},
         increments={"credits_remaining": int(credits), "credits_monthly": int(credits)},
         updates={"plan": plan, "status": "active", "current_period_end": period_end,
@@ -656,3 +675,4 @@ async def _apply_mongo_grant(collection, identity: dict, transaction_id: str, *,
                 "$addToSet": {"processed_dodo_transactions": transaction_id},
             },
         )
+

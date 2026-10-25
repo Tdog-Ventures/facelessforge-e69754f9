@@ -55,6 +55,7 @@ async def scan_duplicates(db) -> dict:
                 "email": doc.get("email"),
                 "transaction_id": doc.get("transaction_id"),
                 "last_transaction_id": doc.get("last_transaction_id"),
+                "processed_dodo_transactions": doc.get("processed_dodo_transactions", []),
                 "created_at": _serialize(doc.get("created_at")),
                 "updated_at": _serialize(doc.get("updated_at")),
             })
@@ -78,6 +79,7 @@ async def scan_duplicates(db) -> dict:
                 "user_id": doc.get("user_id"),
                 "credits_remaining": doc.get("credits_remaining"),
                 "credits_monthly": doc.get("credits_monthly"),
+                "processed_dodo_transactions": doc.get("processed_dodo_transactions", []),
                 "plan": doc.get("plan"),
                 "status": doc.get("status"),
                 "current_period_end": _serialize(doc.get("current_period_end")),
@@ -114,8 +116,7 @@ async def main():
     client = AsyncIOMotorClient(args.mongo_url, serverSelectionTimeoutMS=10000)
     try:
         # Use the database name from the URI if present, otherwise facelessforge
-        db_name = client.get_default_database().name if client.get_default_database() else "facelessforge"
-        db = client[db_name]
+        db = client.get_default_database("facelessforge")
         await client.admin.command("ping")
         result = await scan_duplicates(db)
     except Exception as exc:
@@ -142,3 +143,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
