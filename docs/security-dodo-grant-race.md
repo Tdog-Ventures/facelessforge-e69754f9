@@ -19,25 +19,43 @@ events; monitor document growth and migrate to a transactional grant ledger befo
 approaching Mongo document limits. Previously applied transactions have no new
 marker, so this patch does not retrospectively deduplicate historical grants.
 
+## Retry state machine
+
+The webhook acknowledges only after fulfillment completes. The durable
+ff_dodo_fulfillments record moves pending -> redis_granted -> completed:
+
+- pending: no grant has been applied. The Redis Lua script sets its per-payment
+  marker only when HINCRBY succeeds; a failed increment removes the marker so a
+  later delivery can retry.
+- redis_granted: Redis credited, Mongo mirror not yet confirmed. A retry skips
+  the Redis step entirely and runs only the idempotent Mongo mirror.
+- completed: both stores credited; replays return already_fulfilled.
+
+Transient Redis/Mongo errors raise DodoGrantRetryable and return HTTP 503, so
+Dodo redelivers. The first durable record's tenant, product, credits and email
+are canonical. A redelivery naming another tenant is rejected before any
+balance change.
+
 ## Remaining limitations
 
-This is account-level Mongo atomicity, not end-to-end exactly-once fulfillment.
-The webhook caller still marks Redis processed before fulfillment, expires that
-marker, can fail open on Redis errors, grants Redis before the best-effort Mongo
-mirror, and acknowledges Mongo-mirror failures. Thus automatic webhook replay may
-never reach this retry-safe helper after a partial failure, and Redis can diverge
-from Mongo. Manual reconciliation or a separate durable workflow change remains
-necessary. Different webhook IDs describing the same purchase are distinct grant
-identities here. The two accounts and audit are separate writes; they converge
-only if the helper is retried successfully. No Redis behavior changed.
+This is still not a cross-store transaction. Redis is credited before the
+Mongo mirror; the durable redis_granted state makes the retry skip Redis, but a
+crash after Redis and before the marker write can still leave Redis credited
+while the record remains pending. In that case the next Lua call sees the
+existing payment marker and returns 0 rather than double-crediting, so the
+mirror can still complete exactly once. If Redis loses the account data after
+the marker is durable, a retry will not rebuild the Redis balance; Mongo
+remains the authoritative balance read by check_credits, but the two stores can
+diverge until reconciled. If Dodo exhausts its bounded retries, or a
+tenant-mismatched delivery is rejected, the record needs manual reconciliation.
+Historical grants without transaction markers are not retrospectively
+deduplicated.
 
 ## Verification
 
-The new offline tests first failed against the original code for lost concurrent
-updates, duplicate first-account creation, repeated grants, and partial failure.
-With the fix, six offline atomicity cases, three Mongo 7 integration cases, and
-four existing refund cases passed (13 total). Real Mongo tests use a new isolated,
-network-disabled disposable container and fresh test-only databases; they never
-load application environment files. Set DODO_TEST_MONGO_URL to opt into integration
-tests against a disposable server. Without it, those three cases are skipped.
-TestSprite against a deployed candidate was not run: no candidate was deployed.
+The focused billing suite runs against a network-disabled disposable Mongo
+container (private Unix socket, no published ports) and a disposable Redis
+process (private Unix socket, persistence disabled). The reconciled candidate
+passed 49 focused checks with zero failures and zero skips. Set
+DODO_TEST_MONGO_URL and DODO_TEST_REDIS_SERVER to opt into the real-store
+cases; without them those cases skip.

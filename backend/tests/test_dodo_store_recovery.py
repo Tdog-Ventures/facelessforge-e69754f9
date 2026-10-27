@@ -49,7 +49,7 @@ async def test_real_stores_recover_partial_mirror_without_regranting(isolated_re
             assert isolated_redis.hget("tenant:user", "credits") == "100"
             assert (await db.ff_credits.find_one({"tenant_id": "user"}))["credits"] == 100
             assert await real_subscriptions.find_one({"user_id": "user"}) is None
-            assert (await db.ff_dodo_fulfillments.find_one({"_id": "partial-payment"}))["status"] == "pending"
+            assert (await db.ff_dodo_fulfillments.find_one({"_id": "partial-payment"}))["status"] == "redis_granted"
             assert (await fulfill(500))["credits_granted"] == 100
             assert (await fulfill(500))["status"] == "already_fulfilled"
 

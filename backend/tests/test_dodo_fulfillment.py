@@ -11,6 +11,15 @@ from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 import pytest
+from fastapi import HTTPException
+from pymongo.errors import (
+    NetworkTimeout,
+    OperationFailure,
+    ServerSelectionTimeoutError,
+    WriteConcernError,
+    WriteError,
+)
+from redis.exceptions import RedisError
 from starlette.requests import Request
 
 from app import billing_dodo
@@ -420,10 +429,11 @@ async def test_mongo_mirror_failure_is_not_acknowledged():
         payload = _payment_payload()
         with pytest.raises(RuntimeError):
             await _post_webhook(payload, fake_redis, db)
-    # Redis already has credits; webhook is not acknowledged so Dodo retries.
+    # Redis already has credits; the durable redis_granted state records it so
+    # a retry skips the Redis step; webhook is not acknowledged so Dodo retries.
     assert fake_redis.hash["tenant:user"]["credits"] == "100"
     assert f"dodo:webhooks:processed:wh_1" not in fake_redis.strings
-    assert db.ff_dodo_fulfillments.docs[0]["status"] == "pending"
+    assert db.ff_dodo_fulfillments.docs[0]["status"] == "redis_granted"
 
 
 @pytest.mark.asyncio
@@ -437,3 +447,142 @@ async def test_no_zero_balance_after_initial_grant():
     assert sub["credits_remaining"] == 100
     assert sub["credits_monthly"] == 100
     assert "pay_1" in sub["processed_dodo_transactions"]
+
+
+# --- Store failure hardening: retryable, recoverable, no double credit ---
+
+@pytest.mark.parametrize("error_cls", [
+    WriteError,
+    WriteConcernError,
+    ServerSelectionTimeoutError,
+    NetworkTimeout,
+    OperationFailure,
+])
+@pytest.mark.asyncio
+async def test_mongo_write_errors_surface_as_retryable_after_redis_grant(error_cls):
+    """Any Mongo write/connection error during the mirror yields a 503 webhook
+    response, records the redis_granted state, and acknowledges nothing."""
+    fake_redis = FakeRedis()
+    db = _database()
+    failed = False
+    real_update = db.ff_credits.update_one
+
+    async def fail_once(query, update, **kwargs):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise error_cls("simulated transient mongo failure")
+        return await real_update(query, update, **kwargs)
+
+    db.ff_credits.update_one = fail_once
+    payload = _payment_payload(payment_id="pay_mongo_fail")
+    with pytest.raises(HTTPException) as exc_info:
+        await _post_webhook(payload, fake_redis, db)
+    assert exc_info.value.status_code == 503
+    # Redis was granted exactly once...
+    assert fake_redis.hash["tenant:user"]["credits"] == "100"
+    # ...no acknowledgement, and the durable record proves Redis was granted.
+    assert "dodo:webhooks:processed:wh_1" not in fake_redis.strings
+    record = [d for d in db.ff_dodo_fulfillments.docs if d["payment_id"] == "pay_mongo_fail"][0]
+    assert record["status"] == "redis_granted"
+
+
+@pytest.mark.asyncio
+async def test_redis_failure_surfaces_as_retryable():
+    """A Redis connection/script failure yields 503 and leaves no phantom grant."""
+    fake_redis = FakeRedis()
+    db = _database()
+    with patch.object(billing_dodo, "_apply_redis_grant", side_effect=RedisError("redis down")):
+        payload = _payment_payload(payment_id="pay_redis_fail")
+        with pytest.raises(HTTPException) as exc_info:
+            await _post_webhook(payload, fake_redis, db)
+    assert exc_info.value.status_code == 503
+    assert "dodo:webhooks:processed:wh_1" not in fake_redis.strings
+    record = [d for d in db.ff_dodo_fulfillments.docs if d["payment_id"] == "pay_redis_fail"][0]
+    assert record["status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_mongo_write_failure_after_redis_grant_recovers_without_double_credit():
+    """Simulated Mongo write failure AFTER the Redis grant: a retry completes
+    the mirror and never double-credits Redis or Mongo."""
+    fake_redis = FakeRedis()
+    db = _database()
+    failed = False
+    real_update = db.ff_credits.update_one
+
+    async def fail_once(query, update, **kwargs):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise WriteError("simulated transient mongo failure")
+        return await real_update(query, update, **kwargs)
+
+    db.ff_credits.update_one = fail_once
+    payload = _payment_payload(payment_id="pay_recover")
+    with pytest.raises(HTTPException):
+        await _post_webhook(payload, fake_redis, db)
+
+    # Retry lands with the durable record in redis_granted state.
+    result = await _post_webhook(payload, fake_redis, db)
+    assert result["status"] == "ACTIVE"
+    assert fake_redis.hash["tenant:user"]["credits"] == "100"  # no double Redis credit
+    assert len(db.ff_credits.docs) == 1
+    assert db.ff_credits.docs[0]["credits"] == 100  # exactly one Mongo grant
+    assert db.subscriptions.docs[0]["credits_remaining"] == 100
+    assert db.subscriptions.docs[0]["credits_monthly"] == 100
+    assert len(db.ff_billing_events.docs) == 1
+    record = [d for d in db.ff_dodo_fulfillments.docs if d["payment_id"] == "pay_recover"][0]
+    assert record["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_retry_with_redis_granted_status_skips_redis_step():
+    """A retry after the durable redis_granted marker must not re-attempt the
+    Redis grant at all."""
+    fake_redis = FakeRedis()
+    db = _database()
+    payload = _payment_payload(payment_id="pay_skipredis")
+    fake_redis.hash["tenant:user:dodo_fulfillments"] = {"pay_skipredis": "100"}
+    fake_redis.hash["tenant:user"] = {"credits": "100", "status": "ACTIVE"}
+    db.ff_dodo_fulfillments.docs.append({
+        "_id": "pay_skipredis",
+        "payment_id": "pay_skipredis",
+        "tenant_id": "user",
+        "product_id": "pdt_starter",
+        "credits": 100,
+        "event_type": "payment.succeeded",
+        "status": "redis_granted",
+        "attempts": 0,
+    })
+
+    eval_calls = []
+    original_eval = fake_redis.eval
+
+    def counting_eval(*args, **kwargs):
+        eval_calls.append(args)
+        return original_eval(*args, **kwargs)
+
+    fake_redis.eval = counting_eval
+    result = await _post_webhook(payload, fake_redis, db)
+    assert result["status"] == "ACTIVE"
+    assert eval_calls == []  # Redis step skipped entirely
+    assert fake_redis.hash["tenant:user"]["credits"] == "100"  # still exactly once
+    assert db.ff_credits.docs[0]["credits"] == 100
+    assert db.subscriptions.docs[0]["credits_remaining"] == 100
+    record = [d for d in db.ff_dodo_fulfillments.docs if d["payment_id"] == "pay_skipredis"][0]
+    assert record["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_mongo_mirror_failure_after_redis_grant_is_retryable():
+    """A transient Mongo mirror failure is a 503, not a 500, after Redis granted."""
+    fake_redis = FakeRedis()
+    db = _database()
+    with patch.object(billing_dodo, "_mirror_grant_to_mongo", side_effect=NetworkTimeout("mongo down")):
+        with pytest.raises(HTTPException) as exc_info:
+            await _post_webhook(_payment_payload(payment_id="pay_mirror_fail"), fake_redis, db)
+    assert exc_info.value.status_code == 503
+    assert fake_redis.hash["tenant:user"]["credits"] == "100"
+    record = [d for d in db.ff_dodo_fulfillments.docs if d["payment_id"] == "pay_mirror_fail"][0]
+    assert record["status"] == "redis_granted"

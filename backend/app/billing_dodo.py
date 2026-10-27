@@ -23,6 +23,16 @@ import redis
 logger = logging.getLogger("billing_dodo")
 router = APIRouter(prefix="/api/billing/dodo", tags=["dodo"])
 
+
+class DodoGrantRetryable(Exception):
+    """A transient store failure during Dodo fulfillment that must be retried.
+
+    Raised after Redis/Mongo write or connection errors so the webhook
+    acknowledges with 503 and Dodo redelivers; no credits are lost because
+    both the Redis grant and the Mongo mirror are idempotent per payment_id.
+    """
+
+
 # Atomic Redis grant: record the payment_id in a per-tenant fulfillment hash,
 # then increment the tenant credit balance. HSETNX guarantees exactly-once
 # Redis crediting even for concurrent deliveries or different webhook IDs.
@@ -430,6 +440,14 @@ async def dodo_webhook(
             customer_email=(customer or {}).get("email"),
             webhook_id=webhook_id,
         )
+    except DodoGrantRetryable as exc:
+        # A store leg failed before acknowledgement. The fulfillment record
+        # carries the recoverable state; Dodo redelivers on 503.
+        logger.exception(
+            "Dodo fulfillment retryable failure id=%s payment_id=%s tenant_id=%s; not acknowledged",
+            webhook_id, payment_id, tenant_id,
+        )
+        raise HTTPException(status_code=503, detail="Dodo fulfillment pending; retry required") from exc
     except Exception:
         logger.exception("Dodo fulfillment failed id=%s payment_id=%s; not acknowledged", webhook_id, payment_id)
         raise
@@ -491,37 +509,60 @@ async def _fulfill_dodo_grant(*, tenant_id: str, product_id: Optional[str],
 
     A Mongo record keyed by payment_id drives recovery. It is created in the
     pending state, then Redis and Mongo are updated idempotently, then the
-    record is marked completed. Retries with the same payment_id (whether
-    from Dodo replays or different webhook IDs) find the record and do not
-    re-grant.
+    record is marked completed. After the Redis grant succeeds the record is
+    flipped to "redis_granted" before the Mongo mirror is attempted, so a
+    retry can skip the Redis step entirely (never re-granting Redis credits).
+    Transient Redis/Mongo failures are surfaced as DodoGrantRetryable so the
+    webhook acknowledges with 503 and Dodo redelivers (bounded retry).
+    Retries with the same payment_id (whether from Dodo replays or different
+    webhook IDs) find the record and do not re-grant.
     """
+    from pymongo.errors import PyMongoError
+
     from .db import get_db
     db = get_db()
     now = datetime.now(timezone.utc)
 
+    def _retryable(action: str, exc: BaseException) -> DodoGrantRetryable:
+        logger.error(
+            "Dodo grant %s failed payment_id=%s tenant_id=%s: %s - webhook must be retried",
+            action, payment_id, tenant_id, exc,
+        )
+        return DodoGrantRetryable(f"dodo grant {action} failed for payment_id={payment_id}: {exc}")
+
     # 1. Ensure a durable fulfillment record exists. Upsert-on-insert lets
     # concurrent deliveries race safely; only one creates the pending record.
-    await db.ff_dodo_fulfillments.update_one(
-        {"_id": payment_id},
-        {"$setOnInsert": {
-            "payment_id": payment_id,
-            "tenant_id": tenant_id,
-            "product_id": product_id,
-            "credits": credits,
-            "event_type": event_type,
-            "status": "pending",
-            "customer_email": customer_email,
-            "attempts": 0,
-            "webhook_id": webhook_id,
-            "created_at": now,
-            "updated_at": now,
-        }},
-        upsert=True,
-    )
-    fulfillment = await db.ff_dodo_fulfillments.find_one({"_id": payment_id}, {"_id": 0})
+    try:
+        await db.ff_dodo_fulfillments.update_one(
+            {"_id": payment_id},
+            {"$setOnInsert": {
+                "payment_id": payment_id,
+                "tenant_id": tenant_id,
+                "product_id": product_id,
+                "credits": credits,
+                "event_type": event_type,
+                "status": "pending",
+                "customer_email": customer_email,
+                "attempts": 0,
+                "webhook_id": webhook_id,
+                "created_at": now,
+                "updated_at": now,
+            }},
+            upsert=True,
+        )
+    except PyMongoError as exc:
+        raise _retryable("fulfillment-record-create", exc) from exc
+    try:
+        fulfillment = await db.ff_dodo_fulfillments.find_one({"_id": payment_id}, {"_id": 0})
+    except PyMongoError as exc:
+        raise _retryable("fulfillment-record-read", exc) from exc
     if not fulfillment:
-        raise RuntimeError("Dodo fulfillment record was not persisted")
+        raise DodoGrantRetryable(
+            f"dodo grant fulfillment-record-read failed for payment_id={payment_id}: record was not persisted"
+        )
     if fulfillment.get("tenant_id") != tenant_id:
+        # The first durable record fixes the tenant contract. A redelivery that
+        # claims another tenant must not be able to re-route the grant.
         raise ValueError("Dodo payment tenant does not match its fulfillment record")
 
     # The first durable record fixes the payment contract. Product mappings,
@@ -540,29 +581,59 @@ async def _fulfill_dodo_grant(*, tenant_id: str, product_id: Optional[str],
         }
 
     # 2. Track this attempt.
-    await db.ff_dodo_fulfillments.update_one(
-        {"_id": payment_id},
-        {"$inc": {"attempts": 1}, "$set": {"updated_at": datetime.now(timezone.utc)}},
-    )
+    try:
+        await db.ff_dodo_fulfillments.update_one(
+            {"_id": payment_id},
+            {"$inc": {"attempts": 1}, "$set": {"updated_at": datetime.now(timezone.utc)}},
+        )
+    except PyMongoError as exc:
+        raise _retryable("attempts-counter", exc) from exc
 
     # 3. Redis grant (atomic once-per-payment via Lua HSETNX + HINCRBY).
-    _apply_redis_grant(r, tenant_id, payment_id, credits)
+    #    Skipped when a previous attempt already granted it and recorded the
+    #    intermediate "redis_granted" state.
+    redis_granted = bool(fulfillment and fulfillment.get("status") == "redis_granted")
+    if redis_granted:
+        logger.info("Dodo grant retry: Redis already granted earlier payment_id=%s tenant_id=%s", payment_id, tenant_id)
+    else:
+        try:
+            _apply_redis_grant(r, tenant_id, payment_id, credits)
+        except redis.RedisError as exc:
+            # The Lua script released the payment marker when the increment did
+            # not apply, so a bounded redelivery is safe and loses no credits.
+            raise _retryable("redis-grant", exc) from exc
+        # 3b. Durable intermediate state BEFORE the Mongo mirror: if the
+        # mirror (or this marker write) fails, a retry will see redis_granted
+        # and skip the Redis step instead of re-granting.
+        try:
+            await db.ff_dodo_fulfillments.update_one(
+                {"_id": payment_id},
+                {"$set": {"status": "redis_granted", "updated_at": datetime.now(timezone.utc)}},
+            )
+        except PyMongoError as exc:
+            raise _retryable("redis-granted-marker", exc) from exc
 
     # 4. Mongo mirror (idempotent per payment_id).
-    await _mirror_grant_to_mongo(
-        tenant_id=tenant_id,
-        product_id=product_id,
-        credits=credits,
-        transaction_id=payment_id,
-        event_type=event_type,
-        customer_email=customer_email,
-    )
+    try:
+        await _mirror_grant_to_mongo(
+            tenant_id=tenant_id,
+            product_id=product_id,
+            credits=credits,
+            transaction_id=payment_id,
+            event_type=event_type,
+            customer_email=customer_email,
+        )
+    except PyMongoError as exc:
+        raise _retryable("mongo-mirror", exc) from exc
 
     # 5. Mark completed.
-    await db.ff_dodo_fulfillments.update_one(
-        {"_id": payment_id},
-        {"$set": {"status": "completed", "updated_at": datetime.now(timezone.utc)}},
-    )
+    try:
+        await db.ff_dodo_fulfillments.update_one(
+            {"_id": payment_id},
+            {"$set": {"status": "completed", "updated_at": datetime.now(timezone.utc)}},
+        )
+    except PyMongoError as exc:
+        raise _retryable("completion-marker", exc) from exc
 
     return {
         "status": "ACTIVE",

@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TESTS = [
     "backend/tests/test_dodo_fulfillment.py",
     "backend/tests/test_dodo_grant_atomicity.py",
+    "backend/tests/test_dodo_canonical_retry.py",
     "backend/tests/test_dodo_refund_review.py",
     "backend/tests/test_dodo_pending_identity.py",
     "backend/tests/test_dodo_redis_integration.py",
