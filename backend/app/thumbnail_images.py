@@ -173,8 +173,9 @@ async def _gemini_image(prompt: str, session_id: str) -> bytes | None:
             if data:
                 return base64.b64decode(data)
         return None
-    except Exception as e:  # noqa: BLE001
-        logger.warning("Gemini image generation failed: %s", e)
+    except Exception as e:  # noqa: BLE001        reason = _safe_provider_error(e)
+        logger.warning("Gemini image generation failed: %s", reason)
+        raise ThumbnailGenerationError(f"Gemini {model}: {reason}") from e
         return None
 
 
