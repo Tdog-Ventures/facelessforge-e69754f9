@@ -469,7 +469,12 @@ def validate_prerequisites(project: dict, script: dict | None,
     # Editorial projects retain their legacy stock/fallback behaviour.  A
     # commercial project is stricter: no auto-stock or caption card can fill a
     # missing client scene.
-    scene_assets = [a for a in assets if a.get("asset_type") in ("stock_image", "stock_video") and a.get("scene_id")]
+    current_scene_ids = {s.get("id") for s in scenes if s.get("id")}
+    scene_assets = [
+        a for a in assets
+        if a.get("asset_type") in ("stock_image", "stock_video")
+        and a.get("scene_id") in current_scene_ids
+    ]
     covered_ids = {a["scene_id"] for a in scene_assets}
     coverage = (len(covered_ids) / max(1, len(scenes))) if scenes else 0
     if commercial:
