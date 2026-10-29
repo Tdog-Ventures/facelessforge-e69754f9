@@ -280,13 +280,16 @@ async def generate_thumbnail_images(
         session_id = f"thumb-{project_id}-{asset_id}"
         ext = "svg"
         image_bytes: bytes | None = None
-        source = "mock_thumbnail"
-        source_item: dict | None = None
+        source = "mock_thumbnail"        source_item: dict | None = None
+        provider_error: ThumbnailGenerationError | None = None
 
         if _use_mock():
             image_bytes = _mock_svg(asset_id, project, brief)
-        else:
-            image_bytes = await _gemini_image(prompt, session_id)
+        else:            try:
+                image_bytes = await _gemini_image(prompt, session_id)
+            except ThumbnailGenerationError as exc:
+                provider_error = exc
+                image_bytes = None
             if image_bytes is not None:
                 ext = "png"
                 source = info["provider"]
@@ -305,8 +308,11 @@ async def generate_thumbnail_images(
 
         if image_bytes is None:
             # No mock fallback — return real only, frontend shows skeleton/Retry
-            logger.warning("Thumbnail generation failed for %s variant %s — no mock, will show Retry", project_id, i)
-            continue
+            logger.warning("Thumbnail generation failed for %s variant %s — no mock, will show Retry", project_id, i)            reason = provider_error or ThumbnailGenerationError(
+                f"{info['provider']} returned no image and the Pexels fallback produced no usable result"
+            )
+            logger.warning("Thumbnail generation failed for %s variant %s: %s", project_id, i, reason)
+            raise reason
 
         file_path = dir_path / f"{asset_id}.{ext}"
         file_path.write_bytes(image_bytes)
