@@ -191,7 +191,13 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
       const { data } = await api.post(`/projects/${projectId}/generate-scenes`, preserve ? { preserveSceneCount: true } : {});
       onChange(data);
       if (data.project) setInnerProject(data.project);
-      toast.success(preserve ? "Scenes regenerated (count preserved)" : "Scenes generated", { id: "gen-scenes" });
+      const sceneCount = (data.scenes || []).length || scenes.length;
+      toast.success(preserve ? "Scenes regenerated (count preserved)" : "Scene plan created", {
+        id: "gen-scenes",
+        description: preserve
+          ? `${sceneCount} scene rows updated. Existing attachment choices were preserved where possible.`
+          : `${sceneCount} scene rows created. No clips are attached yet—use Auto-Attach Assets or choose clips manually.`,
+      });
     } catch (err) {
       if (!handleExhausted(err)) toast.error("Generation failed", { id: "gen-scenes", description: formatApiError(err.response?.data?.detail) || err.message });
       else toast.error("Credits exhausted", { id: "gen-scenes", description: `0 left, resets ${(() => { try { return new Date(err.response?.data?.detail?.reset_at || credits?.reset_at).toLocaleDateString(); } catch { return err.response?.data?.detail?.reset_at || ""; }})()}` });
