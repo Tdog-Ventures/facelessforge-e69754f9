@@ -1930,10 +1930,9 @@ async def _record_voice_fit(db, project_id: str, script_version: str, attempts: 
         )
     except Exception:  # noqa: BLE001
         pass
+# Internal worker implementation. The public route below submits a durable job.
+async def _generate_full_voiceover_now(
 
-
-@router.post("/projects/{project_id}/voiceover/generate-script")
-async def generate_full_voiceover(
     project_id: str,
     body: GenerateVoiceoverRequest = Body(default=None),
     user=Depends(get_current_user),
