@@ -24,9 +24,20 @@ from pathlib import Path
 import httpx
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-from .storage import get_storage
+from .storage import get_storagelogger = logging.getLogger("facelessforge.thumbnail_images")
 
-logger = logging.getLogger("facelessforge.thumbnail_images")
+
+class ThumbnailGenerationError(RuntimeError):
+    """Sanitised provider failure safe for persistence and the UI."""
+
+
+def _safe_provider_error(exc: Exception) -> str:
+    message = str(exc or "unknown provider error")
+    for name in ("EMERGENT_LLM_KEY", "GEMINI_API_KEY", "PEXELS_API_KEY"):
+        secret = os.environ.get(name, "")
+        if secret:
+            message = message.replace(secret, "[redacted]")
+    return " ".join(message.split())[:400]
 
 STATIC_ROOT = Path(__file__).parent.parent / "static" / "thumbs"
 STATIC_ROOT.mkdir(parents=True, exist_ok=True)
