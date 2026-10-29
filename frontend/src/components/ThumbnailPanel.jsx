@@ -12,9 +12,9 @@ export default function ThumbnailPanel({
   selectedThumbnailId,
   canEdit,
   onChange,
-  autoGeneratingConcepts = false,
-}) {
-  const [generating, setGenerating] = useState(null); // brief id currently generating
+  autoGeneratingConcepts = false,}) {
+  const [generating, setGenerating] = useState({}); // independent state per brief
+  const [generationErrors, setGenerationErrors] = useState({});
   const [working, setWorking] = useState(null); // asset id being acted on
   const [autoSelectFirst, setAutoSelectFirst] = useState(true);
   const [autoPendingBriefId, setAutoPendingBriefId] = useState(null);
