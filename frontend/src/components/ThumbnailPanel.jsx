@@ -82,8 +82,9 @@ export default function ThumbnailPanel({
   }, [assets, autoPendingBriefId, selectedThumbnailId]);
 
   const generate = async (briefId, variants = 1) => {
-    if (!projectId || !briefId) return;
-    setGenerating(briefId);
+    if (!projectId || !briefId) return;    if (generating[briefId]) return;
+    setGenerating((current) => ({ ...current, [briefId]: true }));
+    setGenerationErrors((current) => ({ ...current, [briefId]: null }));
     const toastId = toast.loading(
       variants > 1 ? `Generating ${variants} thumbnail variants…` : "Generating thumbnail image…",
       { id: `gen-thumb-${briefId}` },
@@ -103,11 +104,14 @@ export default function ThumbnailPanel({
       );
     } catch (err) {
       toast.error("Generation failed", {
-        id: toastId,
-        description: formatApiError(err.response?.data?.detail) || err.message,
+        id: toastId,        description: (() => {
+          const detail = err.response?.data?.detail;
+          const reason = detail == null ? (err.message || "Thumbnail rendering failed. Please retry this option.") : formatApiError(detail);
+          setGenerationErrors((current) => ({ ...current, [briefId]: reason }));
+          return reason;
+        })(),
       });
-    } finally {
-      setGenerating(null);
+    } finally {      setGenerating((current) => ({ ...current, [briefId]: false }));
     }
   };
 
