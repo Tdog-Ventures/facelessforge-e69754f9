@@ -1766,11 +1766,28 @@ async def generate_thumbnail_image_endpoint(
     if not brief_asset:
         raise HTTPException(status_code=404, detail="Thumbnail brief not found")
     brief = brief_asset.get("brief") or {}
+    try:
 
-    generated = await thumb_images.generate_thumbnail_images(
-        project, brief, variants=body.variants, project_id=project_id,
+        generated = await thumb_images.generate_thumbnail_images(
+            project, brief, variants=body.variants, project_id=project_id,
+
     )
+    except thumb_images.ThumbnailGenerationError as exc:
+        now = _now()
+        error = {
+            "code": "thumbnail_provider_failed",
+            "message": str(exc),
+            "provider": thumb_images.provider_info().get("provider"),
+            "updated_at": now,
+        }
+        await db.assets.update_one(
+            {"id": brief_asset_id, "project_id": project_id},
+            {"$set": {"generation_error": error, "updated_at": now}},
+        )
+        raise HTTPException(status_code=502, detail=error) from exc
+
     if not generated:
+
         raise HTTPException(status_code=502, detail="Image generation failed. Please retry.")
 
     now = _now()
@@ -1781,6 +1798,11 @@ async def generate_thumbnail_image_endpoint(
         g["updated_at"] = now
         inserts.append(dict(g))
     await db.assets.insert_many([dict(d) for d in inserts])
+    await db.assets.update_one(
+        {"id": brief_asset_id, "project_id": project_id},
+        {"$unset": {"generation_error": ""}, "$set": {"updated_at": now}},
+    )
+
 
     est_cost = 0.02 * len(generated) if not generated[0].get("mock") else 0
     if est_cost:
