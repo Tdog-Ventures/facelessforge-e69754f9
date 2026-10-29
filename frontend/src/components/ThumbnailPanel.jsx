@@ -243,8 +243,8 @@ export default function ThumbnailPanel({
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
         {briefs.map((a, i) => {
           const b = a.brief || a;
-          const gens = generatedByBrief(a.id);
-          const isGen = generating === a.id;
+          const gens = generatedByBrief(a.id);          const isGen = Boolean(generating[a.id]);
+          const generationError = generationErrors[a.id] || a.generation_error?.message;
           return (
             <div
               key={a.id}
