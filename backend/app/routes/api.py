@@ -2073,8 +2073,160 @@ async def _generate_full_voiceover_now(
     await db.projects.update_one({"id": project_id}, {"$set": project_set})
     return await _attach_project_view(db, await db.projects.find_one({"id": project_id}, {"_id": 0}))
 
+_VOICEOVER_TASKS: dict[str, asyncio.Task] = {}
+
+
+def _voiceover_job_view(job: dict) -> dict:
+    return {key: value for key, value in (job or {}).items() if key != "_id"}
+
+
+def _safe_voiceover_job_error(detail) -> dict:
+    if isinstance(detail, dict):
+        code = str(detail.get("code") or "voiceover_failed")
+        message = str(detail.get("message") or detail)
+    else:
+        code = "voiceover_failed"
+        message = str(detail or "Voiceover generation failed")
+    for name in ("ELEVENLABS_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        secret = os.environ.get(name, "")
+        if secret:
+            message = message.replace(secret, "[redacted]")
+    return {"code": code, "message": " ".join(message.split())[:500]}
+
+
+async def _run_full_voiceover_job(job_id: str, project_id: str, body_data: dict, user: dict) -> None:
+    db = get_db()
+    claimed = await db.voiceover_jobs.find_one_and_update(
+        {"id": job_id, "status": "queued"},
+        {"$set": {"status": "running", "provider_call_started_at": _now(), "updated_at": _now()}},
+    )
+    if not claimed:
+        return
+    try:
+        project_view = await _generate_full_voiceover_now(
+            project_id, GenerateVoiceoverRequest(**body_data), user,
+        )
+        await db.voiceover_jobs.update_one(
+            {"id": job_id},
+            {"$set": {
+                "status": "completed",
+                "asset_id": project_view.get("selected_voiceover_asset_id"),
+                "completed_at": _now(),
+                "updated_at": _now(),
+            }},
+        )
+    except HTTPException as exc:
+        await db.voiceover_jobs.update_one(
+            {"id": job_id},
+            {"$set": {"status": "failed", "error": _safe_voiceover_job_error(exc.detail), "updated_at": _now()}},
+        )
+    except Exception as exc:  # noqa: BLE001
+        await db.voiceover_jobs.update_one(
+            {"id": job_id},
+            {"$set": {"status": "failed", "error": _safe_voiceover_job_error(exc), "updated_at": _now()}},
+        )
+    finally:
+        _VOICEOVER_TASKS.pop(job_id, None)
+
+
+def _start_voiceover_job(job: dict, user: dict) -> None:
+    job_id = job["id"]
+    task = _VOICEOVER_TASKS.get(job_id)
+    if task and not task.done():
+        return
+    _VOICEOVER_TASKS[job_id] = asyncio.create_task(
+        _run_full_voiceover_job(job_id, job["project_id"], job["request"], user)
+    )
+
+
+@router.post("/projects/{project_id}/voiceover/generate-script")
+async def submit_full_voiceover_job(
+    project_id: str,
+    body: GenerateVoiceoverRequest = Body(default=None),
+    user=Depends(get_current_user),
+):
+    db = get_db()
+    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    _ensure_project_access(project, user, write=True)
+    if user["role"] == "viewer":
+        raise HTTPException(status_code=403, detail="Viewer cannot generate voiceovers")
+    script = await db.scripts.find_one({"project_id": project_id}, {"_id": 0})
+    if not script or not script.get("full_script", "").strip():
+        raise HTTPException(status_code=400, detail="Generate a script before voiceover.")
+    body = body or GenerateVoiceoverRequest()
+    body_data = body.model_dump() if hasattr(body, "model_dump") else body.dict()
+    request_key = str(uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"{project_id}:{script.get('id')}:{script.get('updated_at')}:{json.dumps(body_data, sort_keys=True, default=str)}",
+    ))
+    existing = await db.voiceover_jobs.find_one(
+        {"project_id": project_id, "request_key": request_key, "status": {"$in": ["queued", "running", "completed"]}},
+        {"_id": 0},
+        sort=[("created_at", -1)],
+    )
+    if existing:
+        if existing["status"] == "queued":
+            _start_voiceover_job(existing, user)
+        return {"job": _voiceover_job_view(existing), "duplicate": True}
+    now = _now()
+    job = {
+        "id": str(uuid.uuid4()),
+        "project_id": project_id,
+        "request_key": request_key,
+        "request": body_data,
+        "previous_asset_id": project.get("selected_voiceover_asset_id"),
+        "status": "queued",
+        "progress": {"stage": "queued", "message": "Voiceover queued"},
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.voiceover_jobs.insert_one(dict(job))
+    _start_voiceover_job(job, user)
+    return {"job": _voiceover_job_view(job), "duplicate": False}
+
+
+@router.get("/projects/{project_id}/voiceover/jobs/active")
+async def get_active_voiceover_job(project_id: str, user=Depends(get_current_user)):
+    db = get_db()
+    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    _ensure_project_access(project, user)
+    job = await db.voiceover_jobs.find_one(
+        {"project_id": project_id}, {"_id": 0}, sort=[("created_at", -1)],
+    )
+    return {"job": _voiceover_job_view(job) if job else None}
+
+
+@router.get("/projects/{project_id}/voiceover/jobs/{job_id}")
+async def get_voiceover_job(project_id: str, job_id: str, user=Depends(get_current_user)):
+    db = get_db()
+    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    _ensure_project_access(project, user)
+    job = await db.voiceover_jobs.find_one({"id": job_id, "project_id": project_id}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Voiceover job not found")
+    if job["status"] == "queued":
+        _start_voiceover_job(job, user)
+    elif job["status"] == "running" and job.get("updated_at") and _now() - job["updated_at"] > timedelta(minutes=15):
+        selected_id = project.get("selected_voiceover_asset_id")
+        if selected_id and selected_id != job.get("previous_asset_id"):
+            await db.voiceover_jobs.update_one(
+                {"id": job_id},
+                {"$set": {"status": "completed", "asset_id": selected_id, "completed_at": _now(), "updated_at": _now()}},
+            )
+        else:
+            error = {
+                "code": "voiceover_worker_interrupted",
+                "message": "The worker stopped after synthesis began. Automatic retry is disabled to prevent a duplicate provider charge; inspect saved output before retrying.",
+            }
+            await db.voiceover_jobs.update_one(
+                {"id": job_id}, {"$set": {"status": "failed", "error": error, "updated_at": _now()}},
+            )
+        job = await db.voiceover_jobs.find_one({"id": job_id}, {"_id": 0})
+    return {"job": _voiceover_job_view(job)}
+
 
 @router.post("/projects/{project_id}/scenes/{scene_id}/voiceover/generate")
+
 async def generate_scene_voiceover(
     project_id: str, scene_id: str,
     body: GenerateVoiceoverRequest = Body(default=None),
