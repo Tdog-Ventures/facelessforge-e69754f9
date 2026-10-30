@@ -1,10 +1,14 @@
 import React, { useEffect, useState } from "react";
-import { Activity, Clock } from "lucide-react";
+import { Activity, Clock, Sun, Moon } from "lucide-react";
+import { useTheme } from "next-themes";
 import { api } from "../lib/api";
 
 export default function TopBar({ title, subtitle, right }) {
   const [now, setNow] = useState(new Date());
   const [online, setOnline] = useState(true);
+  const { theme = "dark", setTheme, resolvedTheme = "dark" } = useTheme();
+
+  const isLight = resolvedTheme === "light";
 
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 1000);
@@ -27,7 +31,7 @@ export default function TopBar({ title, subtitle, right }) {
   return (
     <header
       data-testid="topbar"
-      className="sticky top-0 z-30 h-16 border-b border-[rgba(59,130,246,0.15)] bg-[#0f141f]/90 backdrop-blur-xl flex items-center justify-between px-8 pl-14 md:pl-8"
+      className="sticky top-0 z-30 h-16 border-b border-[var(--ff-border)] bg-[var(--ff-surface)]/90 backdrop-blur-xl flex items-center justify-between px-8 pl-14 md:pl-8"
     >
       <div>
         <div className="flex items-center gap-3">
@@ -41,8 +45,41 @@ export default function TopBar({ title, subtitle, right }) {
       </div>
       <div className="flex items-center gap-4">
         {right}
+        {/* Theme toggle: sun (light) / moon (dark) with accessible labels and focus */}
+        <div className="flex items-center" role="group" aria-label="Theme selection">
+          <button
+            data-testid="theme-light"
+            aria-label="Select light mode"
+            aria-pressed={isLight}
+            onClick={() => { try { setTheme("light"); } catch (e) {} }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") { e.preventDefault(); try { setTheme("light"); } catch (e) {} }
+              if (e.key === "ArrowRight" || e.key === "ArrowDown") { e.preventDefault(); try { setTheme("dark"); } catch (e) {} }
+            }}
+            tabIndex={0}
+            className={`rounded-full p-2 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ff-primary)] focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--ff-bg)] ${isLight ? "bg-[var(--ff-primary)] text-white shadow-md" : "text-[var(--ff-text-muted)] hover:text-[var(--ff-text)] hover:bg-[var(--ff-surface-2)]"}`}
+            title="Light mode"
+          >
+            <Sun size={18} strokeWidth={1.5} aria-hidden="true" />
+          </button>
+          <button
+            data-testid="theme-dark"
+            aria-label="Select dark mode"
+            aria-pressed={!isLight}
+            onClick={() => { try { setTheme("dark"); } catch (e) {} }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") { e.preventDefault(); try { setTheme("dark"); } catch (e) {} }
+              if (e.key === "ArrowLeft" || e.key === "ArrowUp") { e.preventDefault(); try { setTheme("light"); } catch (e) {} }
+            }}
+            tabIndex={0}
+            className={`rounded-full p-2 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ff-primary)] focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--ff-bg)] ${!isLight ? "bg-[var(--ff-primary)] text-white shadow-md" : "text-[var(--ff-text-muted)] hover:text-[var(--ff-text)] hover:bg-[var(--ff-surface-2)]"}`}
+            title="Dark mode"
+          >
+            <Moon size={18} strokeWidth={1.5} aria-hidden="true" />
+          </button>
+        </div>
         <div className="hidden md:flex items-center gap-2 font-mono text-[11px] text-zinc-500">
-          <Activity size={12} strokeWidth={1.5} style={{ color: online ? "#00FF66" : "#FF3366" }} />
+          <Activity size={12} strokeWidth={1.5} style={{ color: online ? "var(--ff-success)" : "var(--ff-error)" }} />
           <span>{online ? "SYSTEM · ONLINE" : "SYSTEM · DEGRADED"}</span>
         </div>
         <div className="hidden md:flex items-center gap-2 font-mono text-[11px] text-zinc-500">

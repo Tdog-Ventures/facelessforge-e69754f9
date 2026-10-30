@@ -1,6 +1,7 @@
 import React from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { Toaster } from "sonner";
+import { ThemeProvider } from "next-themes";
 import "@/App.css";
 
 import { AuthProvider, useAuth } from "@/lib/auth";
@@ -21,10 +22,10 @@ class ErrorBoundary extends React.Component {
   render() {
     if (this.state.hasError) {
       return (
-        <div className="min-h-screen bg-[#0A0A0A] text-zinc-300 flex flex-col items-center justify-center p-8 font-mono text-sm">
+        <div className="min-h-screen bg-[var(--ff-bg)] text-[var(--ff-text-muted)] flex flex-col items-center justify-center p-8 font-mono text-sm">
           <h2 className="text-red-400 text-lg mb-2">Something went wrong</h2>
           <p className="text-zinc-500 text-xs max-w-md text-center mb-4">{String(this.state.error?.message || this.state.error || "Unknown error")}</p>
-          <button onClick={() => this.setState({ hasError: false, error: null })} className="border border-zinc-700 text-white px-4 py-1 text-xs hover:border-[#00E5FF] hover:text-[#00E5FF]">Try again</button>
+          <button onClick={() => this.setState({ hasError: false, error: null })} className="border border-[var(--ff-border)] text-[var(--ff-text)] px-4 py-1 text-xs hover:border-[var(--ff-primary)] hover:text-[var(--ff-primary)]">Try again</button>
         </div>
       );
     }
@@ -77,7 +78,7 @@ function Protected({ children, adminOnly = false }) {
   }
   if (user === null) {
     return (
-      <div className="min-h-screen bg-[#0f141f] text-slate-500 font-mono text-sm flex items-center justify-center">
+      <div className="min-h-screen bg-[var(--ff-bg)] text-[var(--ff-text-dim)] font-mono text-sm flex items-center justify-center">
         Loading…
       </div>
     );
@@ -97,7 +98,7 @@ function GuestOnly({ children }) {
   const { user } = useAuth();
   if (user === null) {
     return (
-      <div className="min-h-screen bg-[#0A0A0A] text-zinc-500 font-mono text-sm flex items-center justify-center">
+      <div className="min-h-screen bg-[var(--ff-bg)] text-[var(--ff-text-dim)] font-mono text-sm flex items-center justify-center">
         Loading…
       </div>
     );
@@ -127,12 +128,13 @@ function ProductHuntRedirect() {
 export default function App() {
   return (
     <div className="App">
-      <AuthProvider>
-        <ConfirmProvider>
-          <BrowserRouter>
-          <ProductHuntRedirect />
-          <ErrorBoundary>
-          <Routes>
+      <ThemeProvider defaultTheme="dark" attribute="data-theme" storageKey="theme">
+        <AuthProvider>
+          <ConfirmProvider>
+            <BrowserRouter>
+            <ProductHuntRedirect />
+            <ErrorBoundary>
+            <Routes>
             <Route path="/" element={<LandingPage />} />
             <Route path="/ph" element={<PHPage />} />
             <Route path="/privacy" element={<PrivacyPage />} />
@@ -164,13 +166,12 @@ export default function App() {
           </Routes>
           </ErrorBoundary>
           <Toaster
-            theme="dark"
             position="top-right"
             toastOptions={{
               style: {
-                background: "#121212",
-                border: "1px solid #27272A",
-                color: "#fff",
+                background: "var(--ff-surface)",
+                border: "1px solid var(--ff-border)",
+                color: "var(--ff-text)",
                 borderRadius: 2,
                 fontFamily: "'JetBrains Mono', monospace",
                 fontSize: 12,
@@ -180,6 +181,7 @@ export default function App() {
         </BrowserRouter>
         </ConfirmProvider>
       </AuthProvider>
+      </ThemeProvider>
     </div>
   );
 }
