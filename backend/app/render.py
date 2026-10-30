@@ -371,6 +371,18 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _as_utc(dt: datetime) -> datetime:
+    """Normalize a datetime to timezone-aware UTC.
+
+    The Motor client is created without ``tz_aware=True``, so BSON dates read
+    back from Mongo are naive (but stored as UTC). Mixing them with the aware
+    values from ``_now()`` raises TypeError on arithmetic/comparison.
+    """
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def _safe_name(s: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_\-]", "_", s or "")[:80]
 
@@ -2055,8 +2067,19 @@ async def _run_render(job_id: str, project_id: str):
     db = get_db()
     lock = _project_lock(project_id)
     async with lock:
+        started_at = _now()
+        queued = await db.render_jobs.find_one(
+            {"id": job_id}, {"_id": 0, "created_at": 1}) or {}
+        queue_ms = None
+        created_at = queued.get("created_at")
+        if isinstance(created_at, datetime):
+            # created_at comes back naive from Mongo; normalize before subtracting
+            # from the timezone-aware started_at.
+            created_at = _as_utc(created_at)
+            queue_ms = max(0, int((started_at - created_at).total_seconds() * 1000))
         await _set_job(job_id, status="validating", current_step="validating",
-                       progress=5, started_at=_now())
+                       progress=5, started_at=started_at,
+                       queue_duration_ms=queue_ms)
 
         # Fetch job for per-render overrides (burn_subtitles, aspect_ratio) — default off for captions, 9:16 default
         job_doc = await db.render_jobs.find_one({"id": job_id}, {"_id": 0}) or {}
