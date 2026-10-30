@@ -41,6 +41,7 @@ from ..grounding import CLIENT_VISUAL_TYPES
 from ..timing import build_timing_status
 from ..grounding import commercial_project_errors
 from ..storage import resolve_delivery_url
+from ..email import send_password_reset_email
 from .. import generation as gen
 from .. import stock as stock_service
 from .. import thumbnail_images as thumb_images
@@ -337,8 +338,37 @@ async def forgot_password(body: ForgotPasswordRequest, request: Request):
             "used_at": None,
         })
         # Build reset link (frontend route)
-        frontend = os.environ.get("FRONTEND_URL") or request.headers.get("origin") or ""
-        reset_url = f"{frontend}/reset-password?token={token}" if frontend else f"/reset-password?token={token}"
+        frontend = (
+            os.environ.get("PASSWORD_RESET_URL_BASE")
+            or os.environ.get("FRONTEND_URL")
+            or "https://facelessforge.ethinx.solutions"
+        ).rstrip("/")
+        reset_url = f"{frontend}/reset-password?token={token}"
+        try:
+            delivery = await send_password_reset_email(
+                recipient=email,
+                reset_url=reset_url,
+                expires_in_minutes=ttl_minutes,
+            )
+        except Exception as exc:
+            logger.error(
+                "Password-reset mailer raised for user_id=%s: %s",
+                user["id"],
+                type(exc).__name__,
+            )
+            delivery = {"ok": False, "mode": "unknown"}
+        if not delivery.get("ok") and not _dev_mode():
+            # Preserve the non-enumerating response while ensuring an undelivered
+            # reset token cannot remain active.
+            await db.password_reset_tokens.update_many(
+                {"user_id": user["id"], "token": token, "used_at": None},
+                {"$set": {"used_at": _now()}},
+            )
+            logger.error(
+                "Password-reset email delivery failed for user_id=%s via %s",
+                user["id"],
+                delivery.get("mode", "unknown"),
+            )
         if _dev_mode():
             logger.warning("[DEV reset] %s -> %s", email, reset_url)
             response_payload["dev_reset_token"] = token

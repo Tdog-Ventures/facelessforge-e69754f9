@@ -6,6 +6,7 @@ import "@/App.css";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { ConfirmProvider } from "@/components/ConfirmDialog";
 import BillingBankTransfer from "@/components/BillingBankTransfer";
+import GuestOnly from "@/components/GuestOnly";
 
 class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -90,19 +91,6 @@ function Protected({ children, adminOnly = false }) {
   if (!disableGate && !hasInvite && typeof window !== "undefined" && window.location.pathname.startsWith("/app")) {
     return <Navigate to="/" replace />;
   }
-  return children;
-}
-
-function GuestOnly({ children }) {
-  const { user } = useAuth();
-  if (user === null) {
-    return (
-      <div className="min-h-screen bg-[#0A0A0A] text-zinc-500 font-mono text-sm flex items-center justify-center">
-        Loading…
-      </div>
-    );
-  }
-  if (user) return <Navigate to="/app" replace />;
   return children;
 }
 
