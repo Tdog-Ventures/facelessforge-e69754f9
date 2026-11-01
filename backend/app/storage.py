@@ -183,6 +183,63 @@ class LocalStorage(StorageBackend):
 
 # ============================ OBJECT (S3-compatible) ============================
 
+# Credential env-var schemes, in priority order. An access key and its secret
+# MUST come from the same scheme: mixing (e.g. STORAGE_ACCESS_KEY_ID with
+# STORAGE_SECRET_KEY) produces a valid key ID signed with the wrong secret,
+# which R2/S3 reject with SignatureDoesNotMatch.
+_CREDENTIAL_SCHEMES = (
+    ("STORAGE_ACCESS_KEY_ID", "STORAGE_SECRET_ACCESS_KEY"),
+    ("STORAGE_ACCESS_KEY", "STORAGE_SECRET_KEY"),
+    ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"),
+)
+
+
+def resolve_storage_credentials() -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Return (access_key, secret_key, source) from the first scheme that has
+    BOTH values set. Never pairs values across schemes. `source` is the name
+    of the scheme (e.g. "STORAGE_ACCESS_KEY/STORAGE_SECRET_KEY"), never a value.
+    Logs a warning when several complete schemes disagree on the key ID."""
+    complete = []
+    for key_var, secret_var in _CREDENTIAL_SCHEMES:
+        key = (os.environ.get(key_var) or "").strip()
+        secret = (os.environ.get(secret_var) or "").strip()
+        if key and secret:
+            complete.append((f"{key_var}/{secret_var}", key, secret))
+        elif key or secret:
+            logger.warning(
+                "storage credentials: incomplete scheme %s/%s (only %s set) - ignored",
+                key_var, secret_var, key_var if key else secret_var,
+            )
+    if not complete:
+        return None, None, None
+    source, key, secret = complete[0]
+    conflicting = [s for s, k, _ in complete[1:] if k != key]
+    if conflicting:
+        logger.warning(
+            "storage credentials: using %s, but %s hold a different access key id - "
+            "remove stale variables to avoid SignatureDoesNotMatch",
+            source, ", ".join(conflicting),
+        )
+    return key, secret, source
+
+
+def is_r2_endpoint(endpoint_url: Optional[str]) -> bool:
+    return bool(endpoint_url and "r2.cloudflarestorage.com" in endpoint_url)
+
+
+def s3_client_config(endpoint_url: Optional[str], **extra):
+    """botocore Config for S3-compatible clients. For Cloudflare R2, disable
+    boto3>=1.36 default flexible checksums (aws-chunked CRC32 trailers), which
+    R2 does not fully support and can surface as SignatureDoesNotMatch."""
+    from botocore.config import Config
+    kwargs = {"signature_version": "s3v4"}
+    if is_r2_endpoint(endpoint_url):
+        kwargs["request_checksum_calculation"] = "when_required"
+        kwargs["response_checksum_validation"] = "when_required"
+    kwargs.update(extra)
+    return Config(**kwargs)
+
+
 class S3Storage(StorageBackend):
     mode = "object"
 
@@ -196,16 +253,8 @@ class S3Storage(StorageBackend):
         )
         self.public_base = (os.environ.get("STORAGE_PUBLIC_BASE_URL") or "").rstrip("/")
         self.signed_ttl = int(os.environ.get("STORAGE_SIGNED_URL_TTL", "86400"))
-        self.access_key = (
-            os.environ.get("STORAGE_ACCESS_KEY_ID")
-            or os.environ.get("STORAGE_ACCESS_KEY")
-            or os.environ.get("AWS_ACCESS_KEY_ID")
-        )
-        self.secret_key = (
-            os.environ.get("STORAGE_SECRET_ACCESS_KEY")
-            or os.environ.get("STORAGE_SECRET_KEY")
-            or os.environ.get("AWS_SECRET_ACCESS_KEY")
-        )
+        # Resolve key + secret as a matched pair (never mixed across schemes).
+        self.access_key, self.secret_key, self.cred_source = resolve_storage_credentials()
         self._client = None
         self._client_lock = threading.Lock()
 
@@ -219,10 +268,9 @@ class S3Storage(StorageBackend):
                 raise RuntimeError("STORAGE_BUCKET not set")
             try:
                 import boto3
-                from botocore.config import Config
             except Exception as e:  # noqa: BLE001
                 raise RuntimeError(f"boto3 not installed: {e}")
-            kwargs = {"config": Config(signature_version="s3v4", retries={"max_attempts": 3})}
+            kwargs = {"config": s3_client_config(self.endpoint_url, retries={"max_attempts": 3})}
             if self.region:
                 kwargs["region_name"] = self.region
             if self.endpoint_url:
@@ -265,10 +313,29 @@ class S3Storage(StorageBackend):
 
     def save_file(self, local_path: Path, key: str, content_type: str) -> SaveResult:
         client = self._client_or_raise()
-        client.upload_file(
-            str(local_path), self.bucket, key,
-            ExtraArgs={"ContentType": content_type, "CacheControl": "public, max-age=3600"},
-        )
+        try:
+            client.upload_file(
+                str(local_path), self.bucket, key,
+                ExtraArgs={"ContentType": content_type, "CacheControl": "public, max-age=3600"},
+            )
+        except Exception as e:  # noqa: BLE001
+            # Keep the failure visible (re-raised below) with non-secret context
+            # identifying which credential scheme / endpoint signed the request.
+            logger.error(
+                "S3 upload failed key=%s bucket=%s endpoint=%s cred_source=%s: %s",
+                key, self.bucket, self.endpoint_url, self.cred_source, _safe_error(e),
+            )
+            try:
+                import sentry_sdk
+                sentry_sdk.set_context("storage", {
+                    "bucket": self.bucket,
+                    "endpoint_url": self.endpoint_url,
+                    "cred_source": self.cred_source,
+                    "key": key,
+                })
+            except Exception:  # noqa: BLE001
+                pass
+            raise
         url = self._public_or_signed_url(key)
         # Remove local file after successful upload (no longer needed by ingress)
         try:
@@ -304,6 +371,7 @@ class S3Storage(StorageBackend):
             "public_url_strategy": "public_base_url" if self.public_base else "presigned",
             "public_base_url": self.public_base or None,
             "credentials_present": bool(self.access_key and self.secret_key),
+            "credentials_source": self.cred_source,
         }
         ok = bool(self.bucket) and bool(self.access_key and self.secret_key)
         out["ok"] = ok
