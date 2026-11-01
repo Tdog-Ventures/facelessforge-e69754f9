@@ -66,6 +66,7 @@ from . import audio_mix as audio_mix
 from . import stock as stock_service
 from .grounding import CLIENT_VISUAL_TYPES, validate_commercial_grounding
 from .scoring import commercial_scorecard
+from . import project_lease
 try:
     from .verify import verify_render as _verify_render_constitution
     VERIFY_AVAILABLE = True
@@ -562,9 +563,28 @@ async def autofit_project_duration(project_id: str) -> dict:
     callers must surface that instead of queueing.
     """
     db = get_db()
+    # The selected target is a render input, just like mode/ground truth. Read,
+    # calculate and CAS it under the same lease as submission and project edits.
     project = await db.projects.find_one({"id": project_id}, {"_id": 0})
     if not project:
         raise RuntimeError(f"Project {project_id} not found for duration auto-fit.")
+    lease = await project_lease.acquire(
+        db, project_id, project_lease.RENDER_LEASE, ttl_seconds=project_lease.RENDER_LEASE_TTL_SECONDS,
+    )
+    if lease is None:
+        raise RenderSubmissionBusy("Project inputs are being updated; retry the explicit duration fit.")
+    try:
+        return await _autofit_project_duration_locked(db, lease, project_id)
+    finally:
+        await project_lease.release(db, lease)
+
+
+async def _autofit_project_duration_locked(db, lease, project_id: str) -> dict:
+    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    if not project:
+        raise RuntimeError(f"Project {project_id} not found for duration auto-fit.")
+    if await is_render_active(project_id):
+        raise RenderSubmissionBusy("A render is active; wait before changing its selected duration.")
     full_voice = await db.assets.find_one(
         {
             "project_id": project_id,
@@ -583,10 +603,12 @@ async def autofit_project_duration(project_id: str) -> dict:
             "No in-bounds duration fits the measured narration; "
             "regenerate the script and voiceover."
         )
-    await db.projects.update_one(
-        {"id": project_id},
+    updated = await db.projects.update_one(
+        {"id": project_id, **lease.guard()},
         {"$set": {"target_duration": suggestion["to"], "updated_at": _now()}},
     )
+    if getattr(updated, "matched_count", 0) != 1:
+        raise RenderSubmissionBusy("Project inputs changed during duration fit; retry.")
     logger.info(
         "duration autofit project=%s %ss -> %ss (VO %.2fs)",
         project_id, suggestion["from"], suggestion["to"],
@@ -1832,11 +1854,65 @@ async def reverse_render_credits(job_id: str, *, reason: str) -> dict:
     )
 
 
-async def queue_render(project_id: str, *, requested_by: str, burn_subtitles: bool = False, aspect_ratio: str | None = None) -> dict:
-    """Create a job in 'queued' state and start the background worker. Queue limit 3 concurrent, rest queued."""
+class RenderSubmissionBusy(RuntimeError):
+    """Submission cannot proceed because project inputs are being changed or released."""
+
+
+async def queue_render(
+    project_id: str,
+    *,
+    requested_by: str,
+    burn_subtitles: bool = False,
+    aspect_ratio: str | None = None,
+    expected_inputs: dict | None = None,
+) -> dict:
+    """Create a job in 'queued' state and start the background worker. Queue limit 3 concurrent, rest queued.
+
+    Submission runs under the project's render lease, the same lease that
+    serializes project-mode/commercial updates and render release. ``expected_inputs``
+    (from ``project_lease.render_input_snapshot``) is the project state the caller
+    validated; if it changed before the lease was granted the submission is refused.
+    """
     db = get_db()
+    lease = await project_lease.acquire(
+        db, project_id, project_lease.RENDER_LEASE, ttl_seconds=project_lease.RENDER_LEASE_TTL_SECONDS,
+    )
+    if lease is None:
+        raise RenderSubmissionBusy(
+            "The project is being updated or another render is being released; retry shortly."
+        )
+    try:
+        return await _queue_render_locked(
+            db, lease, project_id,
+            requested_by=requested_by,
+            burn_subtitles=burn_subtitles,
+            aspect_ratio=aspect_ratio,
+            expected_inputs=expected_inputs,
+        )
+    finally:
+        await project_lease.release(db, lease)
+
+
+async def _queue_render_locked(
+    db,
+    lease: "project_lease.Lease",
+    project_id: str,
+    *,
+    requested_by: str,
+    burn_subtitles: bool,
+    aspect_ratio: str | None,
+    expected_inputs: dict | None,
+) -> dict:
+    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    if expected_inputs is not None and not project_lease.render_inputs_match(project, expected_inputs):
+        raise RenderSubmissionBusy(
+            "Project settings changed while the render was being prepared; re-check the project and retry."
+        )
     if await is_render_active(project_id):
         raise RuntimeError("A render is already in progress for this project.")
+    # The job records the mode it was submitted under. Mode changes are refused
+    # while the job is active (update_project) and release re-checks it.
+    render_mode = (project or {}).get("production_mode") or "editorial"
     job_id = str(uuid.uuid4())
     charge = {"user_id": requested_by, "amount": 0, "store": "none", "ledger_id": None}
     # Atomic deduct 3 credits (1 render = 3cr) before queue — prevents double-spend
@@ -1935,6 +2011,7 @@ async def queue_render(project_id: str, *, requested_by: str, burn_subtitles: bo
         "burn_subtitles": bool(burn_subtitles),
         "aspect_ratio": aspect_ratio or "9:16",
         "credit_charge": charge,
+        "render_mode": render_mode,
     }
     try:
         await db.render_jobs.insert_one(dict(job))
@@ -1954,6 +2031,15 @@ async def queue_render(project_id: str, *, requested_by: str, burn_subtitles: bo
             except Exception:  # noqa: BLE001 — never mask the original insert failure
                 logger.exception("credit reversal failed after queue insert error job=%s", job_id)
         raise
+
+    # Fenced check: the job exists now, so a mode switch would be refused, but a
+    # stale submission (lease expired and taken over) must not start a worker.
+    if not await project_lease.still_held(db, lease):
+        logger.warning("render submission lost its lease job=%s project=%s", job_id, project_id)
+        await reverse_render_credits(job_id, reason="render_lease_lost")
+        await _set_job(job_id, status="failed", current_step="failed", completed_at=_now(),
+                       error_message="Render submission lost its project lease; resubmit the render.")
+        raise RenderSubmissionBusy("Render submission was interrupted by a project update; retry the render.")
 
     task = asyncio.create_task(_run_render_safe(job_id, project_id))
     _ACTIVE_TASKS[project_id] = task
@@ -2063,6 +2149,68 @@ async def recover_stale_jobs() -> int:
     return res.modified_count or len(stale)
 
 
+async def _release_side_effects(
+    db,
+    project_id: str,
+    job_id: str,
+    *,
+    release_eligible: bool,
+    commercial: bool,
+    validated_mode: str,
+    duration,
+    saved,
+    final,
+) -> None:
+    """Auto-post and ready-email for a release-eligible, non-commercial render.
+
+    Called only while the caller holds the project's render lease. Both side
+    effects are refused unless the project's production mode still equals the
+    mode the render was validated under, so a mode switch can never ungate a post.
+    """
+    current = await db.projects.find_one({"id": project_id}, {"_id": 0}) or {}
+    if (current.get("production_mode") or "editorial") != validated_mode:
+        logger.warning("release side effects skipped project=%s job=%s: mode no longer matches", project_id, job_id)
+        return
+    # ── Auto-post engine: if project.auto_post=true, post to platform of choice (no manual prep) ──
+    try:
+        proj_for_post = await db.projects.find_one({"id": project_id}, {"_id": 0})
+        if release_eligible and not commercial and proj_for_post and proj_for_post.get("auto_post"):
+            # fetch metadata for title/description
+            meta_for_post = await db.metadata_packages.find_one({"project_id": project_id}, {"_id": 0}) or {}
+            meta_for_post["duration"] = duration
+            # build render_job dict for autopost
+            rj = {"output_url": saved.url, "output_path": str(saved.file_path) if saved.file_path else str(final), "duration": duration, "id": job_id}
+            try:
+                from .workers.autopost import autopost_after_render
+                # fire-and-forget but await quickly with timeout 20s
+                try:
+                    await asyncio.wait_for(autopost_after_render(proj_for_post, rj, meta_for_post), timeout=20)
+                except asyncio.TimeoutError:
+                    logger.warning(f"[AUTOPOST] timeout project={project_id}")
+            except Exception as ae:
+                logger.warning(f"[AUTOPOST] hook failed project={project_id}: {ae}")
+    except Exception as ae:
+        logger.warning(f"[AUTOPOST] outer failed {ae}")
+
+    # ── Cold email: Your video IS ready — {FirstName} {company.com} ──
+    try:
+        from .email import send_video_ready_email
+        project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+        if release_eligible and project and not commercial:
+            user = await db.users.find_one({"id": project.get("user_id")}, {"_id": 0})
+            if user and user.get("email"):
+                share_token = project.get("share_token")
+                frontend = os.environ.get("FRONTEND_URL", "https://facelessforge.ethinx.solutions").rstrip("/")
+                share_url = f"{frontend}/s/{share_token}" if share_token and project.get("share_enabled") else None
+                # Fire-and-forget email (log_only in dev, smtp/sendgrid if configured)
+                try:
+                    await send_video_ready_email(user=user, project=project, mp4_url=saved.url, share_url=share_url)
+                except Exception as email_exc:
+                    logger.warning("[EMAIL] send failed project=%s user=%s: %s", project_id, user.get("email"), email_exc)
+    except Exception as e:
+        logger.warning("[EMAIL] hook failed project=%s: %s", project_id, e)
+
+
 async def _run_render(job_id: str, project_id: str):
     db = get_db()
     lock = _project_lock(project_id)
@@ -2084,6 +2232,13 @@ async def _run_render(job_id: str, project_id: str):
         # Fetch job for per-render overrides (burn_subtitles, aspect_ratio) — default off for captions, 9:16 default
         job_doc = await db.render_jobs.find_one({"id": job_id}, {"_id": 0}) or {}
         project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+        # The render is validated and released under the mode it was submitted with.
+        # Mode switches are refused while the job is active, so a difference here
+        # means the submission was not serialized: refuse to run rather than guess.
+        start_mode = (project or {}).get("production_mode") or "editorial"
+        validated_mode = job_doc.get("render_mode") or start_mode
+        if validated_mode != start_mode:
+            raise RuntimeError("Project production mode changed after render submission; resubmit the render.")
         # Aspect: job overrides project (allows landscape/portrait choice at render time)
         aspect = (job_doc.get("aspect_ratio") or project.get("aspect_ratio") or "9:16")
         if aspect not in ("9:16", "1:1", "16:9"):
@@ -2711,65 +2866,49 @@ async def _run_render(job_id: str, project_id: str):
             probe_target = final
         final_has_audio = await _final_has_audio_stream(probe_target)
         captions_present = _verification_check_passed(verification_result, "captions_present")
-        release_eligible = release_eligible_after_qa(
-            commercial=commercial,
-            deterministic_blocked=deterministic_qa_blocked,
-            video_qa=qa_result,
-            verification_passed=verification_passed,
+        # Release is decided and executed under the project's render lease, so a
+        # project-mode update cannot land between the mode check and the auto-post
+        # or ready-email side effects. Fails closed when the lease cannot be
+        # obtained or the project's mode no longer matches the validated mode.
+        release_lease = await project_lease.acquire_with_retry(
+            db, project_id, project_lease.RENDER_LEASE,
+            ttl_seconds=project_lease.RENDER_LEASE_TTL_SECONDS,
         )
-        final_step = "completed" if release_eligible else "qa_blocked"
-        await _set_job(job_id, status="completed", current_step=final_step, progress=100,
-            output_path=str(saved.file_path) if saved.file_path else None, output_url=saved.url,
-            output_relative_url=saved.preview_path, output_storage_mode=store.mode, output_storage_key=saved.key,
-            file_size=(saved.file_path.stat().st_size if saved.file_path and saved.file_path.exists() else final.stat().st_size if final.exists() else None),
-            duration=duration, completed_at=_now(), error_message=None, verification=verification_result,
-            video_qa=qa_result, commercial_report_path=str(report_path) if commercial else None,
-            timestamped_scene_review=scene_review if commercial else None,
-            scorecard=scorecard,
-            has_audio=final_has_audio if final_has_audio is not None else bool(audio_duration),
-            captions_burned=captions_present if captions_present is not None else bool(burn_enabled and burned_out != silent_out),
-            flags_derived_from="final_artifact_probe+verification",
-            flags_derived_at=_now(),
-            release_eligible=release_eligible,
-            deterministic_qa_blocked=deterministic_qa_blocked)
-        project_status = "COMPLETED" if release_eligible else "QA_PENDING"
-        await db.projects.update_one({"id": project_id}, {"$set": {"status": project_status, "rendered_video_asset_id": job_id, "updated_at": _now()}})
-
-        # ── Auto-post engine: if project.auto_post=true, post to platform of choice (no manual prep) ──
         try:
-            proj_for_post = await db.projects.find_one({"id": project_id}, {"_id":0})
-            if release_eligible and not commercial and proj_for_post and proj_for_post.get("auto_post"):
-                # fetch metadata for title/description
-                meta_for_post = await db.metadata_packages.find_one({"project_id": project_id}, {"_id":0}) or {}
-                meta_for_post["duration"] = duration
-                # build render_job dict for autopost
-                rj = {"output_url": saved.url, "output_path": str(saved.file_path) if saved.file_path else str(final), "duration": duration, "id": job_id}
-                try:
-                    from .workers.autopost import autopost_after_render
-                    # fire-and-forget but await quickly with timeout 20s
-                    try:
-                        await asyncio.wait_for(autopost_after_render(proj_for_post, rj, meta_for_post), timeout=20)
-                    except asyncio.TimeoutError:
-                        logger.warning(f"[AUTOPOST] timeout project={project_id}")
-                except Exception as ae:
-                    logger.warning(f"[AUTOPOST] hook failed project={project_id}: {ae}")
-        except Exception as ae:
-            logger.warning(f"[AUTOPOST] outer failed {ae}")
+            current_project = await db.projects.find_one({"id": project_id}, {"_id": 0}) or {}
+            current_mode = current_project.get("production_mode") or "editorial"
+            mode_consistent = release_lease is not None and current_mode == validated_mode
+            if not mode_consistent:
+                logger.warning(
+                    "release blocked project=%s job=%s validated_mode=%s current_mode=%s lease=%s",
+                    project_id, job_id, validated_mode, current_mode, release_lease is not None,
+                )
+            release_eligible = release_eligible_after_qa(
+                commercial=commercial,
+                deterministic_blocked=deterministic_qa_blocked,
+                video_qa=qa_result,
+                verification_passed=verification_passed,
+            ) and mode_consistent
+            final_step = "completed" if release_eligible else "qa_blocked"
+            await _set_job(job_id, status="completed", current_step=final_step, progress=100,
+                output_path=str(saved.file_path) if saved.file_path else None, output_url=saved.url,
+                output_relative_url=saved.preview_path, output_storage_mode=store.mode, output_storage_key=saved.key,
+                file_size=(saved.file_path.stat().st_size if saved.file_path and saved.file_path.exists() else final.stat().st_size if final.exists() else None),
+                duration=duration, completed_at=_now(), error_message=None, verification=verification_result,
+                video_qa=qa_result, commercial_report_path=str(report_path) if commercial else None,
+                timestamped_scene_review=scene_review if commercial else None,
+                scorecard=scorecard,
+                has_audio=final_has_audio if final_has_audio is not None else bool(audio_duration),
+                captions_burned=captions_present if captions_present is not None else bool(burn_enabled and burned_out != silent_out),
+                flags_derived_from="final_artifact_probe+verification",
+                flags_derived_at=_now(),
+                release_eligible=release_eligible,
+                deterministic_qa_blocked=deterministic_qa_blocked)
+            project_status = "COMPLETED" if release_eligible else "QA_PENDING"
+            await db.projects.update_one({"id": project_id}, {"$set": {"status": project_status, "rendered_video_asset_id": job_id, "updated_at": _now()}})
 
-        # ── Cold email: Your video IS ready — {FirstName} {company.com} ──
-        try:
-            from .email import send_video_ready_email
-            project = await db.projects.find_one({"id": project_id}, {"_id": 0})
-            if release_eligible and project and not commercial:
-                user = await db.users.find_one({"id": project.get("user_id")}, {"_id": 0})
-                if user and user.get("email"):
-                    share_token = project.get("share_token")
-                    frontend = os.environ.get("FRONTEND_URL", "https://facelessforge.ethinx.solutions").rstrip("/")
-                    share_url = f"{frontend}/s/{share_token}" if share_token and project.get("share_enabled") else None
-                    # Fire-and-forget email (log_only in dev, smtp/sendgrid if configured)
-                    try:
-                        await send_video_ready_email(user=user, project=project, mp4_url=saved.url, share_url=share_url)
-                    except Exception as email_exc:
-                        logger.warning("[EMAIL] send failed project=%s user=%s: %s", project_id, user.get("email"), email_exc)
-        except Exception as e:
-            logger.warning("[EMAIL] hook failed project=%s: %s", project_id, e)
+            await _release_side_effects(db, project_id, job_id, release_eligible=release_eligible,
+                                        commercial=commercial, validated_mode=validated_mode,
+                                        duration=duration, saved=saved, final=final)
+        finally:
+            await project_lease.release(db, release_lease)

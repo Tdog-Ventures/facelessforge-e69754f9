@@ -14,6 +14,7 @@ Hard rules (matches user spec):
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import secrets
@@ -30,6 +31,8 @@ from . import thumbnail_images as thumb_images
 from . import tts as tts_service
 from .db import get_db
 from .visual_query import truncate_words
+from .external_preparation import prepare_packaging
+from .external_audio import pad_short_external_voiceover
 
 logger = logging.getLogger("facelessforge.external")
 
@@ -64,6 +67,7 @@ class ExternalRenderRequest(BaseModel):
     tone: Optional[str] = Field(default=None, max_length=80)
     target_duration: Optional[int] = Field(default=None, ge=5, le=3600)
     auto_upload: bool = False
+    resume_project_id: Optional[str] = Field(default=None, min_length=8, max_length=64)
 
     @field_validator("source")
     @classmethod
@@ -256,8 +260,52 @@ def _normalise_scenes(payload_scenes: list[ExternalSceneInput],
 
 # ============================ ENDPOINTS ============================
 
+async def _find_resumable_external_draft(db, body, user):
+    existing = await db.projects.find_one({"id": body.resume_project_id}, {"_id": 0})
+    if not existing or existing.get("user_id") != user["id"] or not existing.get("external_source"):
+        raise HTTPException(status_code=404, detail="External draft not found")
+    if (existing.get("status") != "DRAFT" or existing.get("external_source") != body.source
+            or existing.get("name") != body.title
+            or (existing.get("external_asset_id") and existing["external_asset_id"] != body.external_asset_id)):
+        raise HTTPException(status_code=409, detail="Resume request does not match an eligible external draft")
+    if not body.external_asset_id:
+        raise HTTPException(status_code=409, detail="Resume requires the reconciled sample identity")
+    if body.target_duration is None or body.target_duration != existing.get("target_duration"):
+        raise HTTPException(status_code=409, detail="Resume must preserve the explicitly selected duration")
+    if await db.render_jobs.count_documents({"project_id": body.resume_project_id}) or await db.assets.count_documents({"project_id": body.resume_project_id}):
+        raise HTTPException(status_code=409, detail="Resume requires a draft with no assets or render jobs; reconcile existing work first")
+    claim = {"id": existing["id"], "user_id": user["id"], "status": "DRAFT",
+             "name": body.title, "external_source": body.source,
+             "external_asset_id": existing.get("external_asset_id"),
+             "updated_at": existing["updated_at"] if "updated_at" in existing else {"$exists": False}}
+    result = await db.projects.update_one(claim, {"$set": {"status": "PREPARING", "updated_at": _now(), "external_asset_id": body.external_asset_id}})
+    if result.matched_count != 1:
+        raise HTTPException(status_code=409, detail="External draft changed during reconciliation; no seed documents were replaced")
+    return existing
+
+
+_external_preparation_slots = asyncio.Semaphore(1)
+
+
 @router.post("/render-video", response_model=ExternalRenderResponse)
 async def external_render_video(
+    body: ExternalRenderRequest = Body(...),
+    x_facelessforge_key: Optional[str] = Header(default=None, alias="X-FacelessForge-Key"),
+):
+    _require_external_key(x_facelessforge_key)
+    try:
+        await asyncio.wait_for(_external_preparation_slots.acquire(), timeout=0.1)
+    except asyncio.TimeoutError:
+        # Preserve the deployed shared-renderer admission contract: reject before
+        # creating a draft or spending provider resources.
+        raise HTTPException(status_code=429, detail="External preparation is busy; reconcile the previous request before retrying", headers={"Retry-After": "15"}) from None
+    try:
+        return await _prepare_external_render(body, x_facelessforge_key)
+    finally:
+        _external_preparation_slots.release()
+
+
+async def _prepare_external_render(
     body: ExternalRenderRequest = Body(...),
     x_facelessforge_key: Optional[str] = Header(default=None, alias="X-FacelessForge-Key"),
 ):
@@ -275,10 +323,14 @@ async def external_render_video(
         )
         target_duration = int(max(5, min(3600, round(last_end))))
     else:
-        words = max(50, len(body.script.split()))
+        # Duration from actual script length; no 50-word floor or a short
+        # script would be padded to an over-long 20s target and then
+        # auto-corrected only by the render-side duration autofit.
+        words = len(body.script.split())
         target_duration = int(max(5, min(3600, round(words / 2.5))))
 
-    project_id = str(uuid.uuid4())
+    project_id = body.resume_project_id or str(uuid.uuid4())
+    existing = await _find_resumable_external_draft(db, body, user) if body.resume_project_id else None
     voice_style_label = body.voiceover_notes or "neutral male narrator"
     project_doc = {
         "id": project_id,
@@ -304,7 +356,12 @@ async def external_render_video(
         "created_at": _now(),
         "updated_at": _now(),
     }
-    await db.projects.insert_one(dict(project_doc))
+    if existing:
+        project_doc = dict(existing)
+        project_doc.update({"topic": body.script[:280], "target_duration": target_duration,
+                            "external_asset_id": body.external_asset_id, "status": "PREPARING"})
+    else:
+        await db.projects.insert_one(dict(project_doc))
 
     # Seed script
     script_doc = {
@@ -322,6 +379,10 @@ async def external_render_video(
         "created_at": _now(),
         "updated_at": _now(),
     }
+    if existing:
+        await db.scripts.delete_many({"project_id": project_id})
+        await db.scenes.delete_many({"project_id": project_id})
+        await db.metadata_packages.delete_many({"project_id": project_id})
     await db.scripts.insert_one(dict(script_doc))
 
     # Seed scenes
@@ -332,28 +393,14 @@ async def external_render_video(
     if scenes:
         await db.scenes.insert_many([dict(s) for s in scenes])
 
-    # Generate metadata via existing service (deterministic fallback works without LLM)
-    try:
-        meta = await gen.generate_metadata(project_doc, script_doc, scenes)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("metadata generation failed: %s", e)
-        meta = {
-            "title_options": [body.title],
-            "selected_title": body.title,
-            "description": body.script[:400],
-            "tags": [body.niche or "video"],
-            "youtube_chapters": [],
-            "social_caption": body.title,
-        }
+    # Preserve production's provider-free packaging of caller-approved content.
+    meta, briefs = prepare_packaging(
+        body.title, body.script, scenes, list(body.stock_footage_terms or []), body.niche,
+    )
     meta_doc = {"id": str(uuid.uuid4()), "project_id": project_id,
                 **meta, "created_at": _now(), "updated_at": _now()}
     await db.metadata_packages.insert_one(dict(meta_doc))
 
-    # Generate thumbnail brief + image, auto-select first
-    try:
-        briefs = await gen.generate_thumbnails(project_doc)
-    except Exception:  # noqa: BLE001
-        briefs = []
     brief_assets: list[dict] = []
     for c in (briefs or [])[:1]:
         ba = {
@@ -404,6 +451,7 @@ async def external_render_video(
             text=body.script, voice_style=voice_style, project_id=project_id,
             asset_id=vo_id, scene_id=None, name_suffix="(External)",
         )
+        vo_payload = await pad_short_external_voiceover(vo_payload, project_doc)
         vo_payload["text_excerpt"] = body.script[:240]
         vo_payload["created_at"] = _now()
         vo_payload["updated_at"] = _now()
@@ -671,4 +719,3 @@ async def external_render_cancel(
         status=_PUBLIC_STATUS_MAP.get(job.get("status", ""), "cancelled"),
         already_terminal=False,
     )
-

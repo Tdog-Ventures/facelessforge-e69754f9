@@ -20,6 +20,8 @@ import wave
 from pathlib import Path
 from typing import Optional
 
+from .timing import narration_fits_budget
+
 logger = logging.getLogger("facelessforge.audio_mix")
 
 FFMPEG_BIN = shutil.which("ffmpeg") or "ffmpeg"
@@ -128,7 +130,7 @@ async def fit_narration_to_budget(src: Path, *, budget_seconds: float,
     if measured is None or measured <= 0:
         raise RuntimeError(f"cannot measure narration duration: {src.name}")
     ratio = measured / budget_seconds
-    if abs(ratio - 1.0) > MAX_TEMPO_DELTA:
+    if not narration_fits_budget(measured, budget_seconds, max_tempo_delta=MAX_TEMPO_DELTA):
         raise RuntimeError(
             f"narration drift {ratio:.4f} exceeds tolerance "
             f"(measured={measured:.3f}s budget={budget_seconds:.3f}s)")

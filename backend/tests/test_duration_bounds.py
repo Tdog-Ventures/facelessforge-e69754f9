@@ -51,3 +51,79 @@ def test_project_update_accepts_five_seconds_and_rejects_four():
 
     with pytest.raises(ValidationError):
         ProjectUpdate(target_duration=4)
+
+
+def test_external_render_short_script_estimates_five_seconds(monkeypatch):
+    # Regression for CodeRabbit P6 in PR #18: the 50-word floor turned a
+    # short script into a 20s target, then the render-side autofit had to
+    # correct it after payment.
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app import external_api
+
+    class FakeCursor:
+        def __init__(self, docs):
+            self._docs = docs
+
+        def sort(self, *_a, **_k):
+            return self
+
+        async def to_list(self, _n):
+            return [dict(d) for d in self._docs]
+
+    class FakeCollection:
+        def __init__(self):
+            self.inserted = []
+
+        async def insert_one(self, doc):
+            self.inserted.append(dict(doc))
+
+        async def insert_many(self, docs):
+            self.inserted.extend(dict(d) for d in docs)
+
+        async def update_one(self, _query, _update, upsert=False):
+            return MagicMock()
+
+        async def find_one(self, query, _projection=None):
+            for doc in self.inserted:
+                if all(doc.get(k) == v for k, v in query.items()):
+                    return dict(doc)
+            return None
+
+        def find(self, query=None, _projection=None):
+            docs = [
+                d for d in self.inserted
+                if all(d.get(k) == v for k, v in (query or {}).items())
+            ] if query else list(self.inserted)
+            return FakeCursor(docs)
+
+    class FakeDB:
+        def __init__(self):
+            self._cols = {}
+            self.projects_records = None
+
+        def __getattr__(self, name):
+            return self._cols.setdefault(name, FakeCollection())
+
+    fake_db = FakeDB()
+    monkeypatch.setattr(external_api, "_system_creator", AsyncMock(return_value={"id": "sys", "role": "admin"}))
+    monkeypatch.setattr(external_api, "get_db", lambda: fake_db)
+    monkeypatch.setattr(external_api.gen, "generate_metadata", AsyncMock(return_value={
+        "title_options": ["T"], "selected_title": "T", "description": "d",
+        "tags": ["x"], "youtube_chapters": [], "social_caption": "T",
+    }))
+    monkeypatch.setattr(external_api.gen, "generate_thumbnails", AsyncMock(return_value=[]))
+    monkeypatch.setattr(external_api.thumb_images, "generate_thumbnail_images", AsyncMock(return_value=[]))
+    monkeypatch.setattr(external_api.tts_service, "generate_voiceover", AsyncMock(return_value={"id": "vo-1"}))
+    monkeypatch.setattr(external_api.render_service, "validate_prerequisites", lambda *a, **k: {"ok": True, "issues": []})
+    monkeypatch.setattr(external_api.render_service, "queue_render", AsyncMock(return_value={"id": "job-1"}))
+    monkeypatch.setenv("EXTERNAL_RENDER_ENABLED", "true")
+    monkeypatch.setenv("EXTERNAL_RENDER_API_KEY", "test-key")
+
+    body = external_api.ExternalRenderRequest(title="T", script="Short on purpose.")
+    asyncio.run(external_api.external_render_video(body, "test-key"))
+
+    project = fake_db.projects.inserted[0]
+    assert project["target_duration"] == 5

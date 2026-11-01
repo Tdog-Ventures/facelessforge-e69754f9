@@ -2,11 +2,14 @@
 authoritative, manual scripts are never rewritten, AI corrections are
 bounded (initial + 2), attempts and actions persist, failures are explicit.
 """
+import math
+
 import pytest
 
 from app import render
 from app.routes import api as api_routes
-from app.timing import suggest_fitted_duration
+from app.timing import TimingContract, build_timing_status, suggest_fitted_duration
+from backend.tests.fake_db import FakeCollection as ProjectCollection
 
 
 def _match(doc, query):
@@ -95,7 +98,15 @@ class _FakeCursor:
 
 class FakeDB:
     def __init__(self, project, script, assets=None):
-        self.projects = FakeCollection([project])
+        self.projects = ProjectCollection("projects", [project])
+        self.projects.calls = []
+        update_project = self.projects.update_one
+
+        async def tracked_update(query, update, **kwargs):
+            self.projects.calls.append(("update_one", dict(query), dict(update.get("$set", {}))))
+            return await update_project(query, update, **kwargs)
+
+        self.projects.update_one = tracked_update
         self.scripts = FakeCollection([script] if script else [])
         self.assets = FakeCollection(assets)
         self.scenes = FakeCollection([{"id": "sc1", "project_id": project["id"],
@@ -137,11 +148,107 @@ def _tts_factory(durations, calls):
     return fake_tts
 
 
-def test_short_voiceover_has_no_inbounds_fit():
-    # 19s narration against a 30s target cannot fit inside 30..3600 bounds.
-    assert suggest_fitted_duration(voiceover_seconds=19.0, intro_seconds=2.5) is None
+@pytest.mark.parametrize("mode,measured,target,intro,narration", [
+    ("editorial", 19.0, 22, 2.5, 19.5),
+    ("commercial_ad", 19.0, 19, 0.0, 19.0),
+    ("editorial", 2.4, 5, 2.5, 2.5),
+    ("commercial_ad", 5.0, 5, 0.0, 5.0),
+    ("editorial", 10.0, 13, 2.5, 10.5),  # rounded 12s fails; adjacent 13s fits
+    ("editorial", 3597.5, 3600, 2.5, 3597.5),
+    ("editorial", 3600.0, 3600, 2.5, 3597.5),  # fit at the legal upper bound
+])
+def test_duration_fit_obeys_product_bounds_and_intro_allocation(mode, measured, target, intro, narration):
+    # The product range is 5..3600, not the obsolete 30-second minimum.
+    # In particular, 19s of voice fits a 22s editorial target: 19.5s for
+    # narration after reserving the intro, with only ~2.56% tempo adjustment.
+    project = {"target_duration": 30, "production_mode": mode}
+    assert suggest_fitted_duration(voiceover_seconds=measured, intro_seconds=intro) == target
+    assert render.suggest_duration_autofit(project, {"duration": measured}) == {
+        "from": 30, "to": target, "voiceover_seconds": measured,
+    }
+    assert project == {"target_duration": 30, "production_mode": mode}, "a suggestion is not a duration edit"
+
+    fitted_project = dict(project, target_duration=target)
+    timing = TimingContract.from_project(fitted_project)
+    assert timing.intro_seconds == intro
+    assert timing.narration_seconds == narration
+    assert timing.intro_frames + timing.narration_frames == target * timing.fps
+    status = build_timing_status(
+        project=fitted_project, scenes=[{"end_time": narration}], voiceover={"duration": measured},
+    )
+    assert status["ready"] is True
+    assert status["voiceover_tempo_ratio"] == pytest.approx(measured / narration, abs=1e-6)
+    assert render.suggest_duration_autofit(fitted_project, {"duration": measured}) is None
+
+
+@pytest.mark.parametrize("measured,accepted", [
+    (math.nextafter(2.375, -math.inf), False),
+    (2.375, True),  # exactly -5% of the 2.5-second narration budget
+    (math.nextafter(2.375, math.inf), True),
+    (math.nextafter(2.625, -math.inf), True),
+    (2.625, True),  # exactly +5%
+    (math.nextafter(2.625, math.inf), False),
+])
+def test_five_second_tempo_boundary_is_inclusive_without_expanding_tolerance(measured, accepted):
+    expected = 5 if accepted else None
+    assert suggest_fitted_duration(voiceover_seconds=measured, intro_seconds=2.5) == expected
+    status = build_timing_status(
+        project={"target_duration": 5}, scenes=[{"end_time": 2.5}], voiceover={"duration": measured},
+    )
+    assert status["voiceover_action"] == ("tempo_fit" if accepted else "rebuild")
+    assert status["ready"] is accepted
+    suggestion = render.suggest_duration_autofit({"target_duration": 30}, {"duration": measured})
+    assert suggestion == ({"from": 30, "to": 5, "voiceover_seconds": measured} if accepted else None)
+
+
+@pytest.mark.parametrize("mode,measured,intro", [
+    ("editorial", 2.0, 2.5),  # below 95% of even the minimum narration slot
+    ("editorial", 3.0, 2.5),  # too long for 5s, too short for 6s: no whole-second fit
+    ("commercial_ad", 5.4, 0.0),  # likewise between the 5s and 6s tempo windows
+    ("editorial", 4000.0, 2.5),  # exceeds 105% of the maximum narration slot
+    ("commercial_ad", 4000.0, 0.0),
+])
+def test_truly_impossible_fits_return_failure(mode, measured, intro):
+    assert suggest_fitted_duration(voiceover_seconds=measured, intro_seconds=intro) is None
     assert render.suggest_duration_autofit(
-        {"target_duration": 30}, {"duration": 19.0}) is None
+        {"target_duration": 30, "production_mode": mode}, {"duration": measured},
+    ) is None
+
+
+@pytest.mark.parametrize("measured", [float("nan"), float("inf"), -float("inf")])
+def test_nonfinite_voiceover_cannot_suggest_a_duration(measured):
+    assert suggest_fitted_duration(voiceover_seconds=measured) is None
+    assert render.suggest_duration_autofit({"target_duration": 30}, {"duration": measured}) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("measured,accepted", [(2.375, True), (2.625, True), (2.374, False), (2.626, False)])
+async def test_manual_voice_generation_uses_the_same_tempo_boundary(monkeypatch, measured, accepted):
+    text = "The manual short narration stays unchanged."
+    db = FakeDB(_project(target_duration=5), _script(text, source="manual"))
+    monkeypatch.setattr(api_routes, "get_db", lambda: db)
+    monkeypatch.setattr(api_routes.tts_service, "generate_voiceover", _tts_factory([measured], calls := []))
+
+    async def no_rewrite(*_args, **_kwargs):
+        raise AssertionError("manual narration must never be rewritten")
+
+    monkeypatch.setattr(api_routes.gen, "generate_script", no_rewrite)
+    _stub_attach(monkeypatch)
+    if accepted:
+        result = await api_routes.generate_full_voiceover("p1", body=None, user=_user())
+        assert result["stub"] is True
+        assert db.assets.docs[0]["duration"] == measured
+        assert db.projects.docs[0]["selected_voiceover_asset_id"] == db.assets.docs[0]["id"]
+    else:
+        with pytest.raises(Exception) as exc:
+            await api_routes.generate_full_voiceover("p1", body=None, user=_user())
+        assert exc.value.status_code == 400
+        assert exc.value.detail["code"] == "voiceover_length_mismatch"
+        assert exc.value.detail["autofit_suggestion"] is None
+        assert db.assets.docs == []
+    assert len(calls) == 1
+    assert db.projects.docs[0]["target_duration"] == 5
+    assert db.scripts.docs[0]["full_script"] == text
 
 
 def test_long_voiceover_suggests_explicit_fit():
@@ -289,24 +396,50 @@ async def test_invalid_audio_rejected(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_explicit_autofit_is_idempotent(monkeypatch):
+@pytest.mark.parametrize("mode,measured,fitted", [
+    ("editorial", 32.6558125, 35),
+    ("editorial", 19.0, 22),
+    ("editorial", 2.4, 5),
+    ("commercial_ad", 5.0, 5),
+])
+async def test_explicit_autofit_is_idempotent(monkeypatch, mode, measured, fitted):
     voice = {"id": "v1", "project_id": "p1", "asset_type": "voiceover_audio",
-             "duration": 32.6558125}
-    project = _project(target_duration=30, selected_voiceover_asset_id="v1")
+             "duration": measured}
+    project = _project(target_duration=30, production_mode=mode, selected_voiceover_asset_id="v1")
     db = FakeDB(project, _script("word " * 80), assets=[voice])
     monkeypatch.setattr(api_routes, "get_db", lambda: db)
     monkeypatch.setattr(render, "get_db", lambda: db)
 
     first = await api_routes.render_autofit_duration("p1", user=_user())
-    assert first["autofit"] == {"from": 30, "to": 35, "voiceover_seconds": 32.6558125}
-    writes = [c for c in db.projects.calls if c[2].get("target_duration") == 35]
+    assert first["autofit"] == {"from": 30, "to": fitted, "voiceover_seconds": measured}
+    assert first["preflight"]["timing"]["narration_seconds"] == fitted - (2.5 if mode == "editorial" else 0)
+    assert first["preflight"]["timing"]["voiceover_action"] in {"ready", "tempo_fit"}
+    writes = [c for c in db.projects.calls if c[2].get("target_duration") == fitted]
     assert len(writes) == 1
 
     with pytest.raises(Exception) as exc:
         await api_routes.render_autofit_duration("p1", user=_user())
     assert exc.value.status_code == 400  # already fitting: no second write
-    writes = [c for c in db.projects.calls if c[2].get("target_duration") == 35]
+    writes = [c for c in db.projects.calls if c[2].get("target_duration") == fitted]
     assert len(writes) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("measured", [2.0, 4000.0])
+async def test_explicit_impossible_fit_fails_without_duration_or_job_writes(monkeypatch, measured):
+    voice = {"id": "v1", "project_id": "p1", "asset_type": "voiceover_audio", "duration": measured}
+    db = FakeDB(_project(selected_voiceover_asset_id="v1"), _script("Manual narration", source="manual"), [voice])
+    monkeypatch.setattr(api_routes, "get_db", lambda: db)
+    monkeypatch.setattr(render, "get_db", lambda: db)
+
+    with pytest.raises(Exception) as exc:
+        await api_routes.render_autofit_duration("p1", user=_user())
+    assert exc.value.status_code == 400
+    assert "No in-bounds duration" in exc.value.detail
+    assert db.projects.docs[0]["target_duration"] == 30
+    assert not [call for call in db.projects.calls if "target_duration" in call[2]]
+    assert db.render_jobs.docs == []
+    assert db.assets.docs == [voice]
 
 
 @pytest.mark.asyncio
