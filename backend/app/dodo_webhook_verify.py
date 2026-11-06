@@ -49,13 +49,13 @@ def _verify_standard_webhooks(payload: bytes, headers: Dict[str, str], secret: s
 
     # headers are case-insensitive, normalized to lowercase hyphenated per spec
     def _h(name: str) -> Optional[str]:
-        # try exact, lower, and capitalized variants
-        for k in (name, name.lower(), name.upper(), name.capitalize(), "Webhook-Id", "Webhook-Timestamp", "Webhook-Signature"):
-            if k in headers and headers[k]:
-                return str(headers[k])
-        # also check lower-case dict
-        low = {kk.lower(): vv for kk, vv in headers.items()}
-        return low.get(name.lower())
+        # Header names are case-insensitive, but each lookup must remain
+        # scoped to the requested header (never fall through to another).
+        return next(
+            (str(value) for key, value in headers.items()
+             if key.lower() == name.lower() and value),
+            None,
+        )
 
     webhook_id = _h("webhook-id")
     webhook_timestamp = _h("webhook-timestamp")
