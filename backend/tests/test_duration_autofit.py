@@ -125,5 +125,5 @@ def test_preflight_exposes_autofit_suggestion():
     ]
     check = render.validate_prerequisites(project, script, scenes, metadata, assets)
     assert check["ok"] is False
-    assert check["issues"] == ["Voiceover fits selected duration", "Scene visuals attached"]
+    assert check["issues"] == ["Voiceover fits selected duration", "Scene visuals meet 3-second pacing"]
     assert check["autofit_suggestion"] == {"from": 27, "to": 30, "voiceover_seconds": 27.2745625}
