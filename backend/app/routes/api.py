@@ -1441,7 +1441,10 @@ async def find_scene_assets(project_id: str, scene_id: str, body: FindAssetsRequ
     query = _build_scene_stock_query(scene, project, body.query)
     # Aggregated multi-source — merges Pexels + Pixabay + Unsplash, preserves source field per item
     if hasattr(stock_service, "search_stock_aggregated"):
-        return await stock_service.search_stock_aggregated(query, body.media_type, body.per_page)
+        return await stock_service.search_stock_aggregated(
+            query, body.media_type, body.per_page,
+            orientation="portrait" if project.get("aspect_ratio") == "9:16" else None,
+        )
     return await stock_service.search_stock(query, body.media_type, body.per_page)
 
 
@@ -1452,6 +1455,8 @@ async def attach_scene_asset(project_id: str, scene_id: str, body: StockAttachRe
     _ensure_project_access(project, user, write=True)
     if user["role"] == "viewer":
         raise HTTPException(status_code=403, detail="Viewer cannot attach assets")
+    if str(body.source or "").lower() == "mock":
+        raise HTTPException(status_code=422, detail="Mock footage cannot be attached to a production video.")
     scene = await db.scenes.find_one({"id": scene_id, "project_id": project_id}, {"_id": 0})
     if not scene:
         raise HTTPException(status_code=404, detail="Scene not found")
@@ -1791,7 +1796,10 @@ async def _attach_scene_stock(db, *, lease, project, scene, replace_existing, us
             attempted.add(term.casefold())
             try:
                 if hasattr(stock_service, "search_stock_aggregated"):
-                    found = await stock_service.search_stock_aggregated(query=term, media_type="both", per_page=per_page)
+                    found = await stock_service.search_stock_aggregated(
+                        query=term, media_type="both", per_page=per_page,
+                        orientation="portrait" if project.get("aspect_ratio") == "9:16" else None,
+                    )
                 else:
                     found = await stock_service.search_stock(term, "both", per_page)
                 candidates.extend((found or {}).get("results") or [])
