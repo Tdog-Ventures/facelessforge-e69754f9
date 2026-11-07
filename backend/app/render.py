@@ -1609,6 +1609,12 @@ def _blur_fill_vf(W: int, H: int) -> str:
     background fill.  Callers may prepend additional filters (e.g. a
     punch-in crop) before ``split`` and append final per-frame
     constraints (fps, drawtext, etc.) after the overlay."""
+    if H > W:
+        # Portrait output should use edge-to-edge footage, not a narrow
+        # landscape strip with enlarged blurred bars. Centre crop for now;
+        # the stock search separately prioritises native portrait footage.
+        return (f"scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,"
+                f"crop={W}:{H},setsar=1")
     return (
         f"split=2[_bg][_fg];"
         f"[_bg]scale={W}:{H}:force_original_aspect_ratio=increase:flags=bicubic,"
@@ -1644,7 +1650,7 @@ def _ffmpeg_normalise_video(src: Path, duration: float, out: Path,
     cmd = [FFMPEG_BIN, "-y"]
     if start_offset > 0:
         cmd += ["-ss", f"{start_offset:.2f}"]
-    if punch_in:
+    if punch_in and W >= H:
         # Punch-in: split first so the blurred background uses the full frame
         # while only the focused foreground is zoomed.
         vf = (
