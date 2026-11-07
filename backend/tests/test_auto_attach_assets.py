@@ -93,6 +93,9 @@ def _patch_stock(monkeypatch, db, titles, *, by_query=None, ext_prefix="ext"):
         ]}
 
     monkeypatch.setattr(api_routes.stock_service, "search_stock_aggregated", fake_search, raising=False)
+    # Legacy tests isolate storage, billing and lease behaviour with mixed stock titles.
+    # The real relevance predicate has independent regression tests.
+    monkeypatch.setattr(api_routes, "relevant_candidates", lambda candidates, _scene, _query: (candidates, []))
     monkeypatch.setattr(api_routes.stock_service, "is_mock_mode", lambda: True)
     monkeypatch.setattr(api_routes, "get_db", lambda: db)
 
@@ -159,7 +162,9 @@ def test_auto_attach_retries_alternative_queries_when_primary_has_one_asset(monk
         ix = len(queries)
         return {"results": [{
             "external_id": f"alternative-{ix}", "preview_url": f"preview-{ix}",
-            "title": ["Mountain climber on snowy peak", "Chef preparing fresh pasta", "Mechanic repairing car engine", "Dancer performing on stage", "City skyline at sunrise"][min(ix - 1, 4)],
+            "title": ["Editing video timeline at computer", "Video editing workstation monitor", "Editing studio workspace desk", "Creative production editing software", "Video editor timeline screen"][min(ix - 1, 4)],
+            "download_url": f"https://stock.example/video-{ix}.mp4",
+            "source_url": f"https://stock.example/editing-video-{ix}",
             "media_type": "stock_video", "source": "pexels",
         }]}
 
