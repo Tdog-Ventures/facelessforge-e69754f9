@@ -40,7 +40,11 @@ export default function StockAssetModal({ open, onOpenChange, projectId, scene, 
     if (open && scene) {
       const q = buildQuery(scene);
       setQuery(q);
-      setSearchTerms(scene.search_terms || []);
+      setSearchTerms([...new Set(
+        (Array.isArray(scene.search_terms) ? scene.search_terms : [])
+          .map(compactQuery)
+          .filter(t => t.split(/\\s+/).length >= 2)
+      )].slice(0, 4));
       // auto search on open
       doSearch(q, mediaType);
     }
