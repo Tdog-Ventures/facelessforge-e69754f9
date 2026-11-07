@@ -45,6 +45,7 @@ from .. import generation as gen
 from .. import stock as stock_service
 from .. import thumbnail_images as thumb_images
 from ..asset_dedupe import filter_distinct_titles
+from ..scene_terms import compact_stock_query
 from .. import asset_commit, project_lease
 
 
@@ -105,46 +106,31 @@ def _extract_core_query(scene: dict) -> str:
     return "nature cinematic"
 
 def _build_scene_stock_query(scene: dict, project: dict, override: str | None = None) -> str:
-    """Do NOT truncate query server-side. Use full body.query or scene.search_terms joined.
+    """Use visible stock-footage subjects, not complete cinematic instructions.
 
-    FIX: was using visual_direction sliced to 8 words / cinematic suffix only.
-    Now prefers full search_terms joined (first 3 terms) preserving full intent,
-    else visual trimmed to 120 chars, else project topic.
-    Priority: explicit override > search_terms (first 3) > visual (120 chars) > project topic.
+    A manually entered query remains untouched. Generated search terms are
+    alternatives, NOT three phrases to concatenate into an impossible match.
     """
     if override and override.strip():
         return override.strip()
     terms = scene.get("search_terms") or []
-    if terms:
-        cleaned: list[str] = []
-        for t in terms:
-            c = " ".join(str(t or "").split()).strip()
-            if not c:
-                continue
-            # Skip single-word leak artifacts like "make", "small", "imagine"
-            if len(c.split()) == 1 and c.lower() in _SCENE_LEAK_STOP:
-                continue
-            if len(c.split()) == 1 and len(c) < 4:
-                continue
-            cleaned.append(c)
-            if len(cleaned) >= 3:
-                break
-        if cleaned:
-            return " ".join(cleaned)
-        # Fallback: raw first 3 terms if filtering removed all
-        raw = [str(t).strip() for t in terms if str(t).strip()][:3]
-        if raw:
-            return " ".join(raw)
-    visual = _clean_visual_full(scene.get("visual_direction") or "")
-    if visual:
-        # Frontend uses visual.trim().slice(0,120) — mirror here, no 8-word truncation
-        return visual.strip()[:120].strip()
-    # Fallback to project topic
-    base = (project.get("topic") or project.get("niche") or "stock").strip()
-    base = " ".join(base.split())
-    if len(base.split()) < 2:
-        base = "nature cinematic"
-    return base.strip()
+    if isinstance(terms, str):
+        terms = [terms]
+    for term in terms:
+        concise = compact_stock_query(term)
+        if len(concise.split()) >= 2:
+            return concise
+    for candidate in (
+        scene.get("visual_direction"),
+        scene.get("visual"),
+        project.get("topic"),
+        project.get("niche"),
+    ):
+        concise = compact_stock_query(candidate)
+        if concise:
+            return concise
+    return "nature landscape"
+
 
 def _build_ordered_stock_queries(scene: dict, project: dict) -> list[dict]:
     """Generate exactly 3 ordered query objects per scene: pexels_video (cinematic full), pixabay_video (shorter core), unsplash_image (shortest).
@@ -1763,16 +1749,7 @@ async def _debit_scene(db, *, store: dict, user_id: str, asset_ids: list, reason
 
 
 def _auto_stock_query(project: dict, scene: dict) -> str:
-    terms = scene.get("search_terms") or []
-    visual = (scene.get("visual_direction") or scene.get("visual") or "").strip()
-    if terms and isinstance(terms, list) and str(terms[0]).strip():
-        raw = str(terms[0]).strip()[:60]
-    elif visual:
-        raw = visual.split(",")[0].strip()[:60] if "," in visual else visual.split(".")[0].strip()[:60]
-        raw = raw or visual[:60]
-    else:
-        raw = (project.get("topic") or "ancient Rome").strip()[:60]
-    return raw.strip() or "ancient Rome"
+    return _build_scene_stock_query(scene, project)
 
 
 async def _asset_write(db, lease, collection, method, *args, **kwargs):
@@ -1807,7 +1784,7 @@ async def _attach_scene_stock(db, *, lease, project, scene, replace_existing, us
         fallbacks.append(scene.get("visual_direction") or "")
         fallbacks.append(project.get("topic") or "")
         for term in [query, *fallbacks]:
-            term = str(term or "").strip()
+            term = compact_stock_query(term)
             if not term or term.casefold() in attempted:
                 continue
             attempted.add(term.casefold())
