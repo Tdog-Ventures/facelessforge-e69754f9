@@ -36,19 +36,19 @@ export default function Sidebar({ open = true, onClose }) {
   return (
     <aside
       data-testid="sidebar"
-      className={`fixed left-0 top-0 bottom-0 w-60 border-r border-[rgba(59,130,246,0.15)] bg-[#1c2333] flex flex-col z-40 transform transition-transform duration-200
+      className={`fixed left-0 top-0 bottom-0 w-60 border-r border-[var(--ff-border)] bg-[var(--ff-surface)] flex flex-col z-40 transform transition-transform duration-200
         ${open ? "translate-x-0" : "-translate-x-full"} md:translate-x-0`}
-      style={{ boxShadow: "0 0 20px rgba(59,130,246,0.05)" }}
+      style={{ boxShadow: "0 0 20px var(--ff-glow)" }}
     >
-      <div className="h-16 flex items-center gap-3 px-5 border-b border-[rgba(59,130,246,0.15)]">
+      <div className="h-16 flex items-center gap-3 px-5 border-b border-[var(--ff-border)]">
         <div
-          className="w-8 h-8 flex items-center justify-center bg-blue-600 text-white font-black font-mono text-lg rounded-md"
+          className="w-8 h-8 flex items-center justify-center bg-[var(--ff-primary)] text-white font-black font-mono text-lg rounded-md"
         >
           F
         </div>
         <div className="flex flex-col leading-none">
-          <span className="font-semibold tracking-tight text-slate-100">FacelessForge</span>
-          <span className="font-mono text-[9px] text-slate-500 tracking-widest uppercase mt-1">
+          <span className="font-semibold tracking-tight text-[var(--ff-text)]">FacelessForge</span>
+          <span className="font-mono text-[9px] text-[var(--ff-text-dim)] tracking-widest uppercase mt-1">
             Creator OS
           </span>
         </div>
@@ -67,8 +67,8 @@ export default function Sidebar({ open = true, onClose }) {
               const active = isActive || isBilling;
               return `flex items-center gap-3 px-3 py-2.5 text-sm rounded-md border transition-colors ${
                 active
-                  ? "bg-[#0f141f] border-[rgba(59,130,246,0.25)] text-white"
-                  : "border-transparent text-slate-400 hover:text-white hover:bg-[#0f141f]"
+                  ? "bg-[var(--ff-bg)] border-[var(--ff-border-strong)] text-[var(--ff-text)]"
+                  : "border-transparent text-[var(--ff-text-muted)] hover:text-[var(--ff-text)] hover:bg-[var(--ff-bg)]"
               }`;
             }}
           >
@@ -80,10 +80,10 @@ export default function Sidebar({ open = true, onClose }) {
                   <Icon
                     size={16}
                     strokeWidth={1.5}
-                    className={active ? "text-blue-400" : ""}
+                    className={active ? "text-[var(--ff-primary)]" : ""}
                   />
                   <span className="flex-1">{label}</span>
-                  {badge && <span className="font-mono text-[8px] bg-blue-600 text-white px-1.5 py-0.5 rounded tracking-widest">{badge}</span>}
+                  {badge && <span className="font-mono text-[8px] bg-[var(--ff-primary)] text-white px-1.5 py-0.5 rounded tracking-widest">{badge}</span>}
                 </>
               );
             }}
@@ -91,11 +91,11 @@ export default function Sidebar({ open = true, onClose }) {
         ))}
       </nav>
 
-      <div className="border-t border-[rgba(59,130,246,0.15)] p-3 space-y-3">
+      <div className="border-t border-[var(--ff-border)] p-3 space-y-3">
         {user && (
           <div className="px-2">
-            <div className="text-sm text-slate-100 truncate">{user.name}</div>
-            <div className="font-mono text-[10px] text-slate-500 uppercase tracking-widest">
+            <div className="text-sm text-[var(--ff-text)] truncate">{user.name}</div>
+            <div className="font-mono text-[10px] text-[var(--ff-text-dim)] uppercase tracking-widest">
               {user.role}
             </div>
           </div>
@@ -103,7 +103,7 @@ export default function Sidebar({ open = true, onClose }) {
         <button
           data-testid="logout-btn"
           onClick={handleLogout}
-          className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-400 hover:text-white hover:bg-[#0f141f] border border-transparent hover:border-[rgba(59,130,246,0.15)] rounded-md transition-colors"
+          className="w-full flex items-center gap-2 px-3 py-2 text-sm text-[var(--ff-text-muted)] hover:text-[var(--ff-text)] hover:bg-[var(--ff-bg)] border border-transparent hover:border-[var(--ff-border)] rounded-md transition-colors"
         >
           <LogOut size={14} strokeWidth={1.5} /> Sign out
         </button>

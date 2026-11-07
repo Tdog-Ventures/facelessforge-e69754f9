@@ -5,7 +5,7 @@ import { Menu, X } from "lucide-react";
 export default function AppShell({ children }) {
   const [open, setOpen] = useState(false);
   return (
-    <div className="min-h-screen bg-[#0f141f] text-slate-200">
+    <div className="min-h-screen bg-[var(--ff-bg)] text-[var(--ff-text)]">
       <Sidebar open={open} onClose={() => setOpen(false)} />
       {/* overlay for mobile when open */}
       {open && (
@@ -19,7 +19,7 @@ export default function AppShell({ children }) {
       <button
         data-testid="sidebar-toggle"
         onClick={() => setOpen(!open)}
-        className="fixed top-3 left-3 z-40 md:hidden bg-[#1c2333] border border-[rgba(59,130,246,0.15)] p-2 rounded-md text-slate-200"
+        className="fixed top-3 left-3 z-40 md:hidden bg-[var(--ff-surface)] border border-[var(--ff-border)] p-2 rounded-md text-[var(--ff-text)]"
         aria-label="Toggle sidebar"
       >
         {open ? <X size={18} /> : <Menu size={18} />}

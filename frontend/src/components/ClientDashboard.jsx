@@ -64,8 +64,8 @@ function IntakeForm({ onCreated }) {
         Target duration (seconds)
         <input type="number" className="w-full border rounded px-3 py-2 mt-1" value={form.target_duration} onChange={handleChange("target_duration")} min={5} max={3600} />
       </label>
-      {error && <p className="text-red-600 text-sm">{error}</p>}
-      <button type="submit" disabled={submitting} className="bg-black text-white px-4 py-2 rounded disabled:opacity-50">
+      {error && <p className="text-[var(--ff-error)] text-sm">{error}</p>}
+      <button type="submit" disabled={submitting} className="bg-[var(--ff-primary)] text-white px-4 py-2 rounded hover:bg-[var(--ff-primary-hover)] disabled:opacity-50">
         {submitting ? "Submitting..." : "Generate video"}
       </button>
     </form>
@@ -74,14 +74,14 @@ function IntakeForm({ onCreated }) {
 
 function StatusBadge({ status }) {
   const colors = {
-    queued: "bg-yellow-100 text-yellow-800",
-    rendering: "bg-blue-100 text-blue-800",
-    completed: "bg-green-100 text-green-800",
-    COMPLETED: "bg-green-100 text-green-800",
-    failed: "bg-red-100 text-red-800",
-    FAILED: "bg-red-100 text-red-800",
+    queued: "bg-amber-500/15 text-[var(--ff-warning)]",
+    rendering: "bg-blue-500/15 text-[var(--ff-primary)]",
+    completed: "bg-emerald-500/15 text-[var(--ff-success)]",
+    COMPLETED: "bg-emerald-500/15 text-[var(--ff-success)]",
+    failed: "bg-red-500/15 text-[var(--ff-error)]",
+    FAILED: "bg-red-500/15 text-[var(--ff-error)]",
   };
-  const cls = colors[status] || "bg-gray-100 text-gray-800";
+  const cls = colors[status] || "bg-[var(--ff-surface-2)] text-[var(--ff-text-muted)]";
   return <span className={`text-xs px-2 py-1 rounded ${cls}`}>{status || "unknown"}</span>;
 }
 
@@ -105,7 +105,7 @@ function VideoList() {
   }, [fetchVideos]);
 
   if (loading) return <p>Loading...</p>;
-  if (videos.length === 0) return <p className="text-gray-500">No videos yet.</p>;
+  if (videos.length === 0) return <p className="text-[var(--ff-text-dim)]">No videos yet.</p>;
 
   return (
     <div className="space-y-3">
@@ -113,13 +113,13 @@ function VideoList() {
         <div key={v.project_id} className="border rounded p-4 flex justify-between items-center">
           <div>
             <p className="font-medium">{v.name}</p>
-            <p className="text-sm text-gray-500">{v.topic}</p>
-            {v.error_message && <p className="text-sm text-red-600">{v.error_message}</p>}
+            <p className="text-sm text-[var(--ff-text-dim)]">{v.topic}</p>
+            {v.error_message && <p className="text-sm text-[var(--ff-error)]">{v.error_message}</p>}
           </div>
           <div className="flex items-center gap-3">
             <StatusBadge status={v.status} />
             {v.output_url && (
-              <a href={v.output_url} target="_blank" rel="noreferrer" className="text-blue-600 text-sm underline">View</a>
+              <a href={v.output_url} target="_blank" rel="noreferrer" className="text-[var(--ff-primary)] text-sm underline">View</a>
             )}
           </div>
         </div>
