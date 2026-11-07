@@ -1808,6 +1808,12 @@ async def _attach_scene_stock(db, *, lease, project, scene, replace_existing, us
                     break
             except Exception as exc:  # noqa: BLE001
                 search_error = exc
+            # A stock lookup may outlive its lease. Stop issuing fallback
+            # provider requests immediately when ownership has transferred.
+            if not await project_lease.renew(
+                db, lease, ttl_seconds=project_lease.ASSET_LEASE_TTL_SECONDS,
+            ):
+                break
         if candidates:
             result = {"results": candidates}
             search_error = None
