@@ -44,6 +44,7 @@ jobs:
       - name: Run production pipeline regression tests
         run: |
           python -m pytest -q \
+            backend/tests/test_stock_query_compaction.py \
             backend/tests/test_generation_integrity.py \
             backend/tests/test_auto_attach_assets.py \
             backend/tests/test_asset_commit_fencing.py \
