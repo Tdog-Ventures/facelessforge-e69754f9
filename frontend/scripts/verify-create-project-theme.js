@@ -1,11 +1,35 @@
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
-const { chromium } = require("/tmp/opencode/node_modules/playwright-core");
+
+let chromium;
+try {
+  ({ chromium } = require("playwright"));
+} catch {
+  try {
+    ({ chromium } = require("playwright-core"));
+  } catch {
+    ({ chromium } = require("/tmp/opencode/node_modules/playwright-core"));
+  }
+}
 
 const BUILD_DIR = path.join(__dirname, "..", "build");
-const AXE_PATH = path.join(__dirname, "..", "node_modules", "axe-core", "axe.min.js");
+const AXE_PATH = (() => {
+  try {
+    return require.resolve("axe-core/axe.min.js");
+  } catch {
+    return path.join(__dirname, "..", "node_modules", "axe-core", "axe.min.js");
+  }
+})();
 const OUT_DIR = process.env.EVIDENCE_OUT_DIR || "";
+const CHROME_Candidates = [
+  process.env.CHROME_PATH,
+  "/usr/bin/google-chrome",
+  "/usr/bin/google-chrome-stable",
+  "/usr/bin/chromium-browser",
+  "/usr/bin/chromium",
+].filter(Boolean);
+const EXECUTABLE_PATH = CHROME_Candidates.find((p) => fs.existsSync(p));
 
 const MIME = {
   ".html": "text/html",
@@ -51,7 +75,9 @@ function startServer() {
 (async () => {
   const server = await startServer();
   const port = server.address().port;
-  const browser = await chromium.launch({ executablePath: "/usr/bin/google-chrome", args: ["--no-sandbox"] });
+  const launchOpts = { args: ["--no-sandbox"] };
+  if (EXECUTABLE_PATH) launchOpts.executablePath = EXECUTABLE_PATH;
+  const browser = await chromium.launch(launchOpts);
   const failures = [];
   const report = {};
 
