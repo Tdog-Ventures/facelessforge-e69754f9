@@ -34,5 +34,5 @@ jobs:
         run: npm run build
       - name: Run Chromium light/dark contrast and axe-core verification
         run: |
-          npm install --no-save playwright-core axe-core
+          npm install --no-save --legacy-peer-deps playwright-core axe-core
           npm run verify:theme
