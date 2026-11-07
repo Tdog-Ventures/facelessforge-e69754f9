@@ -159,7 +159,7 @@ def test_auto_attach_retries_alternative_queries_when_primary_has_one_asset(monk
         ix = len(queries)
         return {"results": [{
             "external_id": f"alternative-{ix}", "preview_url": f"preview-{ix}",
-            "title": f"Distinct footage subject {ix} scene view",
+            "title": ["Mountain climber on snowy peak", "Chef preparing fresh pasta", "Mechanic repairing car engine", "Dancer performing on stage", "City skyline at sunrise"][min(ix - 1, 4)],
             "media_type": "stock_video", "source": "pexels",
         }]}
 
