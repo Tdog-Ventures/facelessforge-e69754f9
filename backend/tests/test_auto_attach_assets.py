@@ -311,7 +311,10 @@ def test_actual_duplicate_is_skipped_not_reported_as_failure(monkeypatch):
 
     reasons = [d.get("reason") for d in response["details"] if d.get("status") == "skipped"]
     assert reasons == ["duplicate"], response["details"]
-    assert response["failed"] == 0
+    # Two committed clips do not fill a 10s scene (4 required), so the
+    # operation must report incomplete coverage, not a false success.
+    assert response["failed"] == 1
+    assert "incomplete_visual_coverage" in [d.get("reason") for d in response["details"]]
     assert response["attached"] == 2
     assert _balance(db) == 8, "only the two committed attachments are debited"
 
