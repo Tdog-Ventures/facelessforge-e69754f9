@@ -8,6 +8,7 @@ import { useConfirm } from "./ConfirmDialog";
 import BillingBar from "./BillingBar";
 import { useNavigate } from "react-router-dom";
 import { createDodoCheckout, DODO_PRODUCT_IDS } from "../lib/dodo";
+import { beginAssetAttachment, finishAssetAttachment, pendingAssetAttachment } from "../lib/assetAttachmentOperation";
 
 function InfoTip({ text }) {
   const [show, setShow] = useState(false);
@@ -130,6 +131,7 @@ function HumanParamsSidebar({ projectId, project, onChange, canEdit }) {
 export default function ScenePlanner({ projectId, scenes, canEdit, onChange, hasScript, attachedAssets = [], project }) {
   const [generating, setGenerating] = useState(false);
   const [autoAttaching, setAutoAttaching] = useState(false);
+  const [pendingAttachment, setPendingAttachment] = useState(null);
   const [activeScene, setActiveScene] = useState(null);
   const [previewAsset, setPreviewAsset] = useState(null);
   const [credits, setCredits] = useState(null);
@@ -139,6 +141,11 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
   const [innerProject, setInnerProject] = useState(project || null);
   const confirm = useConfirm();
   const navigate = useNavigate();
+
+  useEffect(() => {
+    try { setPendingAttachment(pendingAssetAttachment(projectId)); }
+    catch (err) { toast.error("Asset retry needs reconciliation", { description: err.message }); }
+  }, [projectId]);
 
   useEffect(() => {
     if (project) setInnerProject(project);
@@ -286,13 +293,20 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
   const scenesWithoutAssets = (scenes || []).length - scenesWithAssets;
 
   const autoAttach = async () => {
-    if (credits && (credits.remaining ?? credits.credits) <= 0) {
+    let pending;
+    try { pending = pendingAssetAttachment(projectId); }
+    catch (err) {
+      toast.error("Asset retry needs reconciliation", { description: err.message });
+      return;
+    }
+    // A paid operation can need replay at zero balance after its response was lost.
+    if (!pending && credits && (credits.remaining ?? credits.credits) <= 0) {
       setExhaustedInfo({ reset_at: credits.reset_at || credits.current_period_end, plan: credits.plan || "free" });
       setShowPricingModal(true);
       return;
     }
-    let replaceExisting = false;
-    if (scenesWithAssets > 0) {
+    let replaceExisting = pending?.payload.replace_existing || false;
+    if (!pending && scenesWithAssets > 0) {
       const ok = await confirm({
         title: "Replace existing scene assets?",
         description: `${scenesWithAssets} scenes already have assets. Choose Replace to rebuild everything, or Cancel to only fill the ${scenesWithoutAssets} empty scenes.`,
@@ -309,10 +323,9 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
       { id: "auto-attach" },
     );
     try {
-      const { data } = await api.post(`/projects/${projectId}/auto-attach-assets`, {
-        replace_existing: replaceExisting,
-        media_type: "both",
-      });
+      const operation = pending || beginAssetAttachment(projectId, replaceExisting);
+      setPendingAttachment(operation);
+      const { data } = await api.post(`/projects/${projectId}/auto-attach-assets`, operation.payload);
       const parts = [
         `${data.attached} attached`,
         `${data.skipped} skipped`,
@@ -329,6 +342,8 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
       const { data: refreshed } = await api.get(`/projects/${projectId}`);
       onChange(refreshed);
       try { const { data } = await api.get("/billing/credits"); setCredits(data); } catch {}
+      // Keep the identity if the UI refresh failed or the 2xx body was resumable.
+      if (finishAssetAttachment(operation, data)) setPendingAttachment(null);
     } catch (err) {
       if (!handleExhausted(err)) toast.error("Auto-attach failed", { id: toastId, description: formatApiError(err.response?.data?.detail) || err.message });
       else {
@@ -418,12 +433,12 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
               <button
                 data-testid="auto-attach-btn"
                 onClick={autoAttach}
-                disabled={autoAttaching || exhausted}
-                title={exhausted ? `0 left, resets ${resetLabel}` : undefined}
-                className={`flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest px-2.5 py-1 rounded-md transition-colors disabled:opacity-60 ${exhausted ? "bg-slate-800 text-slate-500 cursor-not-allowed" : "text-white bg-emerald-600 hover:bg-emerald-500"}`}
+                disabled={autoAttaching || (exhausted && !pendingAttachment)}
+                title={exhausted && !pendingAttachment ? `0 left, resets ${resetLabel}` : undefined}
+                className={`flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest px-2.5 py-1 rounded-md transition-colors disabled:opacity-60 ${exhausted && !pendingAttachment ? "bg-slate-800 text-slate-500 cursor-not-allowed" : "text-white bg-emerald-600 hover:bg-emerald-500"}`}
               >
                 {autoAttaching ? <Loader2 size={12} className="animate-spin" /> : <Wand2 size={12} strokeWidth={1.8} />}
-                {exhausted ? `0 left, resets ${resetLabel}` : autoAttaching ? "Auto-attaching…" : "Auto-attach Assets"}
+                {autoAttaching ? "Auto-attaching…" : pendingAttachment ? "Retry asset update" : exhausted ? `0 left, resets ${resetLabel}` : "Auto-attach Assets"}
               </button>
             )}
             {canEdit && project?.production_mode === "commercial_ad" && (

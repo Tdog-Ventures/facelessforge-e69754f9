@@ -7,7 +7,7 @@ never silently replace that selection.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import math
 import re
 from typing import Any
@@ -136,6 +136,28 @@ def normalize_scene_timeline(
     return normalized
 
 
+def narration_fits_budget(
+    measured_seconds: float, budget_seconds: float, *, max_tempo_delta: float = 0.05,
+) -> bool:
+    """Inclusive tempo policy, evaluated without float subtraction at the boundary.
+
+    E.g. 2.375 / 2.5 is exactly the allowed -5%, but abs(0.95 - 1.0)
+    in binary floating point exceeds 0.05. Compare decimal duration differences
+    instead; no epsilon widens the policy to admit a value just outside it.
+    """
+    try:
+        measured, budget, limit = (Decimal(str(value)) for value in (
+            measured_seconds, budget_seconds, max_tempo_delta,
+        ))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    return (
+        measured.is_finite() and budget.is_finite() and limit.is_finite()
+        and measured > 0 and budget > 0 and limit >= 0
+        and abs(measured - budget) <= budget * limit
+    )
+
+
 def build_timing_status(
     *,
     project: dict[str, Any],
@@ -159,7 +181,7 @@ def build_timing_status(
         ratio = measured_vo / timing.narration_seconds
         if abs(drift) <= frame_tolerance:
             action = "ready"
-        elif abs(ratio - 1.0) <= max_tempo_delta:
+        elif narration_fits_budget(measured_vo, timing.narration_seconds, max_tempo_delta=max_tempo_delta):
             action = "tempo_fit"
         else:
             action = "rebuild"
@@ -186,23 +208,27 @@ def suggest_fitted_duration(
 ) -> int | None:
     """Suggest a target duration that fits measured narration (VO is master).
 
-    Returns the fitted whole-second target, or None when no in-bounds target
-    can bring the narration within tempo tolerance (caller must rebuild the
-    script/voiceover instead). Never raises on bad input — returns None.
+    Prefer the rounded voice-plus-intro duration. Check its adjacent integer and
+    legal range boundary as well: rounding alone can reject a valid fit (10s VO
+    plus 2.5s intro fails at 12s but fits at 13s). Return None when no in-bounds
+    whole-second target fits the tempo policy. Invalid audio returns None.
     """
     try:
         measured = float(voiceover_seconds or 0)
         intro = float(intro_seconds or 0)
     except (TypeError, ValueError):
         return None
-    if measured <= 0 or intro < 0:
+    total = measured + intro
+    if not math.isfinite(total) or measured <= 0 or intro < 0 or minimum > maximum:
         return None
-    fitted = int(round(measured + intro))
-    if fitted < minimum or fitted > maximum:
-        return None
-    narration = fitted - intro
-    if narration <= 0:
-        return None
-    if abs(measured / narration - 1.0) > max_tempo_delta:
-        return None
-    return fitted
+    # For a positive narration budget the tempo ratio is monotonic in the target.
+    # If a fit exists, one of the adjacent integers (clamped to the legal range)
+    # fits; more distant targets cannot rescue a rejected pair.
+    candidates = dict.fromkeys(
+        max(minimum, min(maximum, candidate))
+        for candidate in (round(total), math.floor(total), math.ceil(total))
+    )
+    for fitted in candidates:
+        if narration_fits_budget(measured, fitted - intro, max_tempo_delta=max_tempo_delta):
+            return fitted
+    return None

@@ -420,9 +420,18 @@ async def test_billing_failure_blocks_render_queue(monkeypatch):
         async def find_one(self, *_args, **_kwargs):
             raise RuntimeError("billing database unavailable")
 
+    class FakeProjects:
+        # Render lease acquisition reads and fences the project record.
+        async def find_one(self, *_args, **_kwargs):
+            return {"id": "project-1", "user_id": "user-1", "production_mode": "editorial"}
+
+        async def update_one(self, *_args, **_kwargs):
+            return type("R", (), {"matched_count": 1, "modified_count": 1})()
+
     class FakeDB:
         render_jobs = FakeRenderJobs()
         subscriptions = FailingSubscriptions()
+        projects = FakeProjects()
 
     monkeypatch.setattr(render, "get_db", lambda: FakeDB())
 

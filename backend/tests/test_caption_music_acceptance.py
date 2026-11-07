@@ -44,6 +44,25 @@ def test_over_tolerance_drift_blocks(tmp_path: Path):
             src, budget_seconds=31.5, sample_rate=48000, work_dir=tmp_path))
 
 
+@pytest.mark.parametrize("measured,accepted", [(2.375, True), (2.625, True), (2.374, False), (2.626, False)])
+def test_audio_fitter_honours_inclusive_five_percent_boundary(tmp_path: Path, measured, accepted):
+    from backend.app import audio_mix
+    src = _tone(tmp_path / "boundary.wav", measured)
+    if not accepted:
+        with pytest.raises(RuntimeError, match="exceeds tolerance"):
+            asyncio.run(audio_mix.fit_narration_to_budget(
+                src, budget_seconds=2.5, sample_rate=48000, work_dir=tmp_path))
+        assert not (tmp_path / "boundary_fitted.wav").exists()
+        return
+
+    fitted = asyncio.run(audio_mix.fit_narration_to_budget(
+        src, budget_seconds=2.5, sample_rate=48000, work_dir=tmp_path))
+    import wave
+    with wave.open(str(fitted), "rb") as audio:
+        assert audio.getframerate() == 48000
+        assert audio.getnframes() == 120_000
+
+
 def test_mux_uses_no_second_atempo_when_fitted():
     from backend.app import audio_mix
     filt = audio_mix.narration_mux_filter(fitted=True, tempo_ratio=1.012556)

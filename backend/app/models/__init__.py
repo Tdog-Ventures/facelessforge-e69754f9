@@ -184,6 +184,7 @@ class ThumbnailConcept(BaseModel):
 class ScriptUpdate(BaseModel):
     selected_hook: Optional[str] = None
     full_script: Optional[str] = None
+    retention_beats: Optional[List[str]] = None
     cta_block: Optional[str] = None
     source: Optional[str] = None  # "manual" | "ai_generated"; explicit wins, else preserved
 
@@ -261,6 +262,12 @@ class AssetStatusUpdate(BaseModel):
 class AutoAttachRequest(BaseModel):
     replace_existing: bool = False
     media_type: Literal["both", "videos", "photos"] = "both"
+    # Client-generated key for this operation. Replacement requires one; a repeated
+    # request with the same key replays the stored outcome instead of attaching or
+    # charging again, and a failed one resumes without re-charging finished scenes.
+    idempotency_key: Optional[str] = Field(
+        default=None, min_length=8, max_length=80, pattern=r"^[A-Za-z0-9._:-]+$",
+    )
 
 
 class GenerateThumbnailImagesRequest(BaseModel):

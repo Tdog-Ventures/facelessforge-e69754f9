@@ -299,6 +299,19 @@ export default function CreateProjectPage() {
                   <span>I verified this CTA with the client.</span>
                 </label>
               </Field>
+              <Field label="Brand assets supplied" name="brand_assets_supplied" hint="Feeds the release grounding gate" errors={errors}>
+                <label htmlFor="field-input-brand_assets_supplied" className="flex items-center gap-2 text-sm text-[var(--ff-text)]">
+                  <input
+                    id="field-input-brand_assets_supplied"
+                    type="checkbox"
+                    data-testid="field-brand-assets"
+                    checked={form.brand_assets_supplied}
+                    onChange={(e) => update("brand_assets_supplied", e.target.checked)}
+                    className={checkboxClass}
+                  />
+                  <span>The client supplied their own brand assets (logo, footage, product shots).</span>
+                </label>
+              </Field>
             </div>
           )}
 

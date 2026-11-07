@@ -4,13 +4,14 @@ Incident: two E2E renders each needed manual target_duration patches
 (27->30, 30->35) because preflight hard-failed "Voiceover fits selected
 duration" whenever measured narration drifted >5% from the selection.
 The loop below moves the selection to fit measured narration within the
-30..3600s product bounds; anything else still fails closed.
+5..3600s product bounds; anything else still fails closed.
 """
 import pytest
 
 from app import render
 from app.generation import _finalize_script
 from app.timing import suggest_fitted_duration
+from backend.tests.fake_db import FakeCollection, FakeDatabase
 
 
 def test_suggest_fits_measured_narration():
@@ -52,22 +53,19 @@ def test_suggest_duration_autofit_quiet_when_fitting_or_missing():
 def _fake_db(project, voice):
     updates = []
 
-    class FakeProjects:
-        async def find_one(self, *_a, **_k):
-            return dict(project) if project else None
+    db = FakeDatabase(
+        projects=FakeCollection("projects", [project] if project else []),
+        assets=FakeCollection("assets", [{**voice, "project_id": project["id"]}] if voice else []),
+    )
+    update_project = db.projects.update_one
 
-        async def update_one(self, _q, update):
+    async def tracked_update(query, update, **kwargs):
+        if "target_duration" in update.get("$set", {}):
             updates.append(update)
+        return await update_project(query, update, **kwargs)
 
-    class FakeAssets:
-        async def find_one(self, *_a, **_k):
-            return dict(voice) if voice else None
-
-    class FakeDB:
-        projects = FakeProjects()
-        assets = FakeAssets()
-
-    return FakeDB(), updates
+    db.projects.update_one = tracked_update
+    return db, updates
 
 
 @pytest.mark.asyncio

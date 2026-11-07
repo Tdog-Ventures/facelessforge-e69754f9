@@ -255,18 +255,21 @@ async def check_b_silence_gaps(
     The render contract may intentionally place a silent title intro before
     narration starts (DEFAULT_INTRO_SECONDS=2.5).  A fixed 5% skip is shorter
     than that intro on short videos and falsely fails a correct render.
-    When ``intro_seconds`` is supplied it is the only leading silence allowed;
-    gaps that run past the intro, or start later, are still blockers.
+    When ``intro_seconds`` is supplied it replaces the 5% fallback entirely
+    (combining both windows would reopen interior gaps on long renders), and
+    only silence that begins at the start of the render is eligible for that
+    leading window: gaps that start after audible audio, run past the intro,
+    or start later are still blockers.
     """
     video_dur = await ffprobe_video_duration(video_path)
-    legacy_skip_until = video_dur * SILENCE_SKIP_PCT
     if intro_seconds is None:
-        allowed_leading_end = legacy_skip_until
+        allowed_leading_end = video_dur * SILENCE_SKIP_PCT
     else:
-        allowed_leading_end = max(
-            legacy_skip_until,
-            max(0.0, float(intro_seconds)) + SILENCE_INTRO_TOLERANCE,
-        )
+        # The intro contract is authoritative when supplied: keeping
+        # max(legacy, intro) reopens interior gaps on long renders (a 3s gap
+        # at 6-9s would pass a 300s render whose intro is 2.5s, because 5%
+        # of 300s is 15s).
+        allowed_leading_end = max(0.0, float(intro_seconds)) + SILENCE_INTRO_TOLERANCE
 
     stdout, stderr, rc = await _run_cmd(
         FFMPEG_BIN,
@@ -279,9 +282,17 @@ async def check_b_silence_gaps(
         pass  # continue; silencedetect often exits non-zero with -f null
 
     gaps = _parse_silence_gaps(stderr)
+    # Zero gaps >=2s outside the intentional intro window. Only silence that
+    # *starts at the beginning of the render* (within the same encoder-drift
+    # tolerance used for the intro boundary) is leading silence eligible for
+    # that window — brief audible audio followed by an in-window gap, or any
+    # interior gap, remains a blocker.
     offending = [
         g for g in gaps
-        if g["end"] > allowed_leading_end and g["duration"] >= SILENCE_MIN_DURATION
+        if g["duration"] >= SILENCE_MIN_DURATION and not (
+            g["start"] <= SILENCE_INTRO_TOLERANCE
+            and g["end"] <= allowed_leading_end
+        )
     ]
 
     passed = len(offending) == 0
