@@ -147,6 +147,36 @@ def test_auto_attach_filters_near_duplicates_and_attaches(monkeypatch):
     assert _balance(db) == 6
 
 
+
+def test_auto_attach_retries_alternative_queries_when_primary_has_one_asset(monkeypatch):
+    """A single stock result must not end the search for a 10s scene needing four."""
+    db = _db()
+    queries = []
+
+    async def search(*_args, **kwargs):
+        query = str(kwargs.get("query") or (_args[0] if _args else ""))
+        queries.append(query)
+        ix = len(queries)
+        return {"results": [{
+            "external_id": f"alternative-{ix}", "preview_url": f"preview-{ix}",
+            "title": f"Distinct footage subject {ix} scene view",
+            "media_type": "stock_video", "source": "pexels",
+        }]}
+
+    monkeypatch.setattr(api_routes.stock_service, "search_stock_aggregated", search, raising=False)
+    monkeypatch.setattr(api_routes.stock_service, "is_mock_mode", lambda: True)
+    monkeypatch.setattr(api_routes, "get_db", lambda: db)
+    db.scenes.docs[0]["search_terms"] = [
+        "video editing timeline", "editing studio workspace", "creative production desk",
+    ]
+    response = asyncio.run(_attach())
+
+    assert len(queries) >= 3, queries
+    assert response["attached"] >= 3, response
+    assert len(db.assets.docs) == response["attached"]
+    assert len({a["external_id"] for a in db.assets.docs}) == response["attached"]
+
+
 def test_topup_does_not_re_attach_existing_assets(monkeypatch):
     existing = _stock("asset-e1", "ext0", "Video editing timeline interface")
     db = _db(assets=[existing])
