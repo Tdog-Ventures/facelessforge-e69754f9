@@ -1797,14 +1797,35 @@ async def _attach_scene_stock(db, *, lease, project, scene, replace_existing, us
     if needs_search:
         remaining = needed if replace_existing else max(1, needed - len(originals))
         per_page = min(max(remaining * 2, remaining + 5), 40)
-        try:
-            query = _auto_stock_query(project, scene)
-            if hasattr(stock_service, "search_stock_aggregated"):
-                result = await stock_service.search_stock_aggregated(query=query, media_type="both", per_page=per_page)
-            else:
-                result = await stock_service.search_stock(query, "both", per_page)
-        except Exception as exc:  # noqa: BLE001
-            search_error = exc
+        query = _auto_stock_query(project, scene)
+        # Stock providers can return only one result for an over-specific query.
+        # Search alternative scene terms before accepting a partial selection.
+        # The commit phase still deduplicates, fences writers and retains old assets.
+        candidates = []
+        attempted = set()
+        fallbacks = list(scene.get("search_terms") or []) if isinstance(scene.get("search_terms"), list) else []
+        fallbacks.append(scene.get("visual_direction") or "")
+        fallbacks.append(project.get("topic") or "")
+        for term in [query, *fallbacks]:
+            term = str(term or "").strip()
+            if not term or term.casefold() in attempted:
+                continue
+            attempted.add(term.casefold())
+            try:
+                if hasattr(stock_service, "search_stock_aggregated"):
+                    found = await stock_service.search_stock_aggregated(query=term, media_type="both", per_page=per_page)
+                else:
+                    found = await stock_service.search_stock(term, "both", per_page)
+                candidates.extend((found or {}).get("results") or [])
+                # Leave headroom for duplicates already used in the scene/project.
+                if len(_dedup_by_preview(candidates)) >= remaining * 2:
+                    break
+            except Exception as exc:  # noqa: BLE001
+                search_error = exc
+        if candidates:
+            result = {"results": candidates}
+            search_error = None
+
 
     async def commit(fenced_db):
         return await _attach_scene_stock_committing(
