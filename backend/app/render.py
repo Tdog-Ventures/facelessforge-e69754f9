@@ -495,11 +495,27 @@ def validate_prerequisites(project: dict, script: dict | None,
         for item in grounding["checklist"]:
             _add(item["key"], item["label"], item["ok"], "Resolve this commercial grounding requirement before rendering.")
     else:
-        _add("scene_assets", "Scene visuals attached", coverage >= 0.5,
-             f"{len(covered_ids)}/{len(scenes)} scenes have stock visuals. Empty scenes will use caption fallback frames.")
+        # A single stock image in each 30-second scene is NOT sufficient.
+        # Gate render-readiness on visual segment coverage (max 3s per segment).
+        # Legacy mock items are never valid footage for customer-facing videos.
+        valid = [a for a in scene_assets if str(a.get("source") or "").lower() != "mock"
+                 and a.get("status") != "rejected"]
+        counts = {}
+        for asset in valid:
+            counts[asset["scene_id"]] = counts.get(asset["scene_id"], 0) + 1
+        needs = {
+            scene.get("id"): max(1, math.ceil(float(scene.get("duration") or 30) / 3))
+            for scene in scenes if scene.get("id")
+        }
+        missing = sum(max(0, count - counts.get(sid, 0)) for sid, count in needs.items())
+        total_required = sum(needs.values())
+        _add("scene_assets", "Scene visuals meet 3-second pacing",
+             bool(needs) and missing == 0,
+             f"{len(valid)}/{total_required} usable visual segments; {missing} still missing. "
+             "Run auto-attach top-up or select relevant footage before rendering.")
 
     return {
-        "ok": all(c["ok"] for c in checklist if c["key"] != "scene_assets"),
+        "ok": all(c["ok"] for c in checklist),
         "issues": issues,
         "checklist": checklist,
         "scene_coverage": round(coverage, 2),
