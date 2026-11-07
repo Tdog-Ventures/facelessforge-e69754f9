@@ -119,7 +119,23 @@ export default function ProjectDetailPage() {
     );
   }
 
-  const { project, script, scenes, metadata, assets, render_job, share, timing } = view;
+  // A mutation may return an incomplete payload (or a non-project response).
+  // Never let it erase the last valid project and crash the entire page.
+  if (!view?.project) {
+    return (
+      <AppShell>
+        <TopBar title="Project unavailable" />
+        <div className="p-8 space-y-4 text-sm text-zinc-300">
+          <p>Project details could not be loaded. Your saved work has not been deleted.</p>
+          <button type="button" onClick={fetchView} className="text-[#00E5FF] underline">
+            Reload project
+          </button>
+        </div>
+      </AppShell>
+    );
+  }
+
+  const { project, script, scenes = [], metadata, assets = [], render_job, share, timing } = view;
 
   return (
     <AppShell>
@@ -320,7 +336,10 @@ export default function ProjectDetailPage() {
               assets={assets}
               hasScript={!!script}
               canEdit={canEdit}
-              onChange={setView}
+              onChange={(data) => {
+                if (data?.project) setView(data);
+                else fetchView();
+              }}
             />
           )}
           {tab === "render" && (

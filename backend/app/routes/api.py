@@ -45,6 +45,8 @@ from .. import generation as gen
 from .. import stock as stock_service
 from .. import thumbnail_images as thumb_images
 from ..asset_dedupe import filter_distinct_titles
+from ..asset_relevance import relevant_candidates
+from ..scene_terms import compact_stock_query
 from .. import asset_commit, project_lease
 
 
@@ -105,46 +107,31 @@ def _extract_core_query(scene: dict) -> str:
     return "nature cinematic"
 
 def _build_scene_stock_query(scene: dict, project: dict, override: str | None = None) -> str:
-    """Do NOT truncate query server-side. Use full body.query or scene.search_terms joined.
+    """Use visible stock-footage subjects, not complete cinematic instructions.
 
-    FIX: was using visual_direction sliced to 8 words / cinematic suffix only.
-    Now prefers full search_terms joined (first 3 terms) preserving full intent,
-    else visual trimmed to 120 chars, else project topic.
-    Priority: explicit override > search_terms (first 3) > visual (120 chars) > project topic.
+    A manually entered query remains untouched. Generated search terms are
+    alternatives, NOT three phrases to concatenate into an impossible match.
     """
     if override and override.strip():
         return override.strip()
     terms = scene.get("search_terms") or []
-    if terms:
-        cleaned: list[str] = []
-        for t in terms:
-            c = " ".join(str(t or "").split()).strip()
-            if not c:
-                continue
-            # Skip single-word leak artifacts like "make", "small", "imagine"
-            if len(c.split()) == 1 and c.lower() in _SCENE_LEAK_STOP:
-                continue
-            if len(c.split()) == 1 and len(c) < 4:
-                continue
-            cleaned.append(c)
-            if len(cleaned) >= 3:
-                break
-        if cleaned:
-            return " ".join(cleaned)
-        # Fallback: raw first 3 terms if filtering removed all
-        raw = [str(t).strip() for t in terms if str(t).strip()][:3]
-        if raw:
-            return " ".join(raw)
-    visual = _clean_visual_full(scene.get("visual_direction") or "")
-    if visual:
-        # Frontend uses visual.trim().slice(0,120) — mirror here, no 8-word truncation
-        return visual.strip()[:120].strip()
-    # Fallback to project topic
-    base = (project.get("topic") or project.get("niche") or "stock").strip()
-    base = " ".join(base.split())
-    if len(base.split()) < 2:
-        base = "nature cinematic"
-    return base.strip()
+    if isinstance(terms, str):
+        terms = [terms]
+    for term in terms:
+        concise = compact_stock_query(term)
+        if len(concise.split()) >= 2:
+            return concise
+    for candidate in (
+        scene.get("visual_direction"),
+        scene.get("visual"),
+        project.get("topic"),
+        project.get("niche"),
+    ):
+        concise = compact_stock_query(candidate)
+        if concise:
+            return concise
+    return "nature landscape"
+
 
 def _build_ordered_stock_queries(scene: dict, project: dict) -> list[dict]:
     """Generate exactly 3 ordered query objects per scene: pexels_video (cinematic full), pixabay_video (shorter core), unsplash_image (shortest).
@@ -1454,7 +1441,10 @@ async def find_scene_assets(project_id: str, scene_id: str, body: FindAssetsRequ
     query = _build_scene_stock_query(scene, project, body.query)
     # Aggregated multi-source — merges Pexels + Pixabay + Unsplash, preserves source field per item
     if hasattr(stock_service, "search_stock_aggregated"):
-        return await stock_service.search_stock_aggregated(query, body.media_type, body.per_page)
+        return await stock_service.search_stock_aggregated(
+            query, body.media_type, body.per_page,
+            orientation="portrait" if project.get("aspect_ratio") == "9:16" else None,
+        )
     return await stock_service.search_stock(query, body.media_type, body.per_page)
 
 
@@ -1465,6 +1455,8 @@ async def attach_scene_asset(project_id: str, scene_id: str, body: StockAttachRe
     _ensure_project_access(project, user, write=True)
     if user["role"] == "viewer":
         raise HTTPException(status_code=403, detail="Viewer cannot attach assets")
+    if str(body.source or "").lower() == "mock":
+        raise HTTPException(status_code=422, detail="Mock footage cannot be attached to a production video.")
     scene = await db.scenes.find_one({"id": scene_id, "project_id": project_id}, {"_id": 0})
     if not scene:
         raise HTTPException(status_code=404, detail="Scene not found")
@@ -1763,16 +1755,7 @@ async def _debit_scene(db, *, store: dict, user_id: str, asset_ids: list, reason
 
 
 def _auto_stock_query(project: dict, scene: dict) -> str:
-    terms = scene.get("search_terms") or []
-    visual = (scene.get("visual_direction") or scene.get("visual") or "").strip()
-    if terms and isinstance(terms, list) and str(terms[0]).strip():
-        raw = str(terms[0]).strip()[:60]
-    elif visual:
-        raw = visual.split(",")[0].strip()[:60] if "," in visual else visual.split(".")[0].strip()[:60]
-        raw = raw or visual[:60]
-    else:
-        raw = (project.get("topic") or "ancient Rome").strip()[:60]
-    return raw.strip() or "ancient Rome"
+    return _build_scene_stock_query(scene, project)
 
 
 async def _asset_write(db, lease, collection, method, *args, **kwargs):
@@ -1797,14 +1780,44 @@ async def _attach_scene_stock(db, *, lease, project, scene, replace_existing, us
     if needs_search:
         remaining = needed if replace_existing else max(1, needed - len(originals))
         per_page = min(max(remaining * 2, remaining + 5), 40)
-        try:
-            query = _auto_stock_query(project, scene)
-            if hasattr(stock_service, "search_stock_aggregated"):
-                result = await stock_service.search_stock_aggregated(query=query, media_type="both", per_page=per_page)
-            else:
-                result = await stock_service.search_stock(query, "both", per_page)
-        except Exception as exc:  # noqa: BLE001
-            search_error = exc
+        query = _auto_stock_query(project, scene)
+        # Stock providers can return only one result for an over-specific query.
+        # Search alternative scene terms before accepting a partial selection.
+        # The commit phase still deduplicates, fences writers and retains old assets.
+        candidates = []
+        attempted = set()
+        fallbacks = list(scene.get("search_terms") or []) if isinstance(scene.get("search_terms"), list) else []
+        fallbacks.append(scene.get("visual_direction") or "")
+        fallbacks.append(project.get("topic") or "")
+        for term in [query, *fallbacks]:
+            term = compact_stock_query(term)
+            if not term or term.casefold() in attempted:
+                continue
+            attempted.add(term.casefold())
+            try:
+                if hasattr(stock_service, "search_stock_aggregated"):
+                    found = await stock_service.search_stock_aggregated(
+                        query=term, media_type="both", per_page=per_page,
+                        orientation="portrait" if project.get("aspect_ratio") == "9:16" else None,
+                    )
+                else:
+                    found = await stock_service.search_stock(term, "both", per_page)
+                candidates.extend((found or {}).get("results") or [])
+                # Leave headroom for duplicates already used in the scene/project.
+                if len(_dedup_by_preview(candidates)) >= remaining * 2:
+                    break
+            except Exception as exc:  # noqa: BLE001
+                search_error = exc
+            # A stock lookup may outlive its lease. Stop issuing fallback
+            # provider requests immediately when ownership has transferred.
+            if not await project_lease.renew(
+                db, lease, ttl_seconds=project_lease.ASSET_LEASE_TTL_SECONDS,
+            ):
+                break
+        if candidates:
+            result = {"results": candidates}
+            search_error = None
+
 
     async def commit(fenced_db):
         return await _attach_scene_stock_committing(
@@ -1925,6 +1938,9 @@ async def _attach_scene_stock_committing(
             continue
         filtered.append(r)
     unique = _dedup_by_preview(filtered)
+    unique, irrelevant = relevant_candidates(unique, scene, query)
+    for rejected in irrelevant:
+        _detail("skipped", reason="irrelevant_or_unverified", title=rejected.get("title") or rejected.get("name"))
     unique, near_duplicates = filter_distinct_titles(unique, visual_titles)
     for dup in near_duplicates:
         outcome["near_duplicates"] += 1
@@ -1932,8 +1948,8 @@ async def _attach_scene_stock_committing(
     unique = unique[:remaining]
     if not unique:
         # Nothing usable: the scene keeps its current selection untouched.
-        outcome["reason"] = "no_stock_results"
-        _detail("failed", reason="no_stock_results")
+        outcome["reason"] = "no_relevant_stock"
+        _detail("failed", reason="no_relevant_stock")
         return outcome
 
     new_docs: list[dict] = []
@@ -2019,7 +2035,14 @@ async def _attach_scene_stock_committing(
         visual_titles.append(doc["name"])
         _detail("attached", asset_id=doc["id"], order=doc["order"], start_offset=doc["start_offset"])
     outcome["attached"] += len(committed)
-    if carried_committed or committed:
+    # Successful API writes do not imply the scene meets the 3-second pacing rule.
+    # Keep any good clips as a resumable top-up, but report incomplete coverage.
+    final_count = (0 if replace_existing else len(originals)) + len(committed)
+    if final_count < num_needed:
+        outcome["status"] = "failed"
+        outcome["reason"] = "incomplete_visual_coverage"
+        _detail("failed", reason="incomplete_visual_coverage", required=num_needed, available=final_count)
+    elif carried_committed or committed:
         outcome["status"] = "attached"
     else:
         outcome["status"] = "skipped"

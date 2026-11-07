@@ -323,16 +323,9 @@ def _normalise_pexels_video(v: dict, query: str) -> Optional[dict]:
     width = int(v.get("width") or 0)
     height = int(v.get("height") or 0)
 
-    # Constitution §4.1: Reject non-landscape (height >= width)
-    if height >= width:
-        logger.debug(
-            "Rejecting Pexels video %s: height=%d >= width=%d (not landscape)",
-            v.get("id"), height, width,
-        )
-        return None
-
-    # Constitution §4.1: Reject files narrower than 1280px
-    if width < MIN_VIDEO_WIDTH:
+    # Permit portrait 9:16 footage. Reject undersized frames, not orientation.
+    # Portrait clips are preferable to massive blurred bars in portrait renders.
+    if min(width, height) < 720 or max(width, height) < 1280:
         logger.debug(
             "Rejecting Pexels video %s: width=%d < %d (too narrow)",
             v.get("id"), width, MIN_VIDEO_WIDTH,
@@ -470,8 +463,8 @@ async def _search_pexels(
             min_dur = int(os.environ.get("PEXELS_MIN_VIDEO_DURATION", "10"))
             if min_dur > 0:
                 video_params["min_duration"] = min_dur
-            # Force landscape — no caller override permitted
-            video_params["orientation"] = "landscape"
+            # Project-aware: portrait assets for portrait output; legacy defaults to landscape.
+            video_params["orientation"] = orientation if orientation in ("portrait", "landscape", "square") else "landscape"
             r = await client.get(f"{base}/videos/search", params=video_params)
             if r.status_code == 429:
                 logger.warning("Pexels videos rate-limited (429) query=%r", query[:60])
@@ -583,9 +576,7 @@ def _normalise_pixabay_video(hit: dict, query: str) -> Optional[dict]:
         return None
     width = int(best.get("width") or 0)
     height = int(best.get("height") or 0)
-    if height >= width:
-        return None
-    if width < MIN_VIDEO_WIDTH:
+    if min(width, height) < 720 or max(width, height) < 1280:
         return None
     return {
         "source": "pixabay",
@@ -757,6 +748,8 @@ async def search_stock_aggregated(
     query: str,
     media_type: MediaType = "both",
     per_page: int = 12,
+    *,
+    orientation: Optional[str] = None,
 ) -> dict:
     """Aggregated search across Pexels + Pixabay + Unsplash.
 
@@ -815,7 +808,7 @@ async def search_stock_aggregated(
         if src == "unsplash" and media_type == "both":
             mt = "photos"
         if src == "pexels":
-            tasks.append(_search_pexels(query, mt, per_page))
+            tasks.append(_search_pexels(query, mt, per_page, orientation=orientation))
             task_sources.append(src)
         elif src == "pixabay":
             tasks.append(_search_pixabay(query, mt, per_page))

@@ -18,26 +18,40 @@ export default function StockAssetModal({ open, onOpenChange, projectId, scene, 
   const [attached, setAttached] = useState(new Set());
   const [searchTerms, setSearchTerms] = useState([]);
 
-  function buildQuery(scene){
-    const BAD=["stock b-roll matching the narration","b-roll matching","matching the narration","cinematic b-roll"];
-    let q=(scene.visual_direction||"").trim();
-    const isBad=!q || BAD.some(b=>q.toLowerCase().includes(b)) || q.length<25;
-    if(isBad){ q=scene.description||scene.narration||scene.text||scene.voiceover_text||scene.topic||""; }
-    return q.split(".")[0].slice(0,120).trim() || "cinematic b-roll";
+  function compactQuery(value) {
+    const noise = new Set(
+      "a an the of in on at into with for from and to cinematic b-roll footage stock video videos photo photos images image shot shots scene scenes camera angle zoom pan panning tracking closeup wide ultra high resolution 4k 8k hd slow motion dramatic beautiful stunning epic detailed realistic professional showing featuring capturing matching narration lens lighting composition".split(" ")
+    );
+    const words = String(value || "").split(/[.;]/)[0].match(/[A-Za-z0-9]+(?:['-][A-Za-z0-9]+)*/g) || [];
+    return words.filter(w => !noise.has(w.toLowerCase())).slice(0, 5).join(" ");
+  }
+
+  function buildQuery(currentScene) {
+    const terms = Array.isArray(currentScene?.search_terms) ? currentScene.search_terms : [];
+    const options = [...terms, currentScene?.visual_direction, currentScene?.visual, currentScene?.topic];
+    for (const option of options) {
+      const short = compactQuery(option);
+      if (short.split(/\\s+/).length >= 2) return short;
+    }
+    return "nature landscape";
   }
 
   useEffect(() => {
     if (open && scene) {
       const q = buildQuery(scene);
       setQuery(q);
-      setSearchTerms(scene.search_terms || []);
+      setSearchTerms([...new Set(
+        (Array.isArray(scene.search_terms) ? scene.search_terms : [])
+          .map(compactQuery)
+          .filter(t => t.split(/\\s+/).length >= 2)
+      )].slice(0, 4));
       // auto search on open
       doSearch(q, mediaType);
     }
   }, [open, scene?.id]);
 
   const doSearch = async (q, type) => {
-    const finalQuery = (q || query || "").trim().slice(0, 80) || buildQuery(scene);
+    const finalQuery = (q || query || "").trim() || buildQuery(scene);
     const mt = type || mediaType;
     setLoading(true);
     try {
