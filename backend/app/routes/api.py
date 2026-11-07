@@ -45,6 +45,7 @@ from .. import generation as gen
 from .. import stock as stock_service
 from .. import thumbnail_images as thumb_images
 from ..asset_dedupe import filter_distinct_titles
+from ..asset_relevance import relevant_candidates
 from ..scene_terms import compact_stock_query
 from .. import asset_commit, project_lease
 
@@ -1923,6 +1924,9 @@ async def _attach_scene_stock_committing(
             continue
         filtered.append(r)
     unique = _dedup_by_preview(filtered)
+    unique, irrelevant = relevant_candidates(unique, scene, query)
+    for rejected in irrelevant:
+        _detail("skipped", reason="irrelevant_or_unverified", title=rejected.get("title") or rejected.get("name"))
     unique, near_duplicates = filter_distinct_titles(unique, visual_titles)
     for dup in near_duplicates:
         outcome["near_duplicates"] += 1
@@ -1930,8 +1934,8 @@ async def _attach_scene_stock_committing(
     unique = unique[:remaining]
     if not unique:
         # Nothing usable: the scene keeps its current selection untouched.
-        outcome["reason"] = "no_stock_results"
-        _detail("failed", reason="no_stock_results")
+        outcome["reason"] = "no_relevant_stock"
+        _detail("failed", reason="no_relevant_stock")
         return outcome
 
     new_docs: list[dict] = []
@@ -2017,7 +2021,14 @@ async def _attach_scene_stock_committing(
         visual_titles.append(doc["name"])
         _detail("attached", asset_id=doc["id"], order=doc["order"], start_offset=doc["start_offset"])
     outcome["attached"] += len(committed)
-    if carried_committed or committed:
+    # Successful API writes do not imply the scene meets the 3-second pacing rule.
+    # Keep any good clips as a resumable top-up, but report incomplete coverage.
+    final_count = (0 if replace_existing else len(originals)) + len(committed)
+    if final_count < num_needed:
+        outcome["status"] = "failed"
+        outcome["reason"] = "incomplete_visual_coverage"
+        _detail("failed", reason="incomplete_visual_coverage", required=num_needed, available=final_count)
+    elif carried_committed or committed:
         outcome["status"] = "attached"
     else:
         outcome["status"] = "skipped"
