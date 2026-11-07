@@ -18,6 +18,37 @@ _STOP.update({"might", "obsolete", "coming", "year", "years", "small", "business
 
 CINEMATIC_SUFFIX = "4k slow motion b-roll cinematic"
 
+# These describe how to film a shot, not what a stock library should find.
+_STOCK_SEARCH_NOISE = set("""
+a an the of in on at into with for from and to as is are was were being
+cinematic cinematic-style b-roll footage stock video videos photo photos image
+images shot shots scene scenes camera angle zoom pan panning dolly tracking
+closeup close-up wide ultra high resolution 4k 8k hd slow motion dramatic
+beautiful stunning epic detailed realistic photorealistic professional showing
+featuring capturing depicts depicting visual visuals illustration
+""".split())
+
+
+def compact_stock_query(value: str, max_words: int = 5) -> str:
+    """Short footage-search keywords; keep detailed visual_direction separately.
+
+    Search APIs match visible subjects/actions, not a cinematic prompt.
+    Preserve word order and named entities (e.g. One Day International cricket).
+    """
+    raw = str(value or "").split(".")[0].split(";")[0]
+    words = re.findall(r"[A-Za-z0-9]+(?:['-][A-Za-z0-9]+)*", raw)
+    meaningful = []
+    for word in words:
+        if word.lower() in _STOCK_SEARCH_NOISE or word.lower() in _STOP:
+            continue
+        if word.lower() in {"matching", "narration", "lens", "lighting", "composition"}:
+            continue
+        meaningful.append(word)
+        if len(meaningful) >= max_words:
+            break
+    return " ".join(meaningful)
+
+
 def _clean_visual(visual: str) -> str:
     """Preserve full Visual including commas, normalize whitespace only. No truncation."""
     if not visual:
