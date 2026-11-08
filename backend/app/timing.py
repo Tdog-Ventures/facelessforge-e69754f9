@@ -232,3 +232,59 @@ def suggest_fitted_duration(
         if narration_fits_budget(measured, fitted - intro, max_tempo_delta=max_tempo_delta):
             return fitted
     return None
+
+
+def contiguous_timeline_from_durations(scenes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Abut scene ranges using each scene's stored duration.
+
+    Per-scene voiceover used to extend ``end_time`` from the old start and
+    leave the next scene's start in place, so ranges overlapped and the last
+    end no longer matched the sum of durations. This rewrite only repairs
+    those timestamps. It does not change narration text or the project's
+    selected target duration.
+    """
+    ordered = sorted(
+        scenes or [],
+        key=lambda scene: (int(scene.get("scene_number") or 0), str(scene.get("id") or "")),
+    )
+    cursor = 0.0
+    repaired: list[dict[str, Any]] = []
+    for scene in ordered:
+        item = dict(scene)
+        duration = _positive_seconds(item.get("duration"))
+        if duration is None:
+            end = _nonnegative_seconds(item.get("end_time"))
+            start = _nonnegative_seconds(item.get("start_time"))
+            if end is not None and start is not None and end > start:
+                duration = end - start
+        if duration is None:
+            duration = 30.0
+        duration = round(duration, 2)
+        item["start_time"] = round(cursor, 2)
+        item["end_time"] = round(cursor + duration, 2)
+        item["duration"] = duration
+        start_frame = int(round(item["start_time"] * DEFAULT_FPS))
+        end_frame = int(round(item["end_time"] * DEFAULT_FPS))
+        item["start_frame"] = start_frame
+        item["end_frame"] = end_frame
+        item["duration_frames"] = end_frame - start_frame
+        cursor += duration
+        repaired.append(item)
+    return repaired
+
+
+def _nonnegative_seconds(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number
+
+
+def _positive_seconds(value: Any) -> float | None:
+    number = _nonnegative_seconds(value)
+    if number is None or number <= 0:
+        return None
+    return number

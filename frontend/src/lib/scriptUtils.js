@@ -33,6 +33,12 @@ export function validateManualScript(text) {
   return { ok: true, error: null, words, seconds: estimateDurationSeconds(words), cleaned };
 }
 
+export function chapterFields(chapter) {
+  const timestamp = chapter?.timestamp || chapter?.time || "";
+  const title = chapter?.title || chapter?.label || "";
+  return { timestamp, title };
+}
+
 export function invalidationNotice(data) {
   const inv = data?.script_invalidated;
   if (!inv) return null;

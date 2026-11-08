@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Sparkles, Save, Loader2, PenLine } from "lucide-react";
-import { api, formatApiError } from "../lib/api";
+import { api, formatApiError, UNBOUNDED_TIMEOUT } from "../lib/api";
 import { invalidationNotice } from "../lib/scriptUtils";
 import CopyButton from "./CopyButton";
 import ManualScriptForm from "./ManualScriptForm";
@@ -65,7 +65,7 @@ export default function ScriptPanel({ projectId, script, canEdit, onChange }) {
     setGenerating(true);
     toast.loading("Generating with DeepSeek…", { id: "gen-script" });
     try {
-      const { data } = await api.post(`/projects/${projectId}/generate-script`);
+      const { data } = await api.post(`/projects/${projectId}/generate-script`, {}, UNBOUNDED_TIMEOUT);
       // Persist immediately to store + backend + localStorage
       const newScript = data?.script || data;
       if (newScript?.full_script) {
@@ -80,6 +80,8 @@ export default function ScriptPanel({ projectId, script, canEdit, onChange }) {
       }
       onChange(data);
       toast.success("Script generated", { id: "gen-script" });
+      const notice = invalidationNotice(data);
+      if (notice) toast.info("Downstream assets need regeneration", { description: notice, duration: 8000 });
     } catch (err) {
       toast.error("Generation failed", { id: "gen-script", description: formatApiError(err.response?.data?.detail) || err.message });
     } finally {

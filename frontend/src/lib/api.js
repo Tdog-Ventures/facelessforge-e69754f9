@@ -7,7 +7,13 @@ export { BACKEND_URL };
 export const api = axios.create({
   baseURL: API,
   withCredentials: true,
+  // Ordinary reads and writes. Uploads and generation pass their own timeout
+  // because a 60 MB file or a long script can take more than two minutes.
+  timeout: 120000,
 });
+
+// Axios treats 0 as no timeout.
+export const UNBOUNDED_TIMEOUT = { timeout: 0 };
 
 export function formatApiError(detail) {
   if (detail == null) return "Something went wrong. Please try again.";

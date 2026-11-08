@@ -201,6 +201,7 @@ class MetadataUpdate(BaseModel):
     description: Optional[str] = None
     tags: Optional[List[str]] = None
     pinned_comment: Optional[str] = None
+    chapters: Optional[List[dict]] = None
 
 
 # ---------- Provider settings ----------

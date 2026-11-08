@@ -58,7 +58,7 @@ from .storage import get_storage
 from .subtitles import write_srt, write_srt_from_cues, write_srt_from_words
 from .transcribe import transcribe_words
 from .visual_query import truncate_words
-from .timing import TimingContract, build_timing_status, normalize_scene_timeline
+from .timing import TimingContract, build_timing_status, narration_fits_budget, normalize_scene_timeline
 from .timing import (
     MIN_AUTOFIT_MOVE_SECONDS,
     suggest_fitted_duration,
@@ -1310,6 +1310,8 @@ async def _resolve_audio(project: dict, scenes: list[dict], assets: list[dict],
 
     Skips mock (silent) voiceover assets — callers fall through to the
     music-bed-only mux branch so the final MP4 actually has audible audio.
+    A selected real voiceover that cannot be loaded or concatenated raises.
+    Writing a silent master in that case used to look like a successful export.
     """
     def _is_real(a: dict) -> bool:
         return bool(a) and not a.get("mock") and a.get("source") != "mock_tts"
@@ -1319,8 +1321,13 @@ async def _resolve_audio(project: dict, scenes: list[dict], assets: list[dict],
                  and a.get("id") == project.get("selected_voiceover_asset_id")), None)
     if _is_real(full):
         local = await _ensure_audio_local(full, work_dir, "voiceover_full")
-        if local:
-            return local
+        if not local:
+            # Do not substitute per-scene files. They are a different narration.
+            raise RuntimeError(
+                "Selected full-script voiceover could not be loaded; "
+                "render stopped instead of using scene audio or a silent video."
+            )
+        return local
 
     scene_voices_by_id: dict[str, dict] = {}
     for s in scenes:
@@ -1333,7 +1340,31 @@ async def _resolve_audio(project: dict, scenes: list[dict], assets: list[dict],
             ss, key=lambda x: str(x.get("created_at") or ""))
         scene_voices_by_id[s["id"]] = sel
     if scene_voices_by_id:
+        misaligned: list[str] = []
+        for scene in sorted(scenes, key=lambda item: item.get("scene_number", 0)):
+            voice = scene_voices_by_id.get(scene.get("id"))
+            if not voice:
+                continue
+            try:
+                measured = float(voice.get("duration") or 0)
+                budget = float(scene.get("duration") or 0)
+            except (TypeError, ValueError):
+                continue
+            if measured <= 0 or budget <= 0:
+                continue
+            if not narration_fits_budget(measured, budget):
+                misaligned.append(
+                    f"scene {scene.get('scene_number') or scene.get('id')} "
+                    f"voiceover {measured:.1f}s vs slot {budget:.1f}s"
+                )
+        if misaligned:
+            raise RuntimeError(
+                "Scene voiceover does not fit its visual slot within 5%: "
+                + "; ".join(misaligned)
+                + ". Regenerate the voiceover or repair the timeline before rendering."
+            )
         ordered: list[Path] = []
+        missing: list[str] = []
         for idx, s in enumerate(sorted(scenes, key=lambda x: x.get("scene_number", 0))):
             v = scene_voices_by_id.get(s["id"])
             if not v:
@@ -1341,17 +1372,34 @@ async def _resolve_audio(project: dict, scenes: list[dict], assets: list[dict],
             local = await _ensure_audio_local(v, work_dir, f"voiceover_scene_{idx:03d}")
             if local:
                 ordered.append(local)
+            else:
+                missing.append(str(s.get("scene_number") or s.get("id") or idx + 1))
+        if missing:
+            raise RuntimeError(
+                "Selected voiceover files are missing for scenes "
+                + ", ".join(missing)
+                + "; render stopped instead of writing a silent video."
+            )
         if ordered:
             if len(ordered) == 1:
                 return ordered[0]
             list_file = work_dir / "audio_concat.txt"
             list_file.write_text("\n".join(f"file '{p.as_posix()}'" for p in ordered) + "\n")
             out = work_dir / "audio_full.wav"
+            # Re-encode. `-c copy` of MPEG audio into a WAV container fails and
+            # previously dropped the narration on the floor.
             cmd = [FFMPEG_BIN, "-y", "-f", "concat", "-safe", "0",
-                   "-i", str(list_file), "-c", "copy", str(out)]
-            ok, _ = await _run_ffmpeg(cmd)
+                   "-i", str(list_file),
+                   "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2",
+                   str(out)]
+            ok, err = await _run_ffmpeg(cmd)
             if ok and out.exists():
                 return out
+            raise RuntimeError(
+                "Selected voiceover could not be concatenated; "
+                "render stopped instead of writing a silent video. "
+                + (err or "")[-300:]
+            )
     return None
 
 
