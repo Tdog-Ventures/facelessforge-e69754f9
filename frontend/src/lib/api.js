@@ -7,6 +7,9 @@ export { BACKEND_URL };
 export const api = axios.create({
   baseURL: API,
   withCredentials: true,
+  // Generation and voiceover requests can run for a couple of minutes.
+  // Render-state and billing reads pass a shorter timeout of their own.
+  timeout: 120000,
 });
 
 export function formatApiError(detail) {

@@ -3,6 +3,7 @@ import { toast } from "sonner";
 import { Sparkles, Loader2, Save, Download } from "lucide-react";
 import { api, formatApiError, API } from "../lib/api";
 import CopyButton from "./CopyButton";
+import { chapterFields } from "../lib/scriptUtils";
 
 export default function MetadataPanel({ projectId, metadata, canEdit, onChange, hasScript }) {
   const [generating, setGenerating] = useState(false);
@@ -192,12 +193,18 @@ export default function MetadataPanel({ projectId, metadata, canEdit, onChange, 
           <div className="border-t border-zinc-800 px-5 py-3">
             <span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Chapters</span>
             <ul className="mt-3 space-y-1">
-              {(metadata.chapters || []).map((c) => (
-                <li key={`chapter-${c.timestamp}-${c.title}`} className="flex items-center gap-3 text-sm">
-                  <span className="font-mono text-[11px] text-[#00E5FF] w-14">{c.timestamp}</span>
-                  <span className="text-zinc-300">{c.title}</span>
-                </li>
-              ))}
+              {(metadata.chapters || []).length === 0 && (
+                <li className="text-sm text-zinc-500">No chapters yet.</li>
+              )}
+              {(metadata.chapters || []).map((c, i) => {
+                const chapter = chapterFields(c);
+                return (
+                  <li key={`chapter-${i}-${chapter.timestamp}-${chapter.title}`} className="flex items-center gap-3 text-sm">
+                    <span className="font-mono text-[11px] text-[#00E5FF] w-14">{chapter.timestamp}</span>
+                    <span className="text-zinc-300">{chapter.title}</span>
+                  </li>
+                );
+              })}
             </ul>
           </div>
         </div>

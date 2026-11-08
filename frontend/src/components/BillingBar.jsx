@@ -16,7 +16,7 @@ export default function BillingBar() {
         const endpoints = ["/billing/credits", "/billing/balance", "/billing/dodo/credits", "/billing/status"];
         for (const ep of endpoints) {
           try {
-            const res = await api.get(ep);
+            const res = await api.get(ep, { timeout: 15000 });
             if (res?.data && typeof res.data === "object") { data = res.data; break; }
           } catch (_e) { continue; }
         }
@@ -52,7 +52,7 @@ export default function BillingBar() {
       try {
         let data = null;
         for (const ep of ["/billing/credits", "/billing/balance", "/billing/dodo/credits", "/billing/status"]) {
-          try { const r = await api.get(ep); if (r?.data) { data = r.data; break; } } catch {}
+          try { const r = await api.get(ep, { timeout: 15000 }); if (r?.data) { data = r.data; break; } } catch {}
         }
         if (!alive || !data) return;
         const normalized = {

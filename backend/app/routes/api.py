@@ -713,6 +713,12 @@ async def generate_script_endpoint(project_id: str, user=Depends(get_current_use
     project = await db.projects.find_one({"id": project_id}, {"_id": 0})
     _ensure_project_access(project, user, write=True)
     data = await gen.generate_script(project)
+    existing_script = await db.scripts.find_one({"project_id": project_id}, {"_id": 0})
+    old_text = " ".join(str((existing_script or {}).get("full_script") or "").split())
+    new_text = " ".join(str((data or {}).get("full_script") or "").split())
+    invalidated: dict = {}
+    if existing_script and old_text != new_text:
+        invalidated = await _invalidate_script_derivatives(db, project, project_id)
     doc = {
         "id": str(uuid.uuid4()),
         "project_id": project_id,
@@ -724,7 +730,8 @@ async def generate_script_endpoint(project_id: str, user=Depends(get_current_use
     await db.scripts.replace_one({"project_id": project_id}, doc, upsert=True)
     await _log_cost(db, project_id, "script", tokens=max(500, (data.get("word_count", 0) or 0) * 2), cost=0.08)
     await db.projects.update_one({"id": project_id}, {"$set": {"estimated_cost": float(project.get("estimated_cost", 0)) + 0.08, "updated_at": _now()}})
-    return await _attach_project_view(db, await db.projects.find_one({"id": project_id}, {"_id": 0}))
+    view = await _attach_project_view(db, await db.projects.find_one({"id": project_id}, {"_id": 0}))
+    return _script_invalidation_view(view, invalidated)
 
 
 @router.post("/projects/{project_id}/generate-scenes")
@@ -737,18 +744,17 @@ async def generate_scenes_endpoint(project_id: str, request: Request, user=Depen
     script = await db.scripts.find_one({"project_id": project_id}, {"_id": 0})
     if not script:
         raise HTTPException(status_code=400, detail="Generate a script before scenes")
-    # Check preserveSceneCount flag from body (regeneration must preserve count)
+    # preserveSceneCount is accepted and ignored. Scene count follows the
+    # selected narration budget; telling the client the old count was kept was a lie.
     try:
         body = await request.json()
-        preserve = bool(body.get("preserveSceneCount"))
     except Exception:
-        preserve = False
-    # If preserve and scenes already exist and target_duration unchanged, we will let generation lock handle it (it already locks to ceil)
-    # But log for audit
-    if preserve:
-        existing = await db.scenes.count_documents({"project_id": project_id})
-        logger = __import__("logging").getLogger("facelessforge.routes")
-        logger.info("Regenerating scenes preserve count project=%s existing=%s target=%s", project_id, existing, project.get("target_duration"))
+        body = {}
+    if isinstance(body, dict) and body.get("preserveSceneCount"):
+        __import__("logging").getLogger("facelessforge.routes").info(
+            "preserveSceneCount ignored; scene count follows target duration project=%s target=%s",
+            project_id, project.get("target_duration"),
+        )
     try:
         scenes = await gen.generate_scene_plan(project, script)
     except Exception as e:  # noqa: BLE001
@@ -765,6 +771,40 @@ async def generate_scenes_endpoint(project_id: str, request: Request, user=Depen
         await db.scenes.insert_many([dict(sc) for sc in scenes])
     await _log_cost(db, project_id, "scenes", tokens=len(scenes) * 200, cost=0.06)
     await db.projects.update_one({"id": project_id}, {"$set": {"estimated_cost": float(project.get("estimated_cost", 0)) + 0.06, "updated_at": _now()}})
+    return await _attach_project_view(db, await db.projects.find_one({"id": project_id}, {"_id": 0}))
+
+
+@router.post("/projects/{project_id}/scenes/repair-timeline")
+async def repair_scene_timeline(project_id: str, user=Depends(get_current_user)):
+    """Make stored scene ranges contiguous from their durations.
+
+    Does not change the selected target duration, narration text, or call a provider.
+    """
+    from .. import render as render_service
+    from ..timing import contiguous_timeline_from_durations
+
+    db = get_db()
+    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    _ensure_project_access(project, user, write=True)
+    if user["role"] == "viewer":
+        raise HTTPException(status_code=403, detail="Viewer cannot repair scene timing")
+    if await render_service.is_render_active(project_id):
+        raise HTTPException(status_code=409, detail="A render is in progress for this project.")
+    scenes = await db.scenes.find({"project_id": project_id}, {"_id": 0}).sort("scene_number", 1).to_list(500)
+    repaired = contiguous_timeline_from_durations(scenes)
+    now = _now()
+    for scene in repaired:
+        if not scene.get("id"):
+            continue
+        await db.scenes.update_one(
+            {"id": scene["id"], "project_id": project_id},
+            {"$set": {
+                "start_time": scene["start_time"],
+                "end_time": scene["end_time"],
+                "duration": scene["duration"],
+                "updated_at": now,
+            }},
+        )
     return await _attach_project_view(db, await db.projects.find_one({"id": project_id}, {"_id": 0}))
 
 
@@ -848,6 +888,9 @@ async def generate_metadata_endpoint(project_id: str, user=Depends(get_current_u
     if not script:
         raise HTTPException(status_code=400, detail="Generate a script before metadata")
     data = await gen.generate_metadata(project, script, scenes)
+    data["chapters"] = gen.normalize_chapters(data.get("chapters"))
+    if not data["chapters"]:
+        data["chapters"] = gen.chapters_from_scenes(scenes)
     doc = {
         "id": str(uuid.uuid4()),
         "project_id": project_id,
@@ -1017,29 +1060,39 @@ async def update_script(project_id: str, body: ScriptUpdate, user=Depends(get_cu
             patch.setdefault("cta_block", "")
             patch.setdefault("retention_beats", [])
             # History is preserved: render_jobs / master MP4 rows are never touched.
-            scenes_res = await db.scenes.delete_many({"project_id": project_id})
-            meta_res = await db.metadata_packages.delete_many({"project_id": project_id})
-            assets_res = await db.assets.delete_many({
-                "project_id": project_id,
-                "asset_type": {"$in": ["stock_video", "stock_image", "thumbnail_concept", "voiceover_audio"]},
-            })
-            await db.projects.update_one(
-                {"id": project_id},
-                {"$set": {"selected_voiceover_asset_id": None, "updated_at": _now()},
-                 "$unset": {"voice_fit": ""}},
-            )
-            project["selected_voiceover_asset_id"] = None
-            invalidated = {
-                "scenes": getattr(scenes_res, "deleted_count", 0),
-                "metadata": getattr(meta_res, "deleted_count", 0),
-                "assets": getattr(assets_res, "deleted_count", 0),
-            }
+            invalidated = await _invalidate_script_derivatives(db, project, project_id)
     await db.scripts.update_one(
         {"project_id": project_id},
         {"$set": patch, "$setOnInsert": {"id": str(uuid.uuid4()), "project_id": project_id, "created_at": _now()}},
         upsert=True,
     )
     view = await _attach_project_view(db, project)
+    return _script_invalidation_view(view, invalidated)
+
+
+async def _invalidate_script_derivatives(db, project: dict, project_id: str) -> dict:
+    """Drop drafts that quote an older script. Completed render jobs stay."""
+    scenes_res = await db.scenes.delete_many({"project_id": project_id})
+    meta_res = await db.metadata_packages.delete_many({"project_id": project_id})
+    assets_res = await db.assets.delete_many({
+        "project_id": project_id,
+        "asset_type": {"$in": ["stock_video", "stock_image", "thumbnail_concept", "voiceover_audio"]},
+    })
+    await db.projects.update_one(
+        {"id": project_id},
+        {"$set": {"selected_voiceover_asset_id": None, "updated_at": _now()},
+         "$unset": {"voice_fit": ""}},
+    )
+    project["selected_voiceover_asset_id"] = None
+    project.pop("voice_fit", None)
+    return {
+        "scenes": getattr(scenes_res, "deleted_count", 0),
+        "metadata": getattr(meta_res, "deleted_count", 0),
+        "assets": getattr(assets_res, "deleted_count", 0),
+    }
+
+
+def _script_invalidation_view(view: dict, invalidated: dict) -> dict:
     if invalidated and any(invalidated.values()):
         view["script_invalidated"] = invalidated
         view["script_notice"] = (
@@ -1055,6 +1108,9 @@ async def update_metadata(project_id: str, body: MetadataUpdate, user=Depends(ge
     project = await db.projects.find_one({"id": project_id}, {"_id": 0})
     _ensure_project_access(project, user, write=True)
     patch = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
+    if "chapters" in patch:
+        from ..generation import normalize_chapters
+        patch["chapters"] = normalize_chapters(patch.get("chapters"))
     patch["updated_at"] = _now()
     await db.metadata_packages.update_one({"project_id": project_id}, {"$set": patch})
     return await _attach_project_view(db, project)
@@ -1533,22 +1589,9 @@ async def attach_scene_asset(project_id: str, scene_id: str, body: StockAttachRe
         await project_lease.release(db, lease)
     # Archive licence at acquisition (Agent 3 spec: rights_registry + filesystem)
     try:
-        await db.rights_registry.insert_one({
-            "id": str(uuid.uuid4()),
-            "project_id": project_id,
-            "scene_id": scene_id,
-            "asset_id": doc["id"],
-            "external_id": body.external_id,
-            "source": body.source,
-            "source_url": body.source_url,
-            "download_url": body.download_url,
-            "license": "pexels" if body.source == "pexels" else body.source,
-            "attribution_name": body.attribution_name,
-            "attribution_url": body.attribution_url,
-            "archive_license": True,
-            "acquired_at": _now().isoformat(),
-            "acquired_by": user["id"],
-        })
+        await _record_stock_rights(
+            db, project_id=project_id, scene_id=scene_id, doc=doc, user_id=user["id"],
+        )
         # filesystem archive
         import pathlib as _pl
         lic_dir = _pl.Path("/opt/facelessforge/licenses") / project_id
@@ -1562,6 +1605,44 @@ async def attach_scene_asset(project_id: str, scene_id: str, body: StockAttachRe
     except Exception:
         pass
     return _ser(doc)
+
+
+def _stock_licence(doc: dict) -> str:
+    source = str(doc.get("source") or "").strip()
+    explicit = str(doc.get("license") or doc.get("licence") or "").strip()
+    if explicit:
+        return explicit
+    if source == "pexels":
+        return "pexels"
+    return source or "stock"
+
+
+async def _record_stock_rights(db, *, project_id: str, scene_id: str, doc: dict, user_id: str) -> None:
+    """Record acquisition rights. A ledger failure must not roll back the attachment."""
+    licence = _stock_licence(doc)
+    record = {
+        "id": str(uuid.uuid4()),
+        "project_id": project_id,
+        "scene_id": scene_id,
+        "asset_id": doc.get("id"),
+        "external_id": doc.get("external_id"),
+        "source": doc.get("source"),
+        "source_url": doc.get("source_url"),
+        "download_url": doc.get("download_url"),
+        "license": licence,
+        "licence": licence,
+        "attribution_name": doc.get("attribution_name"),
+        "attribution_url": doc.get("attribution_url"),
+        "archive_license": True,
+        "acquired_at": _now().isoformat(),
+        "acquired_by": user_id,
+    }
+    try:
+        await db.rights_registry.insert_one(record)
+    except Exception:
+        __import__("logging").getLogger("facelessforge.routes").warning(
+            "rights registry insert failed project=%s asset=%s", project_id, doc.get("id"), exc_info=True,
+        )
 
 
 # ---- Auto-attach 3-second rule: 10 assets per 30s scene ----
@@ -2035,6 +2116,7 @@ async def _attach_scene_stock_committing(
 
     for doc in committed:
         visual_titles.append(doc["name"])
+        await _record_stock_rights(db, project_id=project_id, scene_id=scene_id, doc=doc, user_id=user["id"])
         _detail("attached", asset_id=doc["id"], order=doc["order"], start_offset=doc["start_offset"])
     outcome["attached"] += len(committed)
     # Successful API writes do not imply the scene meets the 3-second pacing rule.
@@ -2566,6 +2648,8 @@ async def generate_full_voiceover(
         await db.scripts.replace_one({"project_id": project_id}, dict(new_script_doc), upsert=True)
         current_script_id = new_script_doc["id"]
         script_version = f"{current_script_id}:{new_script_doc['updated_at']}"
+        # The corrected script no longer matches scene narration or per-scene audio.
+        await _invalidate_script_derivatives(db, project, project_id)
 
     payload["text_excerpt"] = text[:240]
     payload["created_at"] = _now()
@@ -2643,22 +2727,10 @@ async def generate_scene_voiceover(
     payload["status"] = "selected"
     await db.assets.insert_one(dict(payload))
 
-    # VO is master timeline: update scene duration to voDuration + 0.5s buffer
-    try:
-        vo_duration = float(payload.get("duration") or 0)
-        if vo_duration > 0:
-            new_dur = round(vo_duration + 0.5, 2)
-            await db.scenes.update_one(
-                {"id": scene_id, "project_id": project_id},
-                {"$set": {"duration": new_dur, "end_time": round(float(scene.get("start_time", 0)) + new_dur, 2), "updated_at": _now()}},
-            )
-            # Recalculate total video duration as sum of scene durations for validation
-            all_scenes = await db.scenes.find({"project_id": project_id}, {"_id": 0}).to_list(100)
-            total_dur = sum(float(s.get("duration", 30) or 30) for s in all_scenes)
-            await db.projects.update_one({"id": project_id}, {"$set": {"target_duration": int(total_dur), "updated_at": _now()}})
-    except Exception as e:
-        import logging
-        logging.getLogger("facelessforge.routes").warning("Failed to update scene duration from VO: %s", e)
+    # The selected project duration owns the timeline. Measured voiceover
+    # length is recorded on the asset and fitted at render time. Extending
+    # this scene's end_time without moving the following starts overlapped
+    # the ranges and silently replaced target_duration.
 
     if not payload.get("mock"):
         cost = float(payload.get("cost_estimate") or 0)
@@ -3202,20 +3274,29 @@ def _check_render_rate(user_id: str):
 
 @router.get("/billing/balance")
 async def billing_balance(user=Depends(get_current_user)):
-    from ..db import get_db as _get_db
-    db = _get_db()
     try:
         from ..billing import get_billing_status_for_user
         return await get_billing_status_for_user(user)
     except Exception:
         try:
             import redis
-            r = redis.Redis(host=os.getenv("REDIS_HOST","localhost"), port=int(os.getenv("REDIS_PORT","6379")), decode_responses=True)
+            r = redis.Redis(
+                host=os.getenv("REDIS_HOST", "localhost"),
+                port=int(os.getenv("REDIS_PORT", "6379")),
+                decode_responses=True,
+                socket_connect_timeout=2,
+                socket_timeout=2,
+            )
             data = r.hgetall(f"tenant:{user['id']}")
             credits = int(data.get("credits", 0) or 0)
             return {"credits": credits, "remaining": credits, "monthly": 150, "quota": 150, "plan": "free", "balance": credits}
         except:
             return {"credits": 30, "remaining": 30, "monthly": 30, "quota": 30, "plan": "free", "balance": 30}
+
+@router.get("/billing/credits")
+async def billing_credits(user=Depends(get_current_user)):
+    """Credit balance used by the dashboard. Same payload as /billing/balance."""
+    return await billing_balance(user)
 
 @router.get("/thumbnails/{asset_id}")
 async def get_thumbnail(asset_id: str, request: Request, user=Depends(get_current_user)):

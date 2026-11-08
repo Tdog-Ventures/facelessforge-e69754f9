@@ -31,6 +31,19 @@ export function formatDuration(seconds) {
   return `${m}:${String(r).padStart(2, "0")}`;
 }
 
+export function sceneBudgetLabel({ targetDuration = 0, productionMode, scenes = [] }) {
+  const target = Number(targetDuration) || 0;
+  const intro = productionMode === "commercial_ad" ? 0 : 2.5;
+  const narrationBudget = Math.max(0, target - intro);
+  const expected = Math.max(1, Math.ceil(narrationBudget / 30));
+  const actual = scenes.length;
+  const summed = scenes.reduce((sum, scene) => sum + (Number(scene.duration) || 0), 0);
+  const lastEnd = actual ? Number(scenes[actual - 1].end_time) || 0 : 0;
+  const mismatch = actual > 0 && actual !== expected;
+  const text = `target ${target}s · narration budget ${narrationBudget}s · expected ${expected} scenes · stored ${actual} · timeline ends ${formatDuration(lastEnd)} · summed durations ${Math.round(summed)}s`;
+  return { text, mismatch, expected, actual, narrationBudget };
+}
+
 export function formatCurrency(n) {
   return `$${Number(n || 0).toFixed(2)}`;
 }

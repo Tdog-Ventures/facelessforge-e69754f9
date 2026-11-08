@@ -2,7 +2,7 @@ import React, { useState, useEffect } from "react";
 import { toast } from "sonner";
 import { Sparkles, Loader2, Download, Search, X as XIcon, Wand2, CreditCard, Zap, Info, Save, Film } from "lucide-react";
 import { api, formatApiError, API } from "../lib/api";
-import { formatDuration } from "../lib/format";
+import { formatDuration, sceneBudgetLabel } from "../lib/format";
 import StockAssetModal from "./StockAssetModal";
 import { useConfirm } from "./ConfirmDialog";
 import BillingBar from "./BillingBar";
@@ -166,7 +166,7 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
     let alive = true;
     (async () => {
       try {
-        const { data } = await api.get("/billing/credits");
+        const { data } = await api.get("/billing/credits", { timeout: 15000 });
         if (alive) setCredits(data);
       } catch {}
     })();
@@ -192,13 +192,13 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
       return;
     }
     setGenerating(true);
-    const preserve = scenes.length > 0;
-    toast.loading(preserve ? "Regenerating scene content (keeping count)…" : "Generating scene plan…", { id: "gen-scenes" });
+    const regenerating = scenes.length > 0;
+    toast.loading(regenerating ? "Regenerating the scene plan from the current script…" : "Generating scene plan…", { id: "gen-scenes" });
     try {
-      const { data } = await api.post(`/projects/${projectId}/generate-scenes`, preserve ? { preserveSceneCount: true } : {});
+      const { data } = await api.post(`/projects/${projectId}/generate-scenes`, {});
       onChange(data);
       if (data.project) setInnerProject(data.project);
-      toast.success(preserve ? "Scenes regenerated (count preserved)" : "Scenes generated", { id: "gen-scenes" });
+      toast.success(regenerating ? "Scenes regenerated from the current script" : "Scenes generated", { id: "gen-scenes" });
     } catch (err) {
       if (!handleExhausted(err)) toast.error("Generation failed", { id: "gen-scenes", description: formatApiError(err.response?.data?.detail) || err.message });
       else toast.error("Credits exhausted", { id: "gen-scenes", description: `0 left, resets ${(() => { try { return new Date(err.response?.data?.detail?.reset_at || credits?.reset_at).toLocaleDateString(); } catch { return err.response?.data?.detail?.reset_at || ""; }})()}` });
@@ -341,7 +341,7 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
       }
       const { data: refreshed } = await api.get(`/projects/${projectId}`);
       onChange(refreshed);
-      try { const { data } = await api.get("/billing/credits"); setCredits(data); } catch {}
+      try { const { data } = await api.get("/billing/credits", { timeout: 15000 }); setCredits(data); } catch {}
       // Keep the identity if the UI refresh failed or the 2xx body was resumable.
       if (finishAssetAttachment(operation, data)) setPendingAttachment(null);
     } catch (err) {
@@ -414,16 +414,16 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
       <div className="space-y-4 min-w-0">
         <BillingBar />
         <div className="flex items-center justify-between">
-          <div className="font-mono text-[11px] text-slate-500" title={`Locked: ceil(${innerProject?.target_duration || project?.target_duration || 0}s / 30s)`}>
+          <div className="font-mono text-[11px] text-slate-500" title="Expected scene count is ceil((target − intro) / 30). Intro is 2.5s for editorial videos.">
             {(() => {
-              const total = innerProject?.target_duration || project?.target_duration || 0;
-              const expected = Math.ceil(total / 30);
-              const actual = scenes.length;
-              const totalStr = formatDuration(scenes[scenes.length - 1]?.end_time || total);
-              const mismatch = actual !== expected && actual > 0;
+              const budget = sceneBudgetLabel({
+                targetDuration: innerProject?.target_duration || project?.target_duration || 0,
+                productionMode: innerProject?.production_mode || project?.production_mode,
+                scenes,
+              });
               return (
-                <span className={mismatch ? "text-amber-400" : ""}>
-                  Total: {total}s = {expected} × 30s · {actual} scenes · {totalStr} {mismatch ? "⚠ mismatch" : ""}
+                <span className={budget.mismatch ? "text-amber-400" : ""}>
+                  {budget.text}{budget.mismatch ? " ⚠ scene count differs from the duration budget" : ""}
                 </span>
               );
             })()}

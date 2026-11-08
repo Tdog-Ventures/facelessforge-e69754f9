@@ -64,6 +64,8 @@ r = redis.Redis(
     port=int(os.getenv("REDIS_PORT", "6379")),
     db=0,
     decode_responses=True,
+    socket_connect_timeout=2,
+    socket_timeout=2,
 )
 
 # --- Auth (JWT tenant isolation) ---

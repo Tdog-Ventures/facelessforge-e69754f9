@@ -9,7 +9,7 @@ export default function RightsRegistry({ projectId }) {
       <div className="font-mono text-[10px] uppercase tracking-widest text-zinc-500 mb-3">Rights Registry — {items.length} assets</div>
       {items.map((it,i)=>(
         <div key={i} className="text-xs font-mono border-b border-zinc-800 py-2">
-          <div>asset {it.asset_id} · {it.source} · {it.licence}</div>
+          <div>asset {it.asset_id} · {it.source} · {it.licence || it.license || "unspecified"}</div>
           <div className="text-[10px] text-slate-500">{it.licence_url} · {it.sha256?.slice(0,16)}...</div>
         </div>
       ))}

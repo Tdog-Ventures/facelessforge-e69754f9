@@ -15,6 +15,9 @@ export default function ComplianceChecklist({ projectId }) {
   );
   return (
     <div className="space-y-3">
+      <p className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+        Static publishing guide. These boxes are not saved and do not check this project.
+      </p>
       <Section title="Mandatory" items={data.mandatory} />
       <Section title="Monetization-risk" items={data.monetization_risk} />
       <Section title="Rights" items={data.rights} />

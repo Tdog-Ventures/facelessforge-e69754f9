@@ -4,6 +4,7 @@ import {
   formatNarration,
   validateManualScript,
   invalidationNotice,
+  chapterFields,
   saveScript,
   MIN_MANUAL_WORDS,
 } from "./scriptUtils";
@@ -48,6 +49,11 @@ test("invalidation notice summarises dependent drafts, never masters", () => {
   const fallback = invalidationNotice({ script_invalidated: { scenes: 1, metadata: 1, assets: 2 } });
   expect(fallback).toContain("regenerate");
   expect(fallback).toContain("Completed videos were kept");
+});
+
+test("chapter rows accept generator keys and UI keys", () => {
+  expect(chapterFields({ time: "0:00", label: "Intro" })).toEqual({ timestamp: "0:00", title: "Intro" });
+  expect(chapterFields({ timestamp: "1:22", title: "Fry" })).toEqual({ timestamp: "1:22", title: "Fry" });
 });
 
 test("saveScript posts manual source and returns the project view", async () => {

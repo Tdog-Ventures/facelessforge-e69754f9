@@ -80,6 +80,8 @@ export default function ScriptPanel({ projectId, script, canEdit, onChange }) {
       }
       onChange(data);
       toast.success("Script generated", { id: "gen-script" });
+      const notice = invalidationNotice(data);
+      if (notice) toast.info("Downstream assets need regeneration", { description: notice, duration: 8000 });
     } catch (err) {
       toast.error("Generation failed", { id: "gen-script", description: formatApiError(err.response?.data?.detail) || err.message });
     } finally {

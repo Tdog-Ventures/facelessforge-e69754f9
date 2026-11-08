@@ -232,3 +232,47 @@ def suggest_fitted_duration(
         if narration_fits_budget(measured, fitted - intro, max_tempo_delta=max_tempo_delta):
             return fitted
     return None
+
+
+def contiguous_timeline_from_durations(scenes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Abut scene ranges using each scene's stored duration.
+
+    Per-scene voiceover used to extend ``end_time`` from the old start and
+    leave the next scene's start in place, so ranges overlapped and the last
+    end no longer matched the sum of durations. This rewrite only repairs
+    those timestamps. It does not change narration text or the project's
+    selected target duration.
+    """
+    ordered = sorted(
+        scenes or [],
+        key=lambda scene: (int(scene.get("scene_number") or 0), str(scene.get("id") or "")),
+    )
+    cursor = 0.0
+    repaired: list[dict[str, Any]] = []
+    for scene in ordered:
+        item = dict(scene)
+        duration = _positive_seconds(item.get("duration"))
+        if duration is None:
+            end = _positive_seconds(item.get("end_time"))
+            start = _positive_seconds(item.get("start_time"))
+            if end is not None and start is not None and end > start:
+                duration = end - start
+        if duration is None:
+            duration = 30.0
+        duration = round(duration, 2)
+        item["start_time"] = round(cursor, 2)
+        item["end_time"] = round(cursor + duration, 2)
+        item["duration"] = duration
+        cursor += duration
+        repaired.append(item)
+    return repaired
+
+
+def _positive_seconds(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number <= 0:
+        return None
+    return number

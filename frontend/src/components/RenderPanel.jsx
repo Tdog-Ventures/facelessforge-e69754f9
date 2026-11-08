@@ -24,6 +24,8 @@ export default function RenderPanel({
   projectId, project, script, scenes, metadata, assets, timing, canEdit, onChange,
 }) {
   const [preflight, setPreflight] = useState(null);
+  const [loadError, setLoadError] = useState(null);
+  const [jobsWarning, setJobsWarning] = useState(null);
   const [jobs, setJobs] = useState([]);
   const [activeJob, setActiveJob] = useState(null);
   const [starting, setStarting] = useState(false);
@@ -42,25 +44,47 @@ export default function RenderPanel({
   }, [project?.voice_style, project?.voice_id, project?.aspect_ratio, project?.burn_subtitles]);
 
   const refreshAll = async () => {
+    setLoadError(null);
+    setJobsWarning(null);
+    let preflightData = null;
     try {
-      const [pf, jl] = await Promise.all([
-        api.get(`/projects/${projectId}/render/preflight`),
-        api.get(`/projects/${projectId}/render/jobs`),
-      ]);
-      const normalizedJobs = (jl.data || []).map(normalizeJob);
-      setPreflight(pf.data);
-      setJobs(normalizedJobs);
-      const active = normalizedJobs.find((j) => ACTIVE_STATES.has(j.status));
-      const latest = normalizedJobs[0] || null;
-      // Only show the in-detail JobStatusCard for active or completed jobs.
-      // Cancelled / failed jobs surface as a calm banner via LastTerminalNotice
-      // and remain accessible in the JobHistory list below.
-      setActiveJob(active || (latest && PROMOTABLE.has(latest.status) ? latest : null));
+      const pf = await api.get(`/projects/${projectId}/render/preflight`, { timeout: 15000 });
+      preflightData = pf.data;
     } catch (err) {
-      toast.error("Failed to load render data", {
-        description: formatApiError(err.response?.data?.detail) || err.message,
-      });
+      const status = err.response?.status;
+      const message = formatApiError(err.response?.data?.detail) || err.message || "Failed to load render data";
+      setLoadError(status ? `${message} (HTTP ${status})` : message);
+      return;
     }
+    if (!preflightData || typeof preflightData !== "object") {
+      setLoadError("Render preflight returned an empty response.");
+      return;
+    }
+    try {
+      const jl = await api.get(`/projects/${projectId}/render/jobs`, { timeout: 15000 });
+      const rows = Array.isArray(jl.data) ? jl.data : null;
+      if (!rows) {
+        setJobs([]);
+        setActiveJob(null);
+        setJobsWarning("Render history response was not a list.");
+      } else {
+        const normalizedJobs = rows.map(normalizeJob);
+        setJobs(normalizedJobs);
+        const active = normalizedJobs.find((j) => ACTIVE_STATES.has(j.status));
+        const latest = normalizedJobs[0] || null;
+        // Only show the in-detail JobStatusCard for active or completed jobs.
+        // Cancelled / failed jobs surface as a calm banner via LastTerminalNotice
+        // and remain accessible in the JobHistory list below.
+        setActiveJob(active || (latest && PROMOTABLE.has(latest.status) ? latest : null));
+      }
+    } catch (err) {
+      const status = err.response?.status;
+      const message = formatApiError(err.response?.data?.detail) || err.message || "Failed to load render history";
+      setJobs([]);
+      setActiveJob(null);
+      setJobsWarning(status ? `${message} (HTTP ${status})` : message);
+    }
+    setPreflight(preflightData);
   };
 
   useEffect(() => {
@@ -147,11 +171,11 @@ export default function RenderPanel({
       if (voDuration && scenesTotal && mismatch > 5) {
         // VO is master: backend _build_subclip_plan() scales video to VO
         // exactly (render.py). Warn only — do not block. Video will match VO.
-        toast.warning("Duration auto-alignment: video will match VO", {
-          description: `Target ${target}s, VO ${voDuration.toFixed(1)}s, Scenes ${scenesTotal.toFixed(1)}s — Δ ${mismatch.toFixed(1)}s. VO is master, video will be scaled to ${voDuration.toFixed(1)}s.`,
+        toast.warning("Stored scene timing differs from the voiceover", {
+          description: `Selected target ${target}s stays in charge. Voiceover ${voDuration.toFixed(1)}s, stored scenes ${scenesTotal.toFixed(1)}s. Render fits narration to that target.`,
           duration: 8000,
         });
-        console.warn("[Render] VO vs Scenes mismatch — auto-aligning to VO", { target, voDuration, scenesTotal, mismatch, projectId });
+        console.warn("[Render] Stored scene timing differs from the voiceover", { target, voDuration, scenesTotal, mismatch, projectId });
       }
     } catch (e) {
       console.warn("[Render] Preflight validation failed", e);
@@ -199,6 +223,22 @@ export default function RenderPanel({
   };
 
   if (!preflight) {
+    if (loadError) {
+      return (
+        <div className="p-8 space-y-3" data-testid="render-load-error">
+          <p className="text-sm text-zinc-200">Could not load render state.</p>
+          <p className="font-mono text-xs text-zinc-500">{loadError}</p>
+          <button
+            type="button"
+            data-testid="render-retry"
+            onClick={refreshAll}
+            className="font-mono text-[10px] uppercase tracking-widest border border-zinc-700 px-3 py-2 text-zinc-200 hover:border-[#00E5FF] hover:text-[#00E5FF]"
+          >
+            Retry
+          </button>
+        </div>
+      );
+    }
     return (
       <div className="p-8 text-sm text-zinc-500 font-mono">Loading render state…</div>
     );
@@ -239,6 +279,12 @@ export default function RenderPanel({
               Voiceover is within 5% and will be tempo-fitted to the narration budget.
             </p>
           )}
+        </div>
+      )}
+      {jobsWarning && (
+        <div className="border border-amber-500/40 bg-amber-500/10 text-amber-200 text-sm px-4 py-3 rounded-sm" data-testid="render-jobs-warning">
+          Render history did not load. {jobsWarning}
+          <button type="button" onClick={refreshAll} className="ml-3 underline">Retry</button>
         </div>
       )}
       <PrereqChecklist preflight={preflight} onRefresh={refreshAll} />

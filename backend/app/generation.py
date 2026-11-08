@@ -831,6 +831,45 @@ META_SYSTEM = (
 )
 
 
+def normalize_chapters(chapters) -> list[dict]:
+    """Accept either ``{time, label}`` or ``{timestamp, title}`` and emit the UI shape."""
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for raw in chapters or []:
+        if not isinstance(raw, dict):
+            continue
+        timestamp = str(raw.get("timestamp") or raw.get("time") or "").strip()
+        title = str(raw.get("title") or raw.get("label") or "").strip()
+        if not timestamp and not title:
+            continue
+        key = (timestamp, title)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"timestamp": timestamp, "title": title})
+    return out
+
+
+def chapters_from_scenes(scenes) -> list[dict]:
+    """Build chapter rows from a contiguous scene timeline when the model omitted them."""
+    rows: list[dict] = []
+    for scene in scenes or []:
+        try:
+            start = float(scene.get("start_time") or 0)
+        except (TypeError, ValueError):
+            start = 0.0
+        if not math.isfinite(start) or start < 0:
+            start = 0.0
+        minutes, seconds = divmod(int(round(start)), 60)
+        title = str(scene.get("caption_text") or "").strip()
+        if not title:
+            title = " ".join(str(scene.get("narration_text") or "").split()[:6])
+        if not title:
+            continue
+        rows.append({"timestamp": f"{minutes}:{seconds:02d}", "title": title})
+    return rows
+
+
 async def generate_metadata(project: dict, script: dict, scenes: list = None) -> dict:
     if isinstance(script, str):
         script = {"full_script": script}
@@ -855,7 +894,11 @@ Write specifically about this Topic. Do NOT use a generic entrepreneur/startup o
 Do not include BEAT markers, section headers, or structural labels in any output text."""
 
     result = await _llm_json(META_SYSTEM, user, f"meta-{project.get('id', uuid.uuid4())}")
-    if result:
+    if isinstance(result, dict):
+        result = dict(result)
+        result["chapters"] = normalize_chapters(result.get("chapters"))
+        if not result["chapters"]:
+            result["chapters"] = chapters_from_scenes(scenes)
         return result
 
     short_topic = truncate_words(topic, 60)
@@ -874,13 +917,13 @@ Do not include BEAT markers, section headers, or structural labels in any output
         ),
         "tags": [short_topic, project.get("niche", "education"), "explained", "guide", "how it works"],
         "hashtags": ["#explained", "#education", "#howto"],
-        "chapters": [
+        "chapters": normalize_chapters([
             {"time": "0:00", "label": "Introduction"},
             {"time": "1:00", "label": "The Fundamentals"},
             {"time": "2:30", "label": "Key Insights"},
             {"time": "4:00", "label": "Practical Takeaways"},
             {"time": "5:00", "label": "Wrap-Up"},
-        ],
+        ]),
         "pinned_comment": f"What surprised you most about {short_topic}? Comment below 👇",
     }
 
