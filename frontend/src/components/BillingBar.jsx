@@ -13,7 +13,7 @@ export default function BillingBar() {
       try {
         // Primary: /api/billing/balance (real Dodo per task spec), fallback to status/credits/dodo
         let data = null;
-        const endpoints = ["/billing/balance", "/billing/dodo/credits", "/billing/status", "/billing/credits"];
+        const endpoints = ["/billing/credits", "/billing/balance", "/billing/dodo/credits", "/billing/status"];
         for (const ep of endpoints) {
           try {
             const res = await api.get(ep);
@@ -34,6 +34,7 @@ export default function BillingBar() {
           can_generate: data?.can_generate ?? (data?.remaining ?? data?.credits ?? 0) > 0,
           monthly: data?.monthly ?? data?.quota ?? 150,
           plan: data?.plan ?? "free",
+          operator_unmetered: data?.operator_unmetered === true,
           // keep raw for compat
           ...data,
         };
@@ -50,7 +51,7 @@ export default function BillingBar() {
     const id = setInterval(async () => {
       try {
         let data = null;
-        for (const ep of ["/billing/balance", "/billing/dodo/credits", "/billing/status", "/billing/credits"]) {
+        for (const ep of ["/billing/credits", "/billing/balance", "/billing/dodo/credits", "/billing/status"]) {
           try { const r = await api.get(ep); if (r?.data) { data = r.data; break; } } catch {}
         }
         if (!alive || !data) return;
@@ -62,6 +63,7 @@ export default function BillingBar() {
           can_generate: data?.can_generate ?? (data?.remaining ?? data?.credits ?? 0) > 0,
           monthly: data?.monthly ?? data?.quota ?? 150,
           plan: data?.plan ?? "free",
+          operator_unmetered: data?.operator_unmetered === true,
           ...data,
         };
         setCredits(normalized);
@@ -78,8 +80,8 @@ export default function BillingBar() {
   const plan = credits?.plan ?? "free";
   const resetAt = credits?.reset_at ?? credits?.current_period_end ?? null;
   const pct = monthly > 0 ? Math.round((remaining / monthly) * 100) : 0;
-  const exhausted = remaining <= 0;
-  const low = exhausted || pct < 20;
+  const exhausted = !credits?.operator_unmetered && remaining <= 0;
+  const low = !credits?.operator_unmetered && (exhausted || pct < 20);
   const barColor = exhausted ? "bg-red-500" : low ? "bg-amber-500" : pct < 50 ? "bg-blue-500" : "bg-emerald-500";
   const resetLabel = (() => {
     if (!resetAt) return "";
@@ -93,7 +95,7 @@ export default function BillingBar() {
     <div className="flex items-center gap-3 font-mono text-[11px] w-full">
       <div className={`flex items-center gap-2 px-2 py-1 rounded-md border flex-1 max-w-[420px] ${exhausted ? "border-red-500/40 bg-red-500/10 text-red-400" : low ? "border-amber-500/40 bg-amber-500/10 text-amber-400" : "border-[rgba(59,130,246,0.15)] bg-[#1c2333] text-slate-300"}`}>
         <Coins size={12} strokeWidth={1.5} />
-        <span data-testid="billing-credits">{remaining}/{monthly} credits</span>
+        <span data-testid="billing-credits">{credits?.operator_unmetered ? "Admin production access" : `${remaining}/${monthly} credits`}</span>
         <span className="text-[9px] uppercase tracking-widest px-1 py-0.5 bg-zinc-800 text-zinc-400 rounded-sm">{plan}</span>
         <div className="flex-1 mx-2 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
           <div data-testid="billing-progress" className={`h-full ${barColor} transition-all`} style={{ width: `${Math.min(100, Math.max(0, pct))}%` }} />

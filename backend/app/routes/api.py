@@ -1738,6 +1738,8 @@ async def _debit_committed_attachments(
 
 async def _debit_scene(db, *, store: dict, user_id: str, asset_ids: list, reason: str) -> int:
     """Debit the primary balance, then the legacy ff_credits mirror (best effort)."""
+    if store.get("operator_unmetered") is True:
+        return 0  # verified administrator entitlement; no customer balance mutated
     charged = await _debit_committed_attachments(
         db, collection=store["collection"], balance_filter=store["filter"], field=store["field"],
         user_id=user_id, asset_ids=asset_ids, reason=reason,
@@ -2193,8 +2195,15 @@ async def _auto_attach_under_lease(db, lease, project_id: str, project: dict, bo
                 store = {"collection": "subscriptions", "filter": {"user_id": user["id"]}, "field": "credits_remaining"}
                 remaining = 30
                 paid_asset_ids = set()
+        # The entitlement belongs to the authenticated database user, never a request header.
+        operator_unmetered = bool(
+            user.get("role") == "admin" and sub.get("full_access") is True
+            and sub.get("access_status") == "active"
+        )
+        if operator_unmetered:
+            store = {**store, "operator_unmetered": True}
         total_needed -= sum(asset_id in paid_asset_ids for asset_id in carried_asset_ids)
-        if total_needed > 0 and remaining < total_needed:
+        if not operator_unmetered and total_needed > 0 and remaining < total_needed:
             reset_at = sub.get("current_period_end") or _now() + timedelta(days=30)
             if hasattr(reset_at, 'isoformat'):
                 reset_at = reset_at.isoformat()

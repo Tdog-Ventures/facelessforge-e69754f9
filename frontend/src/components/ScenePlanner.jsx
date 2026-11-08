@@ -186,7 +186,7 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
   };
 
   const generate = async () => {
-    if (credits && (credits.remaining ?? credits.credits) <= 0) {
+    if (credits && !credits.operator_unmetered && (credits.remaining ?? credits.credits) <= 0) {
       setExhaustedInfo({ reset_at: credits.reset_at || credits.current_period_end, plan: credits.plan || "free" });
       setShowPricingModal(true);
       return;
@@ -300,7 +300,7 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
       return;
     }
     // A paid operation can need replay at zero balance after its response was lost.
-    if (!pending && credits && (credits.remaining ?? credits.credits) <= 0) {
+    if (!pending && credits && !credits.operator_unmetered && (credits.remaining ?? credits.credits) <= 0) {
       setExhaustedInfo({ reset_at: credits.reset_at || credits.current_period_end, plan: credits.plan || "free" });
       setShowPricingModal(true);
       return;
@@ -366,7 +366,7 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
     }
   };
 
-  const exhausted = credits && ((credits.remaining ?? credits.credits ?? 1) <= 0);
+  const exhausted = credits && !credits.operator_unmetered && ((credits.remaining ?? credits.credits ?? 1) <= 0);
   const resetLabel = (() => { const r = credits?.reset_at || credits?.current_period_end; if (!r) return "next cycle"; try { return new Date(r).toLocaleDateString(); } catch { return String(r).slice(0,10); } })();
 
   if (!scenes || scenes.length === 0) {

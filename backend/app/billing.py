@@ -81,6 +81,9 @@ async def check_credits(user: dict, required: int = 1):
         else:
             # free tier fallback
             sub = {"credits_remaining": 30, "credits_monthly": 30, "plan": "free", "current_period_end": _now() + timedelta(days=30)}
+    if (user.get("role") == "admin" and sub.get("full_access") is True
+            and sub.get("access_status") == "active"):
+        return sub
     remaining = int(sub.get("credits_remaining", 0))
     quota = int(sub.get("credits_monthly", 30))
     plan = sub.get("plan", "free")
@@ -117,8 +120,9 @@ async def get_billing_status_for_user(user: dict):
             reset_at = reset_at_dt
         except:
             pass
-    can_generate = remaining > 0
-    return {"credits": remaining, "quota": quota, "reset_at": reset_at.isoformat() if hasattr(reset_at, 'isoformat') else str(reset_at), "can_generate": can_generate, "plan": sub.get("plan", "free"), "remaining": remaining, "monthly": quota, "current_period_end": reset_at.isoformat() if hasattr(reset_at, 'isoformat') else str(reset_at)}
+    operator_unmetered = bool(user.get("role") == "admin" and sub.get("full_access") is True and sub.get("access_status") == "active")
+    can_generate = operator_unmetered or remaining > 0
+    return {"operator_unmetered": operator_unmetered, "credits": remaining, "quota": quota, "reset_at": reset_at.isoformat() if hasattr(reset_at, 'isoformat') else str(reset_at), "can_generate": can_generate, "plan": sub.get("plan", "free"), "remaining": remaining, "monthly": quota, "current_period_end": reset_at.isoformat() if hasattr(reset_at, 'isoformat') else str(reset_at)}
 
 def _is_mock_paddle() -> bool:
     key = (os.environ.get("PADDLE_API_KEY") or os.environ.get("PADDLE_APIKEY") or "").strip()
@@ -593,7 +597,8 @@ async def get_credits_endpoint(user=Depends(get_current_user)):
     reset_at = sub.get("current_period_end") or _now() + timedelta(days=30)
     if hasattr(reset_at, 'isoformat'):
         reset_at = reset_at.isoformat()
-    return {"remaining": remaining, "monthly": monthly, "plan": sub.get("plan", "free"), "status": sub.get("status", "active"), "credits": remaining, "quota": monthly, "reset_at": reset_at, "can_generate": remaining > 0, "current_period_end": reset_at}
+    operator_unmetered = bool(user.get("role") == "admin" and sub.get("full_access") is True and sub.get("access_status") == "active")
+    return {"operator_unmetered": operator_unmetered, "remaining": remaining, "monthly": monthly, "plan": sub.get("plan", "free"), "status": sub.get("status", "active"), "credits": remaining, "quota": monthly, "reset_at": reset_at, "can_generate": operator_unmetered or remaining > 0, "current_period_end": reset_at}
 
 class DeductRequest(BaseModel):
     amount: int
