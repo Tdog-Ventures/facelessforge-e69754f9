@@ -1,7 +1,7 @@
 import React, { useRef, useState } from "react";
 import { toast } from "sonner";
 import { Music, Upload, X, Loader2, Play } from "lucide-react";
-import { api, formatApiError } from "../lib/api";
+import { api, formatApiError, UNBOUNDED_TIMEOUT } from "../lib/api";
 
 export default function MusicPanel({ projectId, project, assets, canEdit, onProjectChange }) {
   const [uploading, setUploading] = useState(false);
@@ -32,6 +32,7 @@ export default function MusicPanel({ projectId, project, assets, canEdit, onProj
       form.append("rights_note", rightsNote);
       await api.post(`/projects/${projectId}/music/upload`, form, {
         headers: { "Content-Type": "multipart/form-data" },
+        ...UNBOUNDED_TIMEOUT,
       });
       toast.success(rights ? "Music uploaded and selected" : "Music uploaded — confirm rights to select it");
       setRights(false);

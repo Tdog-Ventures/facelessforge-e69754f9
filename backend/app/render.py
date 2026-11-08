@@ -58,7 +58,7 @@ from .storage import get_storage
 from .subtitles import write_srt, write_srt_from_cues, write_srt_from_words
 from .transcribe import transcribe_words
 from .visual_query import truncate_words
-from .timing import TimingContract, build_timing_status, normalize_scene_timeline
+from .timing import TimingContract, build_timing_status, narration_fits_budget, normalize_scene_timeline
 from .timing import (
     MIN_AUTOFIT_MOVE_SECONDS,
     suggest_fitted_duration,
@@ -1319,12 +1319,15 @@ async def _resolve_audio(project: dict, scenes: list[dict], assets: list[dict],
     full = next((a for a in assets if a.get("asset_type") == "voiceover_audio"
                  and not a.get("scene_id")
                  and a.get("id") == project.get("selected_voiceover_asset_id")), None)
-    full_missing = False
     if _is_real(full):
         local = await _ensure_audio_local(full, work_dir, "voiceover_full")
-        if local:
-            return local
-        full_missing = True
+        if not local:
+            # Do not substitute per-scene files. They are a different narration.
+            raise RuntimeError(
+                "Selected full-script voiceover could not be loaded; "
+                "render stopped instead of using scene audio or a silent video."
+            )
+        return local
 
     scene_voices_by_id: dict[str, dict] = {}
     for s in scenes:
@@ -1337,6 +1340,29 @@ async def _resolve_audio(project: dict, scenes: list[dict], assets: list[dict],
             ss, key=lambda x: str(x.get("created_at") or ""))
         scene_voices_by_id[s["id"]] = sel
     if scene_voices_by_id:
+        misaligned: list[str] = []
+        for scene in sorted(scenes, key=lambda item: item.get("scene_number", 0)):
+            voice = scene_voices_by_id.get(scene.get("id"))
+            if not voice:
+                continue
+            try:
+                measured = float(voice.get("duration") or 0)
+                budget = float(scene.get("duration") or 0)
+            except (TypeError, ValueError):
+                continue
+            if measured <= 0 or budget <= 0:
+                continue
+            if not narration_fits_budget(measured, budget):
+                misaligned.append(
+                    f"scene {scene.get('scene_number') or scene.get('id')} "
+                    f"voiceover {measured:.1f}s vs slot {budget:.1f}s"
+                )
+        if misaligned:
+            raise RuntimeError(
+                "Scene voiceover does not fit its visual slot within 5%: "
+                + "; ".join(misaligned)
+                + ". Regenerate the voiceover or repair the timeline before rendering."
+            )
         ordered: list[Path] = []
         missing: list[str] = []
         for idx, s in enumerate(sorted(scenes, key=lambda x: x.get("scene_number", 0))):
@@ -1374,11 +1400,6 @@ async def _resolve_audio(project: dict, scenes: list[dict], assets: list[dict],
                 "render stopped instead of writing a silent video. "
                 + (err or "")[-300:]
             )
-    if full_missing:
-        raise RuntimeError(
-            "Selected full-script voiceover could not be loaded; "
-            "render stopped instead of writing a silent video."
-        )
     return None
 
 

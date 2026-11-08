@@ -1,79 +1,68 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { Coins, Zap } from "lucide-react";
 import { api } from "../lib/api";
 
+const BILLING_ENDPOINTS = ["/billing/credits", "/billing/balance"];
+
+export function authoritativeBilling(data) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  // Dodo's raw credit hash has neither remaining nor operator_unmetered.
+  // It must not replace the account balance, especially for an unmetered admin.
+  if (data.remaining == null && data.operator_unmetered !== true && data.quota == null && data.monthly == null) {
+    return null;
+  }
+  return {
+    ...data,
+    remaining: data.remaining ?? data.credits ?? 0,
+    quota: data.quota ?? data.monthly ?? 150,
+    credits: data.credits ?? data.remaining ?? 0,
+    reset_at: data.reset_at ?? data.current_period_end ?? null,
+    can_generate: data.can_generate ?? (data.remaining ?? data.credits ?? 0) > 0,
+    monthly: data.monthly ?? data.quota ?? 150,
+    plan: data.plan ?? "free",
+    operator_unmetered: data.operator_unmetered === true,
+  };
+}
+
 export default function BillingBar() {
-  const [credits, setCredits] = useState({ remaining: 0, quota: 150, credits: 0, reset_at: null, can_generate: false, monthly: 150, plan: "free" });
+  const [credits, setCredits] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [unavailable, setUnavailable] = useState(false);
+  const requestSeq = useRef(0);
 
   useEffect(() => {
     let alive = true;
     const fetchBilling = async () => {
-      try {
-        // Primary: /api/billing/balance (real Dodo per task spec), fallback to status/credits/dodo
-        let data = null;
-        const endpoints = ["/billing/credits", "/billing/balance", "/billing/dodo/credits", "/billing/status"];
-        for (const ep of endpoints) {
-          try {
-            const res = await api.get(ep, { timeout: 15000 });
-            if (res?.data && typeof res.data === "object") { data = res.data; break; }
-          } catch (_e) { continue; }
-        }
-        // Guard null / malformed
-        if (!data || typeof data !== "object") {
-          if (alive) setCredits({ remaining: 0, quota: 150, credits: 0, reset_at: null, can_generate: false, monthly: 150, plan: "free" });
-          return;
-        }
-        // Normalize with optional chaining, never throw
-        const normalized = {
-          remaining: data?.remaining ?? data?.credits ?? 0,
-          quota: data?.quota ?? data?.monthly ?? 150,
-          credits: data?.credits ?? data?.remaining ?? 0,
-          reset_at: data?.reset_at ?? data?.current_period_end ?? null,
-          can_generate: data?.can_generate ?? (data?.remaining ?? data?.credits ?? 0) > 0,
-          monthly: data?.monthly ?? data?.quota ?? 150,
-          plan: data?.plan ?? "free",
-          operator_unmetered: data?.operator_unmetered === true,
-          // keep raw for compat
-          ...data,
-        };
-        if (alive) setCredits(normalized);
-      } catch (e) {
-        // Never throw — default safe state prevents white screen
-        console.warn("BillingBar fetch failed", e?.message || e);
-        if (alive) setCredits({ remaining: 0, quota: 150, credits: 0, reset_at: null, can_generate: false, monthly: 150, plan: "free" });
-      } finally {
-        if (alive) setLoading(false);
+      const seq = ++requestSeq.current;
+      let normalized = null;
+      for (const ep of BILLING_ENDPOINTS) {
+        try {
+          const res = await api.get(ep, { timeout: 15000 });
+          normalized = authoritativeBilling(res?.data);
+          if (normalized) break;
+        } catch { /* try the next authoritative endpoint */ }
       }
+      if (!alive || seq !== requestSeq.current) return;
+      if (!normalized) {
+        setUnavailable(true);
+        setLoading(false);
+        return;
+      }
+      setCredits(normalized);
+      setUnavailable(false);
+      setLoading(false);
     };
     fetchBilling();
-    const id = setInterval(async () => {
-      try {
-        let data = null;
-        for (const ep of ["/billing/credits", "/billing/balance", "/billing/dodo/credits", "/billing/status"]) {
-          try { const r = await api.get(ep, { timeout: 15000 }); if (r?.data) { data = r.data; break; } } catch {}
-        }
-        if (!alive || !data) return;
-        const normalized = {
-          remaining: data?.remaining ?? data?.credits ?? 0,
-          quota: data?.quota ?? data?.monthly ?? 150,
-          credits: data?.credits ?? data?.remaining ?? 0,
-          reset_at: data?.reset_at ?? data?.current_period_end ?? null,
-          can_generate: data?.can_generate ?? (data?.remaining ?? data?.credits ?? 0) > 0,
-          monthly: data?.monthly ?? data?.quota ?? 150,
-          plan: data?.plan ?? "free",
-          operator_unmetered: data?.operator_unmetered === true,
-          ...data,
-        };
-        setCredits(normalized);
-      } catch {}
-    }, 30000);
+    const id = setInterval(fetchBilling, 30000);
     return () => { alive = false; clearInterval(id); };
   }, []);
 
   if (loading) {
     return <div className="font-mono text-[10px] text-zinc-500">credits…</div>;
+  }
+  if (unavailable || !credits) {
+    return <div className="font-mono text-[10px] text-amber-300" data-testid="billing-unavailable">Balance unavailable</div>;
   }
   const remaining = credits?.remaining ?? credits?.credits ?? 0;
   const monthly = credits?.monthly ?? credits?.quota ?? 150;

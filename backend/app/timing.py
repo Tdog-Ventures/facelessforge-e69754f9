@@ -253,8 +253,8 @@ def contiguous_timeline_from_durations(scenes: list[dict[str, Any]]) -> list[dic
         item = dict(scene)
         duration = _positive_seconds(item.get("duration"))
         if duration is None:
-            end = _positive_seconds(item.get("end_time"))
-            start = _positive_seconds(item.get("start_time"))
+            end = _nonnegative_seconds(item.get("end_time"))
+            start = _nonnegative_seconds(item.get("start_time"))
             if end is not None and start is not None and end > start:
                 duration = end - start
         if duration is None:
@@ -263,16 +263,28 @@ def contiguous_timeline_from_durations(scenes: list[dict[str, Any]]) -> list[dic
         item["start_time"] = round(cursor, 2)
         item["end_time"] = round(cursor + duration, 2)
         item["duration"] = duration
+        start_frame = int(round(item["start_time"] * DEFAULT_FPS))
+        end_frame = int(round(item["end_time"] * DEFAULT_FPS))
+        item["start_frame"] = start_frame
+        item["end_frame"] = end_frame
+        item["duration_frames"] = end_frame - start_frame
         cursor += duration
         repaired.append(item)
     return repaired
 
 
-def _positive_seconds(value: Any) -> float | None:
+def _nonnegative_seconds(value: Any) -> float | None:
     try:
         number = float(value)
     except (TypeError, ValueError):
         return None
-    if not math.isfinite(number) or number <= 0:
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number
+
+
+def _positive_seconds(value: Any) -> float | None:
+    number = _nonnegative_seconds(value)
+    if number is None or number <= 0:
         return None
     return number

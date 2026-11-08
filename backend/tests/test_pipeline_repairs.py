@@ -6,6 +6,7 @@ and a failed voiceover concat must not become a silent successful render.
 """
 import pytest
 
+from app.billing_dodo import scale_credits_for_checkout
 from app.generation import chapters_from_scenes, normalize_chapters
 from app.routes import api as api_routes
 from app.timing import contiguous_timeline_from_durations
@@ -14,10 +15,24 @@ from app import render
 
 def _match(doc, query):
     for key, cond in query.items():
+        if key == "$or":
+            if not any(_match(doc, sub) for sub in cond):
+                return False
+            continue
+        if isinstance(cond, dict) and "$exists" in cond:
+            if bool(cond["$exists"]) != (key in doc):
+                return False
+            continue
         if isinstance(cond, dict) and "$in" in cond:
             if doc.get(key) not in cond["$in"]:
                 return False
-        elif doc.get(key) != cond:
+            continue
+        if isinstance(cond, dict) and "$lt" in cond:
+            value = doc.get(key)
+            if value is None or not value < cond["$lt"]:
+                return False
+            continue
+        if doc.get(key) != cond and not (cond is None and key not in doc):
             return False
     return True
 
@@ -100,6 +115,20 @@ class FakeDB:
         self.render_jobs = FakeCollection()
 
 
+def test_zero_start_without_duration_uses_the_end_time():
+    repaired = contiguous_timeline_from_durations([
+        {"id": "s1", "scene_number": 1, "start_time": 0, "end_time": 10, "start_frame": 999, "end_frame": 999, "duration_frames": 999},
+        {"id": "s2", "scene_number": 2, "duration": 5, "start_frame": 1, "end_frame": 2, "duration_frames": 1},
+    ])
+    assert repaired[0]["duration"] == 10
+    assert repaired[0]["end_time"] == 10
+    assert repaired[0]["start_frame"] == 0
+    assert repaired[0]["end_frame"] == 300
+    assert repaired[0]["duration_frames"] == 300
+    assert repaired[1]["start_time"] == 10
+    assert repaired[1]["start_frame"] == 300
+
+
 def test_overlapped_voiceover_ranges_become_contiguous_without_touching_target():
     scenes = [
         {"id": "s1", "scene_number": 1, "start_time": 0, "end_time": 31, "duration": 31, "narration_text": "boil"},
@@ -127,6 +156,12 @@ def test_chapters_from_time_label_match_the_metadata_ui():
     assert built[0] == {"timestamp": "0:00", "title": "Boil"}
     assert built[1]["timestamp"] == "1:22"
     assert built[1]["title"].startswith("Poach the egg")
+
+
+def test_pending_checkout_credits_are_not_scaled_twice():
+    assert scale_credits_for_checkout(pending={"credits": "200"}, quantity=2, unit_credits=100) == 200
+    assert scale_credits_for_checkout(pending={}, quantity=2, unit_credits=100) == 200
+    assert scale_credits_for_checkout(pending=None, quantity=2, unit_credits=100) == 200
 
 
 def test_billing_credits_route_is_mounted():
@@ -202,6 +237,72 @@ async def test_generate_script_clears_stale_scenes(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_failed_script_write_does_not_delete_scenes(monkeypatch):
+    project = {"id": "p1", "user_id": "u1", "target_duration": 90, "estimated_cost": 0}
+    old = {"id": "script-1", "project_id": "p1", "full_script": "old narration " * 20}
+    db = FakeDB(project, scripts=[old], scenes=[{"id": "s1", "project_id": "p1"}])
+    monkeypatch.setattr(api_routes, "get_db", lambda: db)
+    monkeypatch.setattr(api_routes, "check_credits", None)
+
+    async def fake_gen(_project):
+        return {"full_script": "brand new narration " * 20, "word_count": 60}
+
+    async def boom(*_a, **_k):
+        raise RuntimeError("script write failed")
+
+    monkeypatch.setattr(api_routes.gen, "generate_script", fake_gen)
+    monkeypatch.setattr(api_routes, "_log_cost", lambda *_a, **_k: None)
+    db.scripts.replace_one = boom
+    with pytest.raises(RuntimeError, match="script write failed"):
+        await api_routes.generate_script_endpoint("p1", user={"id": "u1", "role": "creator"})
+    assert db.scenes.docs == [{"id": "s1", "project_id": "p1"}]
+
+
+@pytest.mark.asyncio
+async def test_busy_asset_lease_restores_the_previous_script(monkeypatch):
+    project = {"id": "p1", "user_id": "u1", "target_duration": 90, "estimated_cost": 0}
+    old = {"id": "script-1", "project_id": "p1", "full_script": "old narration " * 20}
+    db = FakeDB(project, scripts=[old], scenes=[{"id": "s1", "project_id": "p1"}])
+    monkeypatch.setattr(api_routes, "get_db", lambda: db)
+    monkeypatch.setattr(api_routes, "check_credits", None)
+    monkeypatch.setattr(api_routes.gen, "generate_script", lambda _project: _async_script())
+    monkeypatch.setattr(api_routes, "_log_cost", lambda *_a, **_k: None)
+
+    async def busy(*_a, **_k):
+        return None
+
+    monkeypatch.setattr("app.project_lease.acquire", busy)
+    with pytest.raises(Exception) as exc:
+        await api_routes.generate_script_endpoint("p1", user={"id": "u1", "role": "creator"})
+    assert exc.value.status_code == 409
+    assert db.scenes.docs
+    assert db.scripts.docs[0]["full_script"] == old["full_script"]
+
+
+async def _async_script():
+    return {"full_script": "brand new narration " * 20, "word_count": 60}
+
+
+@pytest.mark.asyncio
+async def test_metadata_patch_stores_chapter_fields(monkeypatch):
+    from app.models import MetadataUpdate
+    db = FakeDB({"id": "p1", "user_id": "u1"})
+    db.metadata_packages.docs.append({"id": "m", "project_id": "p1", "chapters": []})
+    monkeypatch.setattr(api_routes, "get_db", lambda: db)
+
+    async def stub(_db, project):
+        return {"project": project}
+
+    monkeypatch.setattr(api_routes, "_attach_project_view", stub)
+    await api_routes.update_metadata(
+        "p1",
+        MetadataUpdate(chapters=[{"time": "0:00", "label": "Intro"}]),
+        user={"id": "u1", "role": "creator"},
+    )
+    assert db.metadata_packages.docs[0]["chapters"] == [{"timestamp": "0:00", "title": "Intro"}]
+
+
+@pytest.mark.asyncio
 async def test_voiceover_concat_reencodes_and_failed_concat_raises(tmp_path, monkeypatch):
     left = tmp_path / "a.mp3"
     right = tmp_path / "b.mp3"
@@ -230,6 +331,33 @@ async def test_voiceover_concat_reencodes_and_failed_concat_raises(tmp_path, mon
     assert produced.read_bytes() == b"RIFF"
     assert "pcm_s16le" in calls[0]
     assert "copy" not in calls[0]
+
+    async def missing_full(_asset, _work, _name):
+        return None
+
+    monkeypatch.setattr(render, "_ensure_audio_local", missing_full)
+    with pytest.raises(RuntimeError, match="full-script"):
+        await render._resolve_audio(
+            {"id": "p", "selected_voiceover_asset_id": "full"},
+            scenes,
+            assets + [{"id": "full", "asset_type": "voiceover_audio", "scene_id": None, "source": "elevenlabs"}],
+            tmp_path,
+        )
+
+    async def present(_asset, _work, name):
+        return left if "000" in name or name == "voiceover_full" else right
+
+    monkeypatch.setattr(render, "_ensure_audio_local", present)
+    uneven = [
+        {"id": "s1", "scene_number": 1, "duration": 30},
+        {"id": "s2", "scene_number": 2, "duration": 30},
+    ]
+    uneven_assets = [
+        {"id": "v1", "asset_type": "voiceover_audio", "scene_id": "s1", "status": "selected", "source": "elevenlabs", "duration": 40},
+        {"id": "v2", "asset_type": "voiceover_audio", "scene_id": "s2", "status": "selected", "source": "elevenlabs", "duration": 20},
+    ]
+    with pytest.raises(RuntimeError, match="visual slot"):
+        await render._resolve_audio({"id": "p"}, uneven, uneven_assets, tmp_path)
 
     async def bad_ffmpeg(cmd, timeout=600):
         return False, "Could not find tag for codec mp3"

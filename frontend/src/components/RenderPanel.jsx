@@ -20,12 +20,22 @@ const normalizeJob = (job) => job
   ? { ...job, status: String(job.status || "").toLowerCase() }
   : job;
 
+function usablePreflight(data) {
+  return Boolean(data)
+    && typeof data === "object"
+    && !Array.isArray(data)
+    && typeof data.ok === "boolean"
+    && Array.isArray(data.checklist);
+}
+
 export default function RenderPanel({
   projectId, project, script, scenes, metadata, assets, timing, canEdit, onChange,
 }) {
   const [preflight, setPreflight] = useState(null);
+  const [preflightStale, setPreflightStale] = useState(false);
   const [loadError, setLoadError] = useState(null);
   const [jobsWarning, setJobsWarning] = useState(null);
+  const [jobsKnown, setJobsKnown] = useState(false);
   const [jobs, setJobs] = useState([]);
   const [activeJob, setActiveJob] = useState(null);
   const [starting, setStarting] = useState(false);
@@ -44,7 +54,6 @@ export default function RenderPanel({
   }, [project?.voice_style, project?.voice_id, project?.aspect_ratio, project?.burn_subtitles]);
 
   const refreshAll = async () => {
-    setLoadError(null);
     setJobsWarning(null);
     let preflightData = null;
     try {
@@ -54,37 +63,40 @@ export default function RenderPanel({
       const status = err.response?.status;
       const message = formatApiError(err.response?.data?.detail) || err.message || "Failed to load render data";
       setLoadError(status ? `${message} (HTTP ${status})` : message);
+      setPreflightStale(true);
       return;
     }
-    if (!preflightData || typeof preflightData !== "object") {
-      setLoadError("Render preflight returned an empty response.");
+    if (!usablePreflight(preflightData)) {
+      setLoadError("Render preflight returned an unusable response.");
+      setPreflightStale(true);
       return;
     }
+    setPreflight(preflightData);
+    setPreflightStale(false);
+    setLoadError(null);
     try {
       const jl = await api.get(`/projects/${projectId}/render/jobs`, { timeout: 15000 });
       const rows = Array.isArray(jl.data) ? jl.data : null;
       if (!rows) {
-        setJobs([]);
-        setActiveJob(null);
         setJobsWarning("Render history response was not a list.");
-      } else {
-        const normalizedJobs = rows.map(normalizeJob);
-        setJobs(normalizedJobs);
-        const active = normalizedJobs.find((j) => ACTIVE_STATES.has(j.status));
-        const latest = normalizedJobs[0] || null;
-        // Only show the in-detail JobStatusCard for active or completed jobs.
-        // Cancelled / failed jobs surface as a calm banner via LastTerminalNotice
-        // and remain accessible in the JobHistory list below.
-        setActiveJob(active || (latest && PROMOTABLE.has(latest.status) ? latest : null));
+        return;
       }
+      const normalizedJobs = rows.map(normalizeJob);
+      setJobs(normalizedJobs);
+      const active = normalizedJobs.find((j) => ACTIVE_STATES.has(j.status));
+      const latest = normalizedJobs[0] || null;
+      // Only show the in-detail JobStatusCard for active or completed jobs.
+      // Cancelled / failed jobs surface as a calm banner via LastTerminalNotice
+      // and remain accessible in the JobHistory list below.
+      setActiveJob(active || (latest && PROMOTABLE.has(latest.status) ? latest : null));
+      setJobsKnown(true);
     } catch (err) {
       const status = err.response?.status;
       const message = formatApiError(err.response?.data?.detail) || err.message || "Failed to load render history";
-      setJobs([]);
-      setActiveJob(null);
+      // Keep the last known job so a history blip does not hide a running render
+      // or enable Start while that job is still going.
       setJobsWarning(status ? `${message} (HTTP ${status})` : message);
     }
-    setPreflight(preflightData);
   };
 
   useEffect(() => {
@@ -222,7 +234,7 @@ export default function RenderPanel({
     }
   };
 
-  if (!preflight) {
+  if (!preflight || (preflightStale && !usablePreflight(preflight))) {
     if (loadError) {
       return (
         <div className="p-8 space-y-3" data-testid="render-load-error">
@@ -244,7 +256,7 @@ export default function RenderPanel({
     );
   }
 
-  const canRender = preflight.ok && !ACTIVE_STATES.has(String(activeJob?.status || "").toLowerCase() || "");
+  const canRender = preflight.ok && !preflightStale && jobsKnown && !ACTIVE_STATES.has(String(activeJob?.status || "").toLowerCase() || "");
   const completed = String(activeJob?.status || "").toLowerCase() === "completed";
   const inProgress = activeJob && ACTIVE_STATES.has(String(activeJob.status || "").toLowerCase());
 
@@ -279,6 +291,12 @@ export default function RenderPanel({
               Voiceover is within 5% and will be tempo-fitted to the narration budget.
             </p>
           )}
+        </div>
+      )}
+      {(loadError || preflightStale) && (
+        <div className="border border-[#FF3366]/40 bg-[#FF3366]/10 text-zinc-200 text-sm px-4 py-3 rounded-sm" data-testid="render-stale-warning">
+          Render readiness is out of date. {loadError || "Refresh before starting a render."}
+          <button type="button" onClick={refreshAll} className="ml-3 underline">Retry</button>
         </div>
       )}
       {jobsWarning && (

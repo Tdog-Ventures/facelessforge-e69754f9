@@ -7,19 +7,34 @@ from app.routes import api as api_routes
 from app import generation as gen_module
 
 
-def _match(doc, query):
-    for key, cond in query.items():
-        if isinstance(cond, dict) and "$in" in cond:
-            if doc.get(key) not in cond["$in"]:
-                return False
-        elif doc.get(key) != cond:
-            return False
-    return True
-
-
 class FakeResult:
     def __init__(self, n=0):
         self.deleted_count = n
+        self.matched_count = n
+
+
+def _match(doc, query):
+    for key, cond in query.items():
+        if key == "$or":
+            if not any(_match(doc, sub) for sub in cond):
+                return False
+            continue
+        if isinstance(cond, dict) and "$exists" in cond:
+            if bool(cond["$exists"]) != (key in doc):
+                return False
+            continue
+        if isinstance(cond, dict) and "$in" in cond:
+            if doc.get(key) not in cond["$in"]:
+                return False
+            continue
+        if isinstance(cond, dict) and "$lt" in cond:
+            value = doc.get(key)
+            if value is None or not value < cond["$lt"]:
+                return False
+            continue
+        if doc.get(key) != cond and not (cond is None and key not in doc):
+            return False
+    return True
 
 
 class FakeCollection:
@@ -33,6 +48,15 @@ class FakeCollection:
             if _match(doc, query):
                 return dict(doc)
         return None
+
+    async def update_many(self, query, update):
+        self.calls.append(("update_many", dict(query)))
+        n = 0
+        for doc in self.docs:
+            if _match(doc, query):
+                doc.update(update.get("$set", {}))
+                n += 1
+        return FakeResult(n)
 
     async def update_one(self, query, update, upsert=False):
         self.calls.append(("update_one", dict(query)))
@@ -212,6 +236,7 @@ async def test_material_change_invalidates_drafts_not_masters(monkeypatch):
         {"id": "v1", "project_id": "project-1", "asset_type": "voiceover_audio"},
         {"id": "st1", "project_id": "project-1", "asset_type": "stock_video", "scene_id": "sc1"},
         {"id": "t1", "project_id": "project-1", "asset_type": "generated_thumbnail"},
+        {"id": "c1", "project_id": "project-1", "asset_type": "client_video", "scene_id": "sc1"},
     ]
     jobs = [{"id": "j1", "project_id": "project-1", "status": "completed",
              "output_storage_key": "renders/project-1/j1.mp4"}]
@@ -225,16 +250,18 @@ async def test_material_change_invalidates_drafts_not_masters(monkeypatch):
     assert db.scenes.docs == []
     assert db.metadata_packages.docs == []
     remaining_types = sorted(a["asset_type"] for a in db.assets.docs)
-    assert remaining_types == ["generated_thumbnail"]
+    assert remaining_types == ["client_video"]
+    assert db.assets.docs[0]["scene_id"] is None
     assert db.render_jobs.docs != []  # master history preserved
     assert db.render_jobs.docs[0]["output_storage_key"] == "renders/project-1/j1.mp4"
     assert all(c[0] != "delete_many" for c in db.render_jobs.calls)
     assert db.projects.docs[0].get("selected_voiceover_asset_id") is None
+    assert db.projects.docs[0].get("selected_thumbnail_asset_id") is None
     assert view["script"]["selected_hook"] == ""
     assert view["script"]["retention_beats"] == []
     assert view["script"]["cta_block"] == ""
     assert view["script_notice"].startswith("Script updated")
-    assert view["script_invalidated"] == {"scenes": 1, "metadata": 1, "assets": 2}
+    assert view["script_invalidated"] == {"scenes": 1, "metadata": 1, "assets": 3}
 
 
 @pytest.mark.asyncio

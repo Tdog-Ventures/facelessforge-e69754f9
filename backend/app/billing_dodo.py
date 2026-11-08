@@ -119,6 +119,23 @@ def infer_credits(product_id: Optional[str]) -> int:
     return credits
 
 
+def scale_credits_for_checkout(*, pending: Optional[dict], quantity: int, unit_credits: int) -> int:
+    """Apply checkout quantity once.
+
+    A pending hash already stores unit credits times quantity. An empty hash
+    means the key was read and was absent. Callers must not pass an empty hash
+    when the Redis read failed; that failure has to be retried instead.
+    """
+    qty = max(1, min(int(quantity or 1), 100))
+    if pending:
+        try:
+            stored = int(pending.get("credits"))
+        except (TypeError, ValueError):
+            stored = int(unit_credits) * qty
+        return max(0, min(stored, MAX_FINITE_CREDITS))
+    return max(0, min(int(unit_credits) * qty, MAX_FINITE_CREDITS))
+
+
 class CheckoutRequest(BaseModel):
     product_id: str
     quantity: int = 1
@@ -178,20 +195,25 @@ async def create_checkout(req: CheckoutRequest, user=Depends(get_current_user)):
         raise HTTPException(500, f"Dodo checkout failed: {str(e)}")
 
     credits = infer_credits(req.product_id) * req.quantity
-    # Store pending in Redis for webhook reconciliation (TTL 1h)
+    # Store pending in Redis for webhook reconciliation (TTL 1h).
+    # The Dodo session already exists. A Redis timeout must not hide that URL:
+    # the webhook grants the stored total when the write landed, and
+    # unit credits times quantity when the key is absent.
     session_id = getattr(session, "session_id", getattr(session, "id", "unknown"))
-    r.hset(
-        f"dodo:pending:{session_id}",
-        mapping={
-            "tenant_id": tenant_id,
-            "product_id": req.product_id,
-            "credits": str(credits),
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        },
-    )
-    r.expire(f"dodo:pending:{session_id}", 3600)
-
     checkout_url = getattr(session, "checkout_url", getattr(session, "url", "")) or ""
+    try:
+        r.hset(
+            f"dodo:pending:{session_id}",
+            mapping={
+                "tenant_id": tenant_id,
+                "product_id": req.product_id,
+                "credits": str(credits),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        r.expire(f"dodo:pending:{session_id}", 3600)
+    except Exception:
+        logger.exception("Dodo pending record failed session=%s; returning the created checkout", session_id)
     return CheckoutResponse(
         checkout_url=checkout_url,
         session_id=session_id,
@@ -352,22 +374,26 @@ async def dodo_webhook(
     if not product_id:
         product_id = os.getenv("DODO_PRODUCT_STARTER", "pdt_starter")
 
-    # Tenant resolution
+    # Tenant resolution. One Redis read decides the pending record.
+    # A timeout is not an absent key: treating it as absent used to multiply
+    # quantity onto credits that checkout had already scaled.
     tenant_id: Optional[str] = None
     credits = DEFAULT_CREDITS
+    pending: dict = {}
     if session_id:
         try:
-            pending = r.hgetall(f"dodo:pending:{session_id}")
-            if pending:
-                tenant_id = pending.get("tenant_id")
-                try:
-                    credits = int(pending.get("credits", str(DEFAULT_CREDITS)))
-                except Exception:
-                    credits = infer_credits(product_id)
-                if pending.get("product_id"):
-                    product_id = pending.get("product_id")  # prefer pending's product
-        except Exception:
-            pass
+            pending = r.hgetall(f"dodo:pending:{session_id}") or {}
+        except Exception as exc:
+            logger.exception("Dodo pending session unreadable session=%s", session_id)
+            raise HTTPException(status_code=503, detail="Pending credit session unreadable; retry required") from exc
+        if pending:
+            tenant_id = pending.get("tenant_id")
+            try:
+                credits = int(pending.get("credits", str(DEFAULT_CREDITS)))
+            except Exception:
+                credits = infer_credits(product_id)
+            if pending.get("product_id"):
+                product_id = pending.get("product_id")  # prefer pending's product
 
     if not tenant_id:
         # Resolve tenant without ternary precedence bug; check metadata separately
@@ -414,16 +440,12 @@ async def dodo_webhook(
             quantity = int(data.get("quantity") or 1)
     except Exception:
         quantity = 1
-    # Apply quantity only if credits was from single product mapping (not already multiplied in pending)
-    # Pending already multiplied; if no pending, multiply now
-    pending_exists = False
-    if session_id:
-        try:
-            pending_exists = bool(r.exists(f"dodo:pending:{session_id}"))
-        except Exception:
-            pending_exists = False
-    if not pending_exists:
-        credits = credits * max(1, min(quantity, 100))
+    # Pending credits were already multiplied by quantity at checkout.
+    credits = scale_credits_for_checkout(
+        pending=pending,
+        quantity=quantity,
+        unit_credits=credits,
+    )
     # Clamp finite
     credits = max(0, min(credits, MAX_FINITE_CREDITS))
     if credits == 0:

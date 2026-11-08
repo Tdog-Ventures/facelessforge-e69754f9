@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { toast } from "sonner";
 import { Sparkles, Loader2, Download, Search, X as XIcon, Wand2, CreditCard, Zap, Info, Save, Film } from "lucide-react";
-import { api, formatApiError, API } from "../lib/api";
+import { api, formatApiError, API, UNBOUNDED_TIMEOUT } from "../lib/api";
 import { formatDuration, sceneBudgetLabel } from "../lib/format";
 import StockAssetModal from "./StockAssetModal";
 import { useConfirm } from "./ConfirmDialog";
@@ -195,7 +195,7 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
     const regenerating = scenes.length > 0;
     toast.loading(regenerating ? "Regenerating the scene plan from the current script…" : "Generating scene plan…", { id: "gen-scenes" });
     try {
-      const { data } = await api.post(`/projects/${projectId}/generate-scenes`, {});
+      const { data } = await api.post(`/projects/${projectId}/generate-scenes`, {}, UNBOUNDED_TIMEOUT);
       onChange(data);
       if (data.project) setInnerProject(data.project);
       toast.success(regenerating ? "Scenes regenerated from the current script" : "Scenes generated", { id: "gen-scenes" });
@@ -214,20 +214,25 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
   const fullRender = async () => {
     setFullRenderLoading(true);
     try {
-      await api.post(`/render/full/${projectId}`);
+      await api.post(`/render/full/${projectId}`, {}, { timeout: 60000 });
       toast.success("Render queued");
     } catch (e) {
-      // fallback to /projects/{id}/render/start or /render/full
+      const timedOut = e?.code === "ECONNABORTED" || !e?.response;
+      if (timedOut || e?.response?.status === 409) {
+        toast.error("Render was not confirmed", {
+          description: "Check Render & Export before trying again. A timed-out request may already be queued.",
+        });
+        return;
+      }
+      if (e?.response?.status !== 404) {
+        toast.error("Render failed", { description: formatApiError(e.response?.data?.detail) || e.message });
+        return;
+      }
       try {
-        await api.post(`/projects/${projectId}/render/full`);
+        await api.post(`/projects/${projectId}/render/start`, {}, { timeout: 60000 });
         toast.success("Render queued");
       } catch (e2) {
-        try {
-          await api.post(`/projects/${projectId}/render/start`, {});
-          toast.success("Render queued");
-        } catch (e3) {
-          toast.error("Render failed", { description: formatApiError(e3.response?.data?.detail) || e3.message });
-        }
+        toast.error("Render failed", { description: formatApiError(e2.response?.data?.detail) || e2.message });
       }
     } finally {
       setFullRenderLoading(false);
@@ -257,7 +262,7 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
     form.append("scene_id", scene.id);
     form.append("asset_type", file.type.startsWith("video/") ? "client_video" : "client_image");
     try {
-      await api.post(`/projects/${projectId}/assets/upload`, form, { headers: { "Content-Type": "multipart/form-data" } });
+      await api.post(`/projects/${projectId}/assets/upload`, form, { headers: { "Content-Type": "multipart/form-data" }, ...UNBOUNDED_TIMEOUT });
       const { data } = await api.get(`/projects/${projectId}`);
       onChange(data);
       toast.success(`Client asset assigned to scene ${scene.scene_number}`);
@@ -272,7 +277,7 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
     form.append("file", file);
     form.append("asset_type", file.type.startsWith("image/") ? "brand_logo" : "brand_image");
     try {
-      await api.post(`/projects/${projectId}/assets/upload`, form, { headers: { "Content-Type": "multipart/form-data" } });
+      await api.post(`/projects/${projectId}/assets/upload`, form, { headers: { "Content-Type": "multipart/form-data" }, ...UNBOUNDED_TIMEOUT });
       const { data } = await api.get(`/projects/${projectId}`);
       onChange(data);
       toast.success("Brand asset uploaded with client provenance");

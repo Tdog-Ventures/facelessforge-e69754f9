@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useMemo } from "react";
 import { toast } from "sonner";
 import { AudioLines, Loader2, Mic2 } from "lucide-react";
-import { api, formatApiError } from "../lib/api";
+import { api, formatApiError, UNBOUNDED_TIMEOUT } from "../lib/api";
 import { useConfirm } from "./ConfirmDialog";
 import VoiceStylePicker from "./voiceover/VoiceStylePicker";
 import VoiceoverCard from "./voiceover/VoiceoverCard";
@@ -57,6 +57,7 @@ export default function VoiceoverPanel({
       const { data } = await api.post(
         `/projects/${projectId}/voiceover/generate-script`,
         { voice_style: voiceStyle },
+        UNBOUNDED_TIMEOUT,
       );
       onChange(data);
       toast.success(meta.mock ? "Mock voiceover ready" : "Voiceover generated", { id: tid });
@@ -81,6 +82,7 @@ export default function VoiceoverPanel({
       const { data } = await api.post(
         `/projects/${projectId}/scenes/${scene.id}/voiceover/generate`,
         { voice_style: voiceStyle },
+        UNBOUNDED_TIMEOUT,
       );
       onChange(data);
       toast.success("Scene voiceover ready", { id: tid });
