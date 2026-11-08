@@ -144,7 +144,7 @@ export default function App() {
             <Route path="/login" element={<GuestOnly><LoginPage /></GuestOnly>} />
             <Route path="/register" element={<GuestOnly><RegisterPage /></GuestOnly>} />
             <Route path="/forgot-password" element={<GuestOnly><ForgotPasswordPage /></GuestOnly>} />
-            <Route path="/reset-password" element={<GuestOnly><ResetPasswordPage /></GuestOnly>} />
+            <Route path="/reset-password" element={<ResetPasswordPage />} />
 
             <Route path="/app" element={<Protected><DashboardPage /></Protected>} />
             <Route path="/app/client-dashboard" element={<Protected><AppShell><ClientDashboard /></AppShell></Protected>} />

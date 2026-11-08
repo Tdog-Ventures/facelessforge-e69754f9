@@ -290,6 +290,11 @@ def _dev_mode() -> bool:
     return os.environ.get("DEV_MODE", "false").lower() in ("1", "true", "yes")
 
 
+def _hash_reset_token(token: str) -> str:
+    """Reset tokens are stored as SHA-256 digests; the raw value only exists in the email."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 @router.post("/auth/forgot-password")
 async def forgot_password(body: ForgotPasswordRequest, request: Request):
     """Always returns 200 — never reveals whether the email exists.
@@ -333,12 +338,13 @@ async def forgot_password(body: ForgotPasswordRequest, request: Request):
         )
         ttl_minutes = int(os.environ.get("PASSWORD_RESET_TTL_MINUTES", "60"))
         token = secrets.token_urlsafe(32)
+        token_hash = _hash_reset_token(token)
         expires_at = now + timedelta(minutes=ttl_minutes)
         await db.password_reset_tokens.insert_one({
             "id": str(uuid.uuid4()),
             "user_id": user["id"],
             "email": email,
-            "token": token,
+            "token_hash": token_hash,
             "created_at": now,
             "expires_at": expires_at,
             "used_at": None,
@@ -367,7 +373,7 @@ async def forgot_password(body: ForgotPasswordRequest, request: Request):
             # Preserve the non-enumerating response while ensuring an undelivered
             # reset token cannot remain active.
             await db.password_reset_tokens.update_many(
-                {"user_id": user["id"], "token": token, "used_at": None},
+                {"user_id": user["id"], "token_hash": token_hash, "used_at": None},
                 {"$set": {"used_at": _now()}},
             )
             logger.error(
@@ -388,7 +394,12 @@ async def forgot_password(body: ForgotPasswordRequest, request: Request):
 async def reset_password(body: ResetPasswordRequest):
     db = get_db()
     now = _now()
-    record = await db.password_reset_tokens.find_one({"token": body.token})
+    token_hash = _hash_reset_token(body.token)
+    # New tokens are stored hashed; raw legacy tokens issued before this change stay
+    # valid until their normal expiry so live links are not broken.
+    record = await db.password_reset_tokens.find_one(
+        {"$or": [{"token_hash": token_hash}, {"token": body.token}]}
+    )
     if not record:
         raise HTTPException(status_code=400, detail="This reset link is invalid or has already been used.")
     if record.get("used_at") is not None:
@@ -405,15 +416,31 @@ async def reset_password(body: ResetPasswordRequest):
     if not user:
         raise HTTPException(status_code=400, detail="This reset link is invalid or has already been used.")
 
+    # Atomic claim: only one concurrent redemption can move used_at from null.
+    claim_filter = {"used_at": None}
+    if record.get("_id") is not None:
+        claim_filter["_id"] = record["_id"]
+    else:
+        claim_filter["$or"] = [{"token_hash": token_hash}, {"token": body.token}]
+    claimed = await db.password_reset_tokens.find_one_and_update(
+        claim_filter, {"$set": {"used_at": now}}
+    )
+    if not claimed:
+        raise HTTPException(status_code=400, detail="This reset link has already been used.")
+
     new_hash = hash_password(body.new_password)
-    await db.users.update_one(
-        {"id": user["id"]},
-        {"$set": {"password_hash": new_hash, "updated_at": now}},
-    )
-    await db.password_reset_tokens.update_one(
-        {"token": body.token},
-        {"$set": {"used_at": now}},
-    )
+    try:
+        await db.users.update_one(
+            {"id": user["id"]},
+            {"$set": {"password_hash": new_hash, "updated_at": now}},
+        )
+    except Exception:
+        # Never leave a token burned by a failed password write.
+        await db.password_reset_tokens.update_one(
+            {"_id": claimed.get("_id")} if claimed.get("_id") is not None else claim_filter,
+            {"$set": {"used_at": None}},
+        )
+        raise HTTPException(status_code=503, detail="Could not update the password. Please retry.")
     # Invalidate any other outstanding tokens for this user
     await db.password_reset_tokens.update_many(
         {"user_id": user["id"], "used_at": None},
