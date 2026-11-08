@@ -565,11 +565,12 @@ def _normalise_pixabay_image(hit: dict, query: str) -> dict:
 def _normalise_pixabay_video(hit: dict, query: str) -> Optional[dict]:
     # Pixabay video hit contains videos.{large,medium,small,tiny}
     videos = hit.get("videos") or {}
-    # Prefer large -> medium -> small
+    # Prefer large -> medium -> small, but skip entries whose dimensions were
+    # omitted (Pixabay sometimes leaves large.width/height as 0).
     best = None
     for size in ["large", "medium", "small", "tiny"]:
         v = videos.get(size)
-        if v and v.get("url"):
+        if v and v.get("url") and int(v.get("width") or 0) > 0:
             best = v
             break
     if not best:
@@ -583,7 +584,7 @@ def _normalise_pixabay_video(hit: dict, query: str) -> Optional[dict]:
         "external_id": str(hit.get("id")),
         "media_type": "stock_video",
         "title": (hit.get("tags") or f"Pixabay video {hit.get('id')}")[:160],
-        "preview_url": hit.get("userImageURL") or best.get("url"),
+        "preview_url": best.get("thumbnail") or hit.get("userImageURL") or best.get("url"),
         "source_url": hit.get("pageURL") or f"https://pixabay.com/videos/{hit.get('id')}/",
         "download_url": best.get("url"),
         "attribution_name": hit.get("user") or "Pixabay contributor",
@@ -870,8 +871,20 @@ async def search_stock_aggregated(
                 if item not in merged and len(merged) < per_page:
                     merged.append(item)
 
-    # FIX: blocklist + last10 dedupe
-    merged = _dedupe_and_filter_items(merged)
+    # Per-provider searches already applied the blocklist and last-10 dedupe.
+    # Re-running the same filter here discarded the whole batch (especially
+    # videos) because the IDs had just been recorded by the provider call.
+    # Only remove duplicate previews across providers.
+    deduped: list[dict] = []
+    seen_keys: set[str] = set()
+    for item in merged:
+        key = str(item.get("preview_url") or item.get("external_id") or "")
+        if key and key in seen_keys:
+            continue
+        if key:
+            seen_keys.add(key)
+        deduped.append(item)
+    merged = deduped
 
     # Optional: sort by relevance overall? Keep interleaved order to preserve mix; but apply relevance as secondary sort within each provider already.
     # Determine source label

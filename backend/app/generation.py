@@ -6,7 +6,14 @@ Falls back to deterministic generation if no LLM is available.
 from __future__ import annotations
 from app.scene_terms import derive_search_terms, derive_visual_query
 from app.visual_query import extract_visual_keywords, is_garbage_token, truncate_words
-from app.timing import TimingContract, normalize_scene_timeline, target_word_count
+from app.timing import (
+    MIN_SCRIPT_WORDS,
+    NarrationPlan,
+    TimingContract,
+    normalize_scene_timeline,
+    script_word_count,
+    target_word_count,
+)
 
 import json
 import logging
@@ -23,11 +30,15 @@ except OSError:
 import math
 import random
 import re
+import time
 import uuid
 from pathlib import Path
 from typing import Optional
 
 import httpx
+
+from . import observability as obs
+from . import provider_usage
 
 logger = logging.getLogger("facelessforge.generation")
 
@@ -67,12 +78,6 @@ strip_beat_artifacts = strip_beat_markers
 
 UNSUPPORTED_TOOL_CLAIMS = ("zapier", "notion", "airtable", "canva", "airtasker")
 
-# Common words that are only "unsupported tool claims" when the brand itself
-# is named. Matching case-insensitively discarded scripts for trivial words —
-# e.g. every educational script about the *notion* of discipline died on the
-# lowercase token "notion".
-CASE_SENSITIVE_TOOL_CLAIMS = frozenset({"notion"})
-
 
 def find_unsupported_tool_claims(script: dict, project: dict) -> list[str]:
     """Return third-party tools the model invented for an unrelated topic.
@@ -85,27 +90,20 @@ def find_unsupported_tool_claims(script: dict, project: dict) -> list[str]:
         return []
     project = project or {}
     brief = project.get("structured_brief") or {}
-    raw_grounded = " ".join(str(value or "") for value in (
+    grounded = " ".join(str(value or "") for value in (
         project.get("topic"), project.get("niche"), project.get("audience"),
         project.get("name"), brief.get("service"), brief.get("offer"),
         brief.get("audience"), brief.get("location"), brief.get("problem"),
-    ))
-    raw_generated = " ".join(str(value or "") for value in (
+    )).lower()
+    generated = " ".join(str(value or "") for value in (
         script.get("full_script"), script.get("selected_hook"),
         script.get("cta_block"),
         " ".join(str(x) for x in (script.get("retention_beats") or [])),
-    ))
-
-    def _claims(term: str, raw: str) -> bool:
-        # Case-sensitive terms require the brand casing ("Notion"); all
-        # others match the lowercased text like before.
-        if term in CASE_SENSITIVE_TOOL_CLAIMS:
-            return bool(re.search(rf"\b{re.escape(term.capitalize())}\b", raw))
-        return bool(re.search(rf"\b{re.escape(term)}\b", raw.lower()))
-
+    )).lower()
     return [
         term for term in UNSUPPORTED_TOOL_CLAIMS
-        if _claims(term, raw_generated) and not _claims(term, raw_grounded)
+        if re.search(rf"\b{re.escape(term)}\b", generated)
+        and not re.search(rf"\b{re.escape(term)}\b", grounded)
     ]
 
 
@@ -138,6 +136,8 @@ def _render_educational_prompt(project: dict, template: str, target_words: int) 
     }
     for key, value in replacements.items():
         filled = filled.replace(key, str(value))
+    floor_words = script_word_floor(target_words)
+    ceiling_words = script_word_ceiling(target_words)
     return filled + f"""
 
 Respond with strict JSON in this exact shape:
@@ -151,7 +151,7 @@ Respond with strict JSON in this exact shape:
   "cta_block": "call to action"
 }}
 
-CRITICAL: full_script must be ONE continuous string of ~{target_words} words, not a list or object. Count words before responding."""
+CRITICAL: full_script must be ONE continuous string between {floor_words} and {ceiling_words} words (target {target_words}). Do not stop early and do not pad past the maximum. Count the words before responding."""
 
 
 def _llm_available() -> bool:
@@ -180,7 +180,90 @@ def _extract_json(text: str) -> Optional[dict]:
 
 
 
-async def _llm_json(system: str, user: str, cache_key: str = "") -> Optional[dict]:
+async def _try_deepseek_json(
+    system: str, user: str, cache_key: str, max_tokens: int = 8192
+) -> tuple[Optional[dict], str]:
+    """Run one DeepSeek request and record measured usage, including failures."""
+    deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    if not deepseek_key:
+        return None, "DeepSeek not configured"
+    started = time.monotonic()
+    status_code: Optional[int] = None
+    usage: dict = {}
+    request_id: Optional[str] = None
+    text = ""
+    message = ""
+    parsed: Optional[dict] = None
+    try:
+        logger.info("DeepSeek request for %s", cache_key)
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                "https://api.deepseek.com/chat/completions",
+                headers={"Authorization": f"Bearer {deepseek_key}", "Content-Type": "application/json"},
+                json={"model": "deepseek-chat", "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}], "temperature": 0.7, "max_tokens": max_tokens},
+            )
+        status_code = resp.status_code
+        request_id = resp.headers.get("x-request-id")
+        if status_code == 200:
+            body = resp.json()
+            usage = body.get("usage") or {}
+            request_id = request_id or body.get("id")
+            text = body["choices"][0]["message"]["content"]
+            parsed = _extract_json(text)
+            if parsed:
+                logger.info("DeepSeek OK %s", cache_key)
+                return parsed, ""
+            message = f"DeepSeek non-JSON: {text[:200]}"
+            logger.warning(message)
+            return None, message
+        message = f"DeepSeek {status_code}: {resp.text[:300]}"
+        logger.warning(message)
+        return None, message
+    except Exception as e:  # noqa: BLE001 - provider failure falls through to existing backups
+        message = f"DeepSeek {e}"
+        logger.warning(message)
+        obs.capture_exception(e, tags={
+            "operation": "generation.llm",
+            "stage": "provider_request",
+            "terminal_status": "retrying",
+            "provider": "deepseek",
+            "model": "deepseek-chat",
+            "error_code": "llm_provider_error",
+            "attempt_number": 1,
+            "retry_count": 0,
+            "output_saved": False,
+            "backend_outcome": "failed",
+        })
+        return None, message
+    finally:
+        await provider_usage.record_llm_attempt(
+            provider="deepseek",
+            model="deepseek-chat",
+            cache_key=cache_key,
+            success=parsed is not None,
+            http_status=status_code,
+            error_code=(
+                None if parsed is not None
+                else "llm_non_json" if status_code == 200
+                else f"llm_http_{status_code}" if status_code
+                else "llm_provider_error"
+            ),
+            error_message=message,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            prompt_tokens=usage.get("prompt_tokens"),
+            completion_tokens=usage.get("completion_tokens"),
+            total_tokens=usage.get("total_tokens"),
+            cached_tokens=usage.get("prompt_cache_hit_tokens"),
+            prompt_characters=len(system or "") + len(user or ""),
+            completion_characters=len(text or ""),
+            request_id=request_id,
+            metadata={"max_tokens": max_tokens, "temperature": 0.7},
+        )
+
+
+async def _llm_json(
+    system: str, user: str, cache_key: str = "", max_tokens: int = 8192
+) -> Optional[dict]:
     """Ollama PRIMARY, then DeepSeek, Kimi, Claude backup.
 
     Ollama is local, private, no API costs — always tried first.
@@ -192,6 +275,17 @@ async def _llm_json(system: str, user: str, cache_key: str = "") -> Optional[dic
     except OSError:
         pass
     last_error: str = ""
+    configured_provider = os.environ.get("LLM_PROVIDER", "").strip().lower()
+    deepseek_attempted = False
+
+    # Respect the active provider selection before trying local fallbacks.  The
+    # production configuration selects DeepSeek; trying Ollama twice first
+    # previously consumed two 120-second request budgets for one scene plan.
+    if configured_provider in {"deepseek", "deepseek-chat"}:
+        deepseek_attempted = True
+        parsed, last_error = await _try_deepseek_json(system, user, cache_key, max_tokens=max_tokens)
+        if parsed:
+            return parsed
 
     # 1. Local Ollama (PRIMARY) — 2 attempts, 600s timeout per attempt
     ollama_model = os.environ.get("OLLAMA_MODEL", "llama3:latest").strip() or "llama3:latest"
@@ -211,7 +305,7 @@ async def _llm_json(system: str, user: str, cache_key: str = "") -> Optional[dic
                             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
                             "stream": False,
                             "format": "json",
-                            "options": {"temperature": 0.7, "num_ctx": 8192},
+                            "options": {"temperature": 0.7, "num_ctx": 8192, "num_predict": max_tokens},
                         },
                     )
                     if resp.status_code == 200:
@@ -235,7 +329,7 @@ async def _llm_json(system: str, user: str, cache_key: str = "") -> Optional[dic
                             "prompt": user,
                             "stream": False,
                             "format": "json",
-                            "options": {"temperature": 0.7, "num_ctx": 8192},
+                            "options": {"temperature": 0.7, "num_ctx": 8192, "num_predict": max_tokens},
                         },
                     )
                     if resp.status_code == 200:
@@ -252,35 +346,39 @@ async def _llm_json(system: str, user: str, cache_key: str = "") -> Optional[dic
         except httpx.TimeoutException as e:
             last_error = f"Ollama timeout ({ollama_timeout}s)"
             logger.warning("Ollama (%s) timeout for %s attempt %d: %s", ollama_model, cache_key, attempt + 1, e)
+            obs.capture_exception(e, tags={
+                "operation": "generation.llm",
+                "stage": "provider_request",
+                "terminal_status": "retrying",
+                "provider": "ollama",
+                "model": ollama_model,
+                "error_code": "llm_timeout",
+                "attempt_number": attempt + 1,
+                "retry_count": attempt,
+                "output_saved": False,
+                "backend_outcome": "failed",
+            })
         except Exception as e:
             last_error = f"Ollama {type(e).__name__}: {e}"
             logger.warning("Ollama (%s) call failed for %s attempt %d: %s", ollama_model, cache_key, attempt + 1, e)
+            obs.capture_exception(e, tags={
+                "operation": "generation.llm",
+                "stage": "provider_request",
+                "terminal_status": "retrying",
+                "provider": "ollama",
+                "model": ollama_model,
+                "error_code": "llm_provider_error",
+                "attempt_number": attempt + 1,
+                "retry_count": attempt,
+                "output_saved": False,
+                "backend_outcome": "failed",
+            })
 
-    # 2. DeepSeek — cloud backup
-    deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
-    if deepseek_key:
-        try:
-            logger.info("Falling back to DeepSeek for %s", cache_key)
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                resp = await client.post(
-                    "https://api.deepseek.com/chat/completions",
-                    headers={"Authorization": f"Bearer {deepseek_key}", "Content-Type": "application/json"},
-                    json={"model": "deepseek-chat", "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}], "temperature": 0.7, "max_tokens": 4096},
-                )
-                if resp.status_code == 200:
-                    text = resp.json()["choices"][0]["message"]["content"]
-                    parsed = _extract_json(text)
-                    if parsed:
-                        logger.info("DeepSeek OK %s", cache_key)
-                        return parsed
-                    last_error = f"DeepSeek non-JSON: {text[:200]}"
-                    logger.warning(last_error)
-                else:
-                    last_error = f"DeepSeek {resp.status_code}: {resp.text[:300]}"
-                    logger.warning(last_error)
-        except Exception as e:
-            last_error = f"DeepSeek {e}"
-            logger.warning(last_error)
+    # 2. DeepSeek — cloud backup, unless it was the configured provider above.
+    if not deepseek_attempted:
+        parsed, last_error = await _try_deepseek_json(system, user, cache_key, max_tokens=max_tokens)
+        if parsed:
+            return parsed
 
     # 3. Kimi — second cloud backup
     kimi_key = os.environ.get("KIMI_API_KEY", "").strip() or os.environ.get("MOONSHOT_API_KEY", "").strip()
@@ -292,7 +390,7 @@ async def _llm_json(system: str, user: str, cache_key: str = "") -> Optional[dic
                 resp = await client.post(
                     "https://api.moonshot.cn/v1/chat/completions",
                     headers={"Authorization": f"Bearer {kimi_key}", "Content-Type": "application/json"},
-                    json={"model": kimi_model, "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}], "temperature": 0.7, "max_tokens": 4096},
+                    json={"model": kimi_model, "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}], "temperature": 0.7, "max_tokens": max_tokens},
                 )
                 if resp.status_code == 200:
                     text = resp.json()["choices"][0]["message"]["content"]
@@ -303,6 +401,18 @@ async def _llm_json(system: str, user: str, cache_key: str = "") -> Optional[dic
                 last_error = f"Kimi {resp.status_code}"
         except Exception as e:
             last_error = f"Kimi {e}"
+            obs.capture_exception(e, tags={
+                "operation": "generation.llm",
+                "stage": "provider_request",
+                "terminal_status": "retrying",
+                "provider": "kimi",
+                "model": os.environ.get("KIMI_MODEL", "kimi-k2-0711-preview"),
+                "error_code": "llm_provider_error",
+                "attempt_number": 2,
+                "retry_count": 1,
+                "output_saved": False,
+                "backend_outcome": "failed",
+            })
 
     # 4. Claude — final backup (per skill: Claude is backup only)
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
@@ -316,7 +426,7 @@ async def _llm_json(system: str, user: str, cache_key: str = "") -> Optional[dic
                 resp = await client.post(
                     "https://api.anthropic.com/v1/messages",
                     headers={"x-api-key": anthropic_key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"},
-                    json={"model": anthropic_model, "system": system, "messages": [{"role": "user", "content": user}], "max_tokens": 4096, "temperature": 0.7},
+                    json={"model": anthropic_model, "system": system, "messages": [{"role": "user", "content": user}], "max_tokens": max_tokens, "temperature": 0.7},
                 )
                 if resp.status_code == 200:
                     text = "".join([b.get("text", "") for b in resp.json().get("content", [])])
@@ -329,8 +439,34 @@ async def _llm_json(system: str, user: str, cache_key: str = "") -> Optional[dic
                     logger.warning(last_error)
         except Exception as e:
             last_error = f"Claude {e}"
+            obs.capture_exception(e, tags={
+                "operation": "generation.llm",
+                "stage": "provider_request",
+                "terminal_status": "failed",
+                "provider": "claude",
+                "model": anthropic_model,
+                "error_code": "llm_provider_error",
+                "attempt_number": 3,
+                "retry_count": 2,
+                "output_saved": False,
+                "backend_outcome": "failed",
+            })
 
     logger.error(f"All LLMs failed {cache_key}: {last_error}")
+    obs.capture_message(f"All LLMs failed {cache_key}: {last_error}", level="error",
+                        fingerprint=["generation", "llm_exhausted"],
+                        tags={
+                            "operation": "generation.llm",
+                            "stage": "provider_chain_exhausted",
+                            "terminal_status": "failed",
+                            "provider": configured_provider or "ollama",
+                            "model": ollama_model,
+                            "error_code": "llm_unavailable",
+                            "attempt_number": 4,
+                            "retry_count": 3,
+                            "output_saved": False,
+                            "backend_outcome": "failed",
+                        })
     return None
 
 
@@ -339,8 +475,194 @@ async def _llm_json(system: str, user: str, cache_key: str = "") -> Optional[dic
 SCRIPT_SYSTEM = (
     "You are a real business owner talking to a friend. Use contractions, short sentences, 8th grade words. No AI phrases. Start with a personal story. "
     "Never invent software, tools, integrations, brands, or product names that the user did not provide. "
-    "Always respond with strict JSON, no commentary. All text in English."
+    "Always respond with strict JSON, no commentary. All text in English. "
+    "Deliver at the requested length: text far below the requested word count is treated as a failed generator response, not a finished script."
 )
+
+# Scripts are planned from the same duration contract as voiceover validation
+# and render preflight. The bounds are a planning envelope, not a promise that
+# the selected voice will land at 150 wpm; the measured take is the authority.
+SCRIPT_WORD_FLOOR_RATIO = 0.95
+SCRIPT_WORD_CEILING_RATIO = 1.05
+CHUNK_WORD_TARGET = 2500
+
+
+class ScriptLengthError(Exception):
+    """A generated AI script is outside the narration planning envelope.
+
+    Carries the counts so callers can surface an explicit, repairable error
+    instead of silently truncating narration or paying for a take that cannot
+    fit the selected duration.
+    """
+
+    def __init__(self, *, words: int, floor: int, ceiling: int | None = None):
+        self.word_count = int(words)
+        self.word_floor = int(floor)
+        self.word_ceiling = int(ceiling) if ceiling is not None else None
+        if self.word_ceiling is not None and self.word_count > self.word_ceiling:
+            message = (
+                f"AI script measured {self.word_count} words against a "
+                f"{self.word_floor}-{self.word_ceiling} word range. "
+                "Shorten or regenerate the script."
+            )
+        else:
+            message = (
+                f"AI script measured {self.word_count} words against a "
+                f"{self.word_floor}-word minimum. Lengthen or regenerate the script."
+            )
+        super().__init__(message)
+
+
+class ScriptUnderLengthError(ScriptLengthError):
+    """Back-compat name for the short-script case."""
+
+
+def _count_script_words(text: str) -> int:
+    """Word count with the same tokenizer _finalize_script reports."""
+    return script_word_count(text)
+
+
+def script_word_floor(target_words: int) -> int:
+    """Minimum word count a script must reach for its narration budget."""
+    try:
+        target = int(target_words or 0)
+    except (TypeError, ValueError):
+        target = 0
+    if target <= 0:
+        return MIN_SCRIPT_WORDS
+    return max(MIN_SCRIPT_WORDS, math.ceil(target * SCRIPT_WORD_FLOOR_RATIO))
+
+
+def script_word_ceiling(target_words: int) -> int:
+    """Maximum word count allowed by the same narration planning envelope."""
+    try:
+        target = int(target_words or 0)
+    except (TypeError, ValueError):
+        target = 0
+    if target <= 0:
+        return MIN_SCRIPT_WORDS
+    return max(script_word_floor(target), math.floor(target * SCRIPT_WORD_CEILING_RATIO))
+
+
+def script_output_token_budget(target_words: int) -> int:
+    """Scale the provider output budget to the requested narration length.
+
+    The old fixed 4k budget silently cut long scripts mid-sentence. 1.65
+    tokens/word leaves room for punctuation and the JSON envelope; chunked
+    generation keeps each individual request inside provider limits.
+    """
+    try:
+        words = max(1, int(target_words or 1))
+    except (TypeError, ValueError):
+        words = 1
+    return max(2048, min(8192, math.ceil(words * 1.8) + 512))
+
+
+# Small shortfalls are closed with a neutral, complete sentence rather than a
+# paid rewrite that may overshoot. Existing narration is preserved verbatim.
+MICRO_CONTINUATIONS = {
+    1: "Indeed.",
+    2: "That matters.",
+    3: "That is it.",
+    4: "That is the point.",
+    5: "That is the practical point.",
+    6: "That is the practical lesson here.",
+    7: "That is the practical lesson to keep.",
+}
+
+
+def micro_continuation(
+    current_words: int, *, min_words: int, max_words: int, target_words: int
+) -> str | None:
+    """Return a short closing sentence that lands inside the word envelope."""
+    need = max(1, min_words - current_words)
+    room = max(1, max_words - current_words)
+    preferred = max(need, min(room, target_words - current_words))
+    for count in range(preferred, room + 1):
+        phrase = MICRO_CONTINUATIONS.get(count)
+        if phrase:
+            return phrase
+    for count in range(need, room + 1):
+        phrase = MICRO_CONTINUATIONS.get(count)
+        if phrase:
+            return phrase
+    return None
+
+
+async def _generate_script_chunk(
+    system: str,
+    topic: str,
+    part_idx: int,
+    total_parts: int,
+    words_this_chunk: int,
+    cache_key: str,
+    max_tokens: int = 8192,
+):
+    part_intro = f"PART {part_idx}/{total_parts} of script about {topic}. "
+    if total_parts > 1:
+        if part_idx == 1:
+            part_intro += f"OPENING - write {words_this_chunk} words, hook to continue. "
+        elif part_idx == total_parts:
+            part_intro += f"FINAL - write {words_this_chunk} words, wrap up + CTA. "
+        else:
+            part_intro += f"MIDDLE part {part_idx} - write {words_this_chunk} words, continue. "
+    floor_this = max(MIN_SCRIPT_WORDS, math.ceil(words_this_chunk * 0.7))
+    user = part_intro + f"\nCRITICAL: Write at least {floor_this} words for this chunk."
+    return await _llm_json(
+        system, user, f"{cache_key}-part{part_idx}", max_tokens=max_tokens
+    )
+
+
+async def generate_long_script(
+    project: dict, target_words: int, base_system: str, base_cache_key: str
+):
+    """Generate a long script in bounded chunks, or fail closed.
+
+    A chunk that produced no script is never silently skipped; the stitched
+    result must also stay inside the shared planning envelope. Returning
+    ``None`` lets the caller fall back to the gated single-shot path.
+    """
+    words_per_chunk = CHUNK_WORD_TARGET
+    total_parts = math.ceil(target_words / words_per_chunk)
+    full_parts: list[str] = []
+    first = None
+    for i in range(1, total_parts + 1):
+        this_words = min(words_per_chunk, target_words - (i - 1) * words_per_chunk)
+        if this_words <= 0:
+            break
+        res = await _generate_script_chunk(
+            base_system,
+            project.get("topic") or "",
+            i,
+            total_parts,
+            this_words,
+            base_cache_key,
+            max_tokens=script_output_token_budget(this_words),
+        )
+        if not res or not res.get("full_script"):
+            logger.warning(
+                "Long-form chunk %s/%s produced no script; failing closed", i, total_parts
+            )
+            return None
+        if first is None:
+            first = res
+        full_parts.append(res.get("full_script", "").strip())
+    if not full_parts:
+        return None
+    stitched = "\n\n".join(full_parts)
+    words = _count_script_words(stitched)
+    floor = script_word_floor(target_words)
+    ceiling = script_word_ceiling(target_words)
+    if words < floor or words > ceiling:
+        logger.warning(
+            "Long-form script measured %s words outside %s-%s; failing closed",
+            words,
+            floor,
+            ceiling,
+        )
+        return None
+    first["full_script"] = stitched
+    return first
 
 
 def _coerce_script(result: dict) -> dict:
@@ -377,41 +699,59 @@ def _coerce_script(result: dict) -> dict:
 
 
 def _finalize_script(out: dict, narration_duration: float = None) -> dict:
-    """Attach derived stats so API consumers never see missing fields. Enforce target duration if given."""
+    """Attach derived stats; never rewrite or truncate narration here.
+
+    Length is reported as data. Long AI output is corrected by the bounded
+    generator path (or rejected), and manual text is preserved verbatim. The
+    paid voiceover preflight is the final gate before synthesis.
+    """
     full = out.get("full_script") or ""
-    # Enforce target duration: truncate to target words if too long (LLM often ignores word count)
-    if narration_duration is not None:
-        try:
-            target_dur = float(narration_duration)
-            target_words = target_word_count(target_dur)
-            # Allow 30% overrun, then word-boundary truncate
-            max_words = int(target_words * 1.5)
-            words_list = re.findall(r"\b\w+\b", full)
-            if len(words_list) > max_words:
-                # Truncate to target_words at word boundary, keep sentences
-                truncated = " ".join(words_list[:target_words])
-                # Try to end at sentence boundary if possible
-                if "." in truncated:
-                    last_dot = truncated.rfind(".")
-                    if last_dot > len(truncated) * 0.7:
-                        truncated = truncated[: last_dot + 1]
-                out["full_script"] = truncated
-                full = truncated
-                logger.info("Script truncated from %s to %s words for narration budget %.2fs", len(words_list), len(re.findall(r"\b\w+\b", truncated)), target_dur)
-        except Exception:
-            pass
-    words = len(re.findall(r"\b\w+\b", full))
+    words = script_word_count(full)
     out["word_count"] = words
     out["estimated_duration"] = int(words / 2.5)
-    # Duration-awareness: record the word budget the narration called for so
-    # shortfalls are visible early instead of surfacing later as a render
-    # "rebuild" (e.g. a 48-word script against a 30s target).
+    # Duration-awareness: record the word envelope the narration called for so
+    # shortfalls/overruns are visible everywhere a script doc is stored.
     try:
         budget = target_word_count(float(narration_duration)) if narration_duration else None
     except Exception:
         budget = None
     out["word_budget"] = budget
     out["budget_coverage"] = round(words / budget, 3) if budget else None
+    if budget:
+        floor_words = script_word_floor(budget)
+        ceiling_words = script_word_ceiling(budget)
+        out["word_floor"] = floor_words
+        out["word_ceiling"] = ceiling_words
+        if words < floor_words:
+            status = "too_short"
+            out["under_length"] = True
+            out["length_message"] = (
+                f"Script has {words} words; {budget} words is the planning target "
+                f"and {floor_words} is the minimum. Add about {floor_words - words} words."
+            )
+        elif words > ceiling_words:
+            status = "too_long"
+            out["under_length"] = False
+            out["length_message"] = (
+                f"Script has {words} words; {ceiling_words} is the planning maximum "
+                f"for this target. Remove about {words - ceiling_words} words."
+            )
+        else:
+            status = "within_bounds"
+            out["under_length"] = False
+            out["length_message"] = (
+                f"Script has {words} words; the planning range is "
+                f"{floor_words}-{ceiling_words}."
+            )
+        out["length_status"] = status
+        out["within_bounds"] = status == "within_bounds"
+    else:
+        out["word_floor"] = None
+        out["word_ceiling"] = None
+        out["under_length"] = None
+        out["length_status"] = "unknown"
+        out["within_bounds"] = None
+        out["length_message"] = "No narration duration was supplied for length validation."
     return out
 
 
@@ -426,27 +766,91 @@ async def generate_script(project: dict) -> dict:
     _is_edu = any(k in _haystack for k in _edu_keys)
 
     target_dur = int(project.get("target_duration", 300))
-    timing = TimingContract.from_project(project)
-    narration_dur = timing.narration_seconds
-    target_words = max(5, target_word_count(narration_dur))
+    plan = NarrationPlan.from_project(project)
+    narration_dur = plan.narration_seconds
+    target_words = plan.words_target
+    min_words = plan.words_min
+    max_words = plan.words_max
+    output_tokens = script_output_token_budget(target_words)
+    base_cache_key = f"script-{project.get('id', uuid.uuid4())}"
+
+    current_finalized: Optional[dict] = None
+    current_text = ""
+    current_words = 0
+    current_status: Optional[str] = None
+    best_finalized: Optional[dict] = None
+    best_words = 0
+    best_status: Optional[str] = None
+
+    def _track(finalized: dict) -> Optional[dict]:
+        nonlocal current_finalized, current_text, current_words, current_status
+        nonlocal best_finalized, best_words, best_status
+        current_finalized = finalized
+        current_text = str(finalized.get("full_script") or "")
+        current_words = int(finalized.get("word_count") or 0)
+        current_status = str(finalized.get("length_status") or "too_short")
+        if current_status == "within_bounds":
+            return finalized
+        if best_finalized is None or abs(current_words - target_words) < abs(best_words - target_words):
+            best_finalized = finalized
+            best_words = current_words
+            best_status = current_status
+        return None
+
+    def _accept_response(result: Optional[dict]) -> Optional[dict]:
+        if not result:
+            return None
+        coerced = _coerce_script(result)
+        if not coerced or not coerced.get("full_script", "").strip():
+            return None
+        unsupported = find_unsupported_tool_claims(coerced, project)
+        if unsupported:
+            logger.warning(
+                "Discarding generated script with unsupported tool claims: %s",
+                unsupported,
+            )
+            return None
+        finalized = _finalize_script(coerced, narration_dur)
+        return _track(finalized)
+
+    if target_words > 3000:
+        logger.info(
+            "Long form %s words -> chunked %s parts",
+            target_words,
+            math.ceil(target_words / CHUNK_WORD_TARGET),
+        )
+        try:
+            long_res = await generate_long_script(
+                project, target_words, SCRIPT_SYSTEM, base_cache_key
+            )
+            if long_res and long_res.get("full_script"):
+                accepted = _accept_response(long_res)
+                if accepted:
+                    return accepted
+        except Exception as e:
+            logger.warning("Chunked long-form failed, falling back to single: %s", e)
 
     if _is_edu:
-        logger.info(f"EDUCATIONAL topic detected: {project.get('topic')} -> using educational_script.txt (Ollama primary)")
+        logger.info(
+            "EDUCATIONAL topic detected: %s -> using educational_script.txt",
+            project.get("topic"),
+        )
         tmpl = _load_prompt_template("educational_script.txt")
         if tmpl:
             user = _render_educational_prompt(project, tmpl, target_words)
-            result = await _llm_json(SCRIPT_SYSTEM, user, f"script-{project.get('id','edu')}")
-            if result:
-                coerced = _coerce_script(result)
-                if coerced and coerced.get("full_script"):
-                    unsupported = find_unsupported_tool_claims(coerced, project)
-                    if unsupported:
-                        logger.warning("Discarding generated script with unsupported tool claims: %s", unsupported)
-                    else:
-                        return _finalize_script(coerced, narration_dur)
-            logger.warning("Educational template LLM failed - using on-topic deterministic fallback")
-        # Educational topics never fall through to the generic business prompt:
-        # straight to the on-topic deterministic fallback below.
+            result = await _llm_json(
+                SCRIPT_SYSTEM,
+                user,
+                f"script-{project.get('id','edu')}",
+                max_tokens=output_tokens,
+            )
+            accepted = _accept_response(result)
+            if accepted:
+                return accepted
+            logger.warning(
+                "Educational template LLM failed - using on-topic deterministic fallback"
+            )
+        # Educational topics never fall through to the generic business prompt.
     else:
         user = f"""Generate a faceless YouTube script as strict JSON with this exact shape:
 {{
@@ -461,104 +865,219 @@ async def generate_script(project: dict) -> dict:
 
 Topic: {project.get('topic', project.get('title', 'business success story'))}
 Niche: {project.get('niche', 'business')}
-Target duration: {target_dur}s (~{target_words} words)
+Target duration: {target_dur}s. Narration slot: {narration_dur:.1f}s.
+Word target: {target_words}. Acceptable range: {min_words}-{max_words} words.
 Tone: {project.get('tone', 'documentary')}
 
-CRITICAL: full_script must be ONE continuous string of ~{target_words} words, not a list or object. Count words before responding.
+CRITICAL: full_script must be ONE continuous string between {min_words} and {max_words} words. Do not stop early, and do not pad past the maximum. Count the words before responding. A script outside this range is rejected and corrected.
 Write specifically about the Topic above. Do NOT fall back to a generic entrepreneur/startup origin story (instant noodles, sleeping in the office, investors saying no, first 100 customers) unless the Topic explicitly asks for one.
 Do not include BEAT markers, section headers, or structural labels (such as "BEAT 1", "INTRO:", "HOOK:", "CTA:", "SCENE 1:", etc.) in the output. All text must read as continuous voiceover."""
 
-        result = await _llm_json(SCRIPT_SYSTEM, user, f"script-{project.get('id', uuid.uuid4())}")
-        if result:
-            coerced = _coerce_script(result)
-            if coerced and coerced.get("full_script", "").strip():
-                unsupported = find_unsupported_tool_claims(coerced, project)
-                if unsupported:
-                    logger.warning("Discarding generated script with unsupported tool claims: %s", unsupported)
-                else:
-                    return _finalize_script(coerced, narration_dur)
+        result = await _llm_json(
+            SCRIPT_SYSTEM, user, base_cache_key, max_tokens=output_tokens
+        )
+        accepted = _accept_response(result)
+        if accepted:
+            return accepted
 
-    # Deterministic fallback - on-topic skeleton, never a canned unrelated story.
-    topic = (project.get("topic") or project.get("title") or "this subject").strip().rstrip("?")
-    if _is_edu:
-        if target_words <= 32:
-            # Short narration budgets (a 5s editorial target leaves ~2.5s of
-            # speech, i.e. ~6 words): the long skeleton below truncates to its
-            # generic opening ("Today we are looking at what") and drops the
-            # topic entirely. Ship a concise, topic-bearing script instead.
-            topic_words = len(re.findall(r"\b\w+\b", topic))
-            if topic_words + 5 <= target_words:
-                narration = f"What the science says about {topic}"
-            else:
-                # An over-budget topic is cut to the budget itself. Finalization tolerates
-                # a 50% overrun, but render timing only absorbs a 5% tempo change, so a
-                # full 7-9 word topic against a 6-word budget would fail render preflight.
-                narration = " ".join(re.findall(r"\b\w+\b", topic)[: max(1, target_words)])
+    # Bounded text correction. Small shortfalls are closed deterministically
+    # with a complete closing sentence; larger shortfalls use a continuation
+    # request that preserves the previous narration verbatim. Overlong takes
+    # get a complete condensation request. No TTS is called here and no text is
+    # ever silently truncated.
+    for correction_round in (1, 2):
+        if current_finalized is None or current_status is None:
+            break
+        if current_status == "within_bounds":
+            return current_finalized
+        if current_status == "too_short":
+            micro = micro_continuation(
+                current_words, min_words=min_words, max_words=max_words,
+                target_words=target_words,
+            )
+            if micro:
+                combined = f"{current_text} {micro}".strip()
+                finalized = _finalize_script(
+                    {**(current_finalized or {}), "full_script": combined},
+                    narration_dur,
+                )
+                accepted = _track(finalized)
+                if accepted:
+                    logger.info(
+                        "Script length closed with a deterministic %s-word continuation "
+                        "(%s -> %s words)",
+                        script_word_count(micro), current_words,
+                        finalized.get("word_count"),
+                    )
+                    return accepted
+                # A micro closer cannot make an overlong take shorter.
+                break
+
+            add_words = max(1, min(target_words - current_words, max_words - current_words))
+            need_words = max(1, min_words - current_words)
+            room_words = max(1, max_words - current_words)
+            retry_user = f"""The complete narration below is {current_words} words. It needs to be {min_words}-{max_words} words (target {target_words}).
+Return STRICT JSON only: {{"continuation": "..."}} where continuation is ONE natural closing passage of exactly {add_words} words (minimum {need_words}, maximum {room_words}) that concludes the narration without changing its meaning.
+Do NOT return the full script, do NOT return a full_script field, do NOT repeat, shorten, rewrite, summarise or explain the existing narration. Only the new closing words belong in the continuation value. A response at or near the length of the existing narration is a shape violation, is discarded and cannot be appended.
+
+EXISTING NARRATION:
+{current_text}
+
+Topic: {project.get('topic', project.get('title', 'this subject'))}
+Niche: {project.get('niche', 'business')}
+Tone: {project.get('tone', 'documentary')}"""
+        else:
+            overage = max(1, current_words - max_words)
+            retry_user = f"""The complete narration below is {current_words} words, which is {overage} words over the {max_words}-word maximum.
+Rewrite the COMPLETE narration at no more than {max_words} words (target {target_words}). Preserve the meaning and the strongest concrete details; remove repetition and secondary examples. Return the full narration as full_script, not a fragment or only the removed text.
+
+PREVIOUS NARRATION:
+{current_text}
+
+Topic: {project.get('topic', project.get('title', 'this subject'))}"""
+
+        result = await _llm_json(
+            SCRIPT_SYSTEM,
+            retry_user,
+            f"{base_cache_key}-length-{correction_round}",
+            max_tokens=output_tokens,
+        )
+        if current_status == "too_short":
+            raw = result or {}
+            continuation = str(raw.get("continuation") or "").strip()
+            used_key = "continuation"
+            if not continuation:
+                # Legacy/defensive path: a provider that ignores the fragment schema.
+                continuation = str((_coerce_script(raw) or {}).get("full_script") or "").strip()
+                used_key = "full_script"
+            if continuation:
+                cont_words = script_word_count(continuation)
+                echoes_narration = bool(current_text.strip()) and (
+                    continuation.startswith(current_text.strip()[:80])
+                    or current_text.strip()[:80] in continuation
+                    or current_text.strip() in continuation
+                )
+                if used_key != "continuation" or echoes_narration:
+                    logger.warning(
+                        "Continuation correction round %s rejected: fragment path returned a full rewrite "
+                        "(%s words, key=%s); a %s-%s word continuation was required",
+                        correction_round, cont_words, used_key, need_words, room_words,
+                    )
+                    continue
+                room = max(1, max_words - current_words)
+                need = max(1, min_words - current_words)
+                if need <= cont_words <= room:
+                    combined = f"{current_text} {continuation}".strip()
+                    finalized = _finalize_script(
+                        {**(current_finalized or {}), "full_script": combined},
+                        narration_dur,
+                    )
+                    accepted = _track(finalized)
+                    if accepted:
+                        return accepted
+                logger.warning(
+                    "Continuation correction round %s returned %s words; needed %s-%s",
+                    correction_round, cont_words, need, room,
+                )
+        else:
+            accepted = _accept_response(result)
+            if accepted:
+                return accepted
+
+    if current_finalized is None:
+        # LLM outage path: deterministic on-topic skeleton, never a canned
+        # unrelated story. The paid voiceover preflight still enforces length.
+        topic = (project.get("topic") or project.get("title") or "this subject").strip().rstrip("?")
+        if _is_edu:
             return _finalize_script({
-                "hook_option_one": f"What science says about {topic}",
-                "hook_option_two": f"The science of {topic}, truthfully",
-                "hook_option_three": f"How {topic} affects us - the evidence",
-                "selected_hook": f"What science says about {topic}",
-                "full_script": narration,
-                "retention_beats": [f"The evidence on {topic}"],
-                "cta_block": f"Follow for more evidence on {topic}.",
+                "hook_option_one": f"What the research really says about {topic}",
+                "hook_option_two": f"The science behind {topic} most people miss",
+                "hook_option_three": f"How {topic} actually affects us - the evidence",
+                "selected_hook": f"What the research really says about {topic}",
+                "full_script": (
+                    f"Today we are looking at what the research actually says about {topic}. "
+                    "This is not a story about a startup or a founder - it is about evidence. "
+                    "Studies consistently show that the way we live and the creatures we share "
+                    "our lives with shape our mental and physical health in measurable ways. "
+                    "Different pet types - dogs, cats, fish, birds - have different effects, "
+                    "and the mechanisms behind them, from oxytocin release to routine and "
+                    "social connection, are now well documented. "
+                    "The key insight is that small daily changes compound over time. "
+                    "Data beats guesswork, and the research gives us a clear picture of what "
+                    "actually helps. "
+                    "So here is the takeaway: understand the science, apply the evidence, "
+                    "and build habits that genuinely support your wellbeing."
+                ),
+                "retention_beats": [
+                    "What the studies show",
+                    "Dog vs cat vs fish - the differences",
+                    "The oxytocin and mental-health mechanism",
+                    "Practical takeaways you can use today",
+                ],
+                "cta_block": "If this was useful, subscribe. New evidence-based videos every week.",
             }, narration_dur)
         return _finalize_script({
-            "hook_option_one": f"What the research really says about {topic}",
-            "hook_option_two": f"The science behind {topic} most people miss",
-            "hook_option_three": f"How {topic} actually affects us - the evidence",
-            "selected_hook": f"What the research really says about {topic}",
+            "hook_option_one": f"What nobody tells you about {topic}",
+            "hook_option_two": f"The truth about {topic} most people miss",
+            "hook_option_three": f"Why {topic} matters more than you think",
+            "selected_hook": f"What nobody tells you about {topic}",
             "full_script": (
-                f"Today we are looking at what the research actually says about {topic}. "
-                "This is not a story about a startup or a founder - it is about evidence. "
-                "Studies consistently show that the way we live and the creatures we share "
-                "our lives with shape our mental and physical health in measurable ways. "
-                "Different pet types - dogs, cats, fish, birds - have different effects, "
-                "and the mechanisms behind them, from oxytocin release to routine and "
-                "social connection, are now well documented. "
-                "The key insight is that small daily changes compound over time. "
-                "Data beats guesswork, and the research gives us a clear picture of what "
-                "actually helps. "
-                "So here is the takeaway: understand the science, apply the evidence, "
-                "and build habits that genuinely support your wellbeing."
+                f"This video is about {topic}. "
+                "In the next few minutes, you will learn what really drives it, "
+                "why most people misunderstand it, and what you can do differently starting today. "
+                f"Let's begin with the fundamentals. When people first encounter {topic}, "
+                "they usually focus on the surface and miss the mechanisms underneath. "
+                "That is exactly where the advantage hides. "
+                "The first key insight is that small, consistent decisions compound. "
+                "What looks like overnight success is almost always the visible tip of a long, deliberate process. "
+                "The second insight is that data beats guesswork. "
+                "The people who win in this space measure what works, cut what does not, and iterate fast. "
+                "The third insight is that distribution matters as much as quality. "
+                "Even the best work fails in silence if nobody sees it. "
+                "So here is the takeaway: understand the fundamentals, measure everything, and ship consistently. "
+                "Do that, and the results stop being luck and start being math."
             ),
             "retention_beats": [
-                "What the studies show",
-                "Dog vs cat vs fish - the differences",
-                "The oxytocin and mental-health mechanism",
-                "Practical takeaways you can use today",
+                "The fundamentals most people skip",
+                "Why data beats guesswork",
+                "The distribution mistake that kills good work",
             ],
-            "cta_block": "If this was useful, subscribe. New evidence-based videos every week.",
+            "cta_block": "If this was useful, subscribe. New videos like this every week.",
         }, narration_dur)
 
-    return _finalize_script({
-        "hook_option_one": f"What nobody tells you about {topic}",
-        "hook_option_two": f"The truth about {topic} most people miss",
-        "hook_option_three": f"Why {topic} matters more than you think",
-        "selected_hook": f"What nobody tells you about {topic}",
-        "full_script": (
-            f"This video is about {topic}. "
-            "In the next few minutes, you will learn what really drives it, "
-            "why most people misunderstand it, and what you can do differently starting today. "
-            f"Let's begin with the fundamentals. When people first encounter {topic}, "
-            "they usually focus on the surface and miss the mechanisms underneath. "
-            "That is exactly where the advantage hides. "
-            "The first key insight is that small, consistent decisions compound. "
-            "What looks like overnight success is almost always the visible tip of a long, deliberate process. "
-            "The second insight is that data beats guesswork. "
-            "The people who win in this space measure what works, cut what does not, and iterate fast. "
-            "The third insight is that distribution matters as much as quality. "
-            "Even the best work fails in silence if nobody sees it. "
-            "So here is the takeaway: understand the fundamentals, measure everything, and ship consistently. "
-            "Do that, and the results stop being luck and start being math."
-        ),
-        "retention_beats": [
-            "The fundamentals most people skip",
-            "Why data beats guesswork",
-            "The distribution mistake that kills good work",
-        ],
-        "cta_block": "If this was useful, subscribe. New videos like this every week.",
-    }, narration_dur)
+    final_words = int((best_finalized or current_finalized or {}).get("word_count") or current_words)
+    final_status = best_status or current_status or "too_short"
+    logger.error(
+        "AI script outside planning envelope after correction: %s words outside %s-%s (topic=%r)",
+        final_words,
+        min_words,
+        max_words,
+        project.get("topic"),
+    )
+    obs.capture_message(
+        f"AI script outside planning envelope after correction: {final_words} outside {min_words}-{max_words}",
+        level="error",
+        fingerprint=["generation", "script_length"],
+        tags={
+            "operation": "generation.script",
+            "stage": "word_length_gate",
+            "terminal_status": "failed",
+            "provider": os.environ.get("LLM_PROVIDER", "") or "ollama",
+            "model": os.environ.get("OLLAMA_MODEL", "llama3:latest"),
+            "error_code": "script_length_mismatch",
+            "attempt_number": 3,
+            "retry_count": 2,
+            "output_saved": False,
+            "requested_duration_seconds": target_dur,
+            "scene_count": 0,
+            "backend_outcome": "failed",
+        },
+    )
+    raise ScriptLengthError(
+        words=final_words,
+        floor=min_words,
+        ceiling=max_words,
+    )
 
 
 # ------------------------------ SCENE PLAN ------------------------------
@@ -636,11 +1155,6 @@ def _split_script_exact(full_script: str, scene_count: int) -> list[str]:
     Scene planning is semantic only: the model may choose visuals and search
     terms, but it must never rewrite the voiceover.  Concatenating the returned
     chunks with single spaces reproduces the whitespace-normalised script.
-
-    Exception: the words-splitting path (short scripts with fewer sentences
-    than scenes) starves once the words run out — later scenes receive empty
-    strings rather than losing or duplicating a word, so the join equality
-    then only holds word-for-word ("both sides split() equal").
     """
     count = max(1, int(scene_count))
     text = " ".join(str(full_script or "").split())
@@ -661,16 +1175,7 @@ def _split_script_exact(full_script: str, scene_count: int) -> list[str]:
             group_len = 0
             while start < len(sentences):
                 candidate = sentences[start]
-                sentences_left = len(sentences) - start
-                over_budget = group_len + len(candidate) + 1 > target
-                # The old break only guarded the break path; consuming a
-                # sentence past the target when few sentences remained
-                # starved the later scenes into empty chunks. Two guards
-                # now: break when this group is over budget, and break
-                # when consuming would leave fewer sentences than there
-                # are remaining scenes (each later scene needs >= 1).
-                can_break = bool(group) and sentences_left >= remaining_scenes - 1
-                if can_break and (over_budget or sentences_left < remaining_scenes):
+                if group and group_len + len(candidate) + 1 > target and len(sentences) - start >= remaining_scenes - 1:
                     break
                 group.append(candidate)
                 group_len += len(candidate) + 1
@@ -690,14 +1195,7 @@ def _split_script_exact(full_script: str, scene_count: int) -> list[str]:
         if remaining_scenes == 1:
             chunks.append(" ".join(words[start:]))
             break
-        words_left = total - start
-        # Not enough words to still hand every later scene at least one?
-        # Hand out at most one word per scene (empty chunks once they run
-        # out) instead of letting the clamps go negative and slice words
-        # twice, which used to raise IndexError for long scene plans over
-        # short scripts.
-        can_feed_all_later = words_left >= remaining_scenes
-        target = words_left / remaining_scenes
+        target = (total - start) / remaining_scenes
         end = start + max(1, int(round(target)))
         best = end
         for delta in range(0, 5):
@@ -708,16 +1206,38 @@ def _split_script_exact(full_script: str, scene_count: int) -> list[str]:
             else:
                 continue
             break
-        if can_feed_all_later:
-            best = min(max(best, start + 1), total - (remaining_scenes - 1))
-        else:
-            best = min(start + 1, total)
+        # Clamp inside the remaining words.  A short script can request more
+        # scenes than it has words; the old upper bound went negative there
+        # and produced an IndexError instead of empty padding chunks.
+        if start >= total:
+            chunks.append("")
+            continue
+        best = min(max(best, start + 1), total)
         chunks.append(" ".join(words[start:best]))
         start = best
     return chunks
 
 
-async def generate_scene_plan(project: dict, script: dict) -> list[dict]:
+async def generate_scene_plan(project: dict, script: dict,
+                              trace: Optional[dict] = None) -> list[dict]:
+    """Plan scenes and record whether the deterministic fallback was used.
+
+    ``trace`` is an optional caller-owned dict.  The API route persists it as
+    ``project.scene_generation`` so Sentry and the UI can distinguish a real
+    LLM plan from a silent fallback.  Keeping the return type as ``list[dict]``
+    preserves every existing caller.
+    """
+    if trace is None:
+        trace = {}
+    trace.clear()
+    trace.update({
+        "fallback_used": False,
+        "fallback_reason": None,
+        "error_code": None,
+        "llm_scene_count": 0,
+        "scene_count": 0,
+        "requested_duration_seconds": int(project.get("target_duration", 300) or 300),
+    })
     target_dur = int(project.get("target_duration", 300))
     timing = TimingContract.from_project(project)
     narration_dur = timing.narration_seconds
@@ -755,12 +1275,21 @@ Topic: {project.get('topic', project.get('title', ''))}
 Niche: {project.get('niche', 'business')}"""
 
     result = await _llm_json(SCENE_SYSTEM, user, f"scenes-{project.get('id', uuid.uuid4())}")
+    if not result or not isinstance(result.get("scenes"), list):
+        trace["fallback_used"] = True
+        trace["fallback_reason"] = "scene_parse_failed"
+        trace["error_code"] = "scene_parse_failed"
+        logger.warning("Scene plan LLM returned no parsable scenes project=%s", project.get("id"))
     if result and isinstance(result.get("scenes"), list):
+        trace["llm_scene_count"] = len(result["scenes"])
         coerced = _coerce_scenes(result["scenes"])
         if coerced:
             # Enforce semantic count, then discard every model-supplied timestamp.
             if len(coerced) != scene_count:
                 logger.warning("LLM scene count mismatch: got %s expected %s, slicing/padding", len(coerced), scene_count)
+                trace["fallback_used"] = True
+                trace["fallback_reason"] = "scene_count_mismatch"
+                trace["error_code"] = "scene_count_mismatch"
                 if len(coerced) > scene_count:
                     coerced = coerced[:scene_count]
                 else:
@@ -793,15 +1322,24 @@ Niche: {project.get('niche', 'business')}"""
             expected = " ".join(full_script.split())
             if joined != expected:
                 logger.warning("LLM scene narration did not preserve script; using exact fallback split")
+                trace["fallback_used"] = True
+                trace["fallback_reason"] = "scene_narration_mismatch"
+                trace["error_code"] = "scene_narration_mismatch"
             else:
-                return normalize_scene_timeline(
+                planned = normalize_scene_timeline(
                     coerced,
                     narration_frames=timing.narration_frames,
                     fps=timing.fps,
                 )
+                trace["scene_count"] = len(planned)
+                return planned
 
     # Deterministic fallback — visuals derived from each scene's exact
     # narration chunk, never from the raw project topic/description text.
+    if not trace.get("fallback_used"):
+        trace["fallback_used"] = True
+        trace["fallback_reason"] = "scene_parse_failed"
+        trace["error_code"] = "scene_parse_failed"
     scene_dur = narration_dur / scene_count
     scenes = []
     for i, narration in enumerate(exact_chunks):
@@ -817,11 +1355,30 @@ Niche: {project.get('niche', 'business')}"""
             "caption_text": truncate_words(narration, 80) or f"Part {i + 1}",
             "search_terms": terms,
         })
-    return normalize_scene_timeline(
+    planned = normalize_scene_timeline(
         scenes,
         narration_frames=timing.narration_frames,
         fps=timing.fps,
     )
+    trace["scene_count"] = len(planned)
+    obs.capture_message(
+        f"Scene plan fell back to deterministic split: {trace.get('fallback_reason')}",
+        level="warning", fingerprint=["generation", "scene_fallback"],
+        tags={
+            "operation": "generation.scenes",
+            "stage": "fallback",
+            "terminal_status": "degraded",
+            "provider": os.environ.get("LLM_PROVIDER", "") or "ollama",
+            "model": os.environ.get("OLLAMA_MODEL", "llama3:latest"),
+            "error_code": trace.get("error_code") or "scene_parse_failed",
+            "attempt_number": 2,
+            "retry_count": 1,
+            "output_saved": False,
+            "requested_duration_seconds": target_dur,
+            "scene_count": len(planned),
+            "backend_outcome": "degraded",
+        })
+    return planned
 
 
 # ------------------------------ METADATA ------------------------------

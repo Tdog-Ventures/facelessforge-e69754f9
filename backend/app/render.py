@@ -54,6 +54,7 @@ import httpx
 from PIL import Image, ImageDraw, ImageFont
 
 from .db import get_db
+from . import observability as obs
 from .storage import get_storage
 from .subtitles import write_srt, write_srt_from_cues, write_srt_from_words
 from .transcribe import transcribe_words
@@ -61,13 +62,14 @@ from .visual_query import truncate_words
 from .timing import TimingContract, build_timing_status, normalize_scene_timeline
 from .timing import (
     MIN_AUTOFIT_MOVE_SECONDS,
+    NarrationPlan,
     suggest_fitted_duration,
 )
 from . import audio_mix as audio_mix
 from . import stock as stock_service
 from .grounding import CLIENT_VISUAL_TYPES, validate_commercial_grounding
 from .scoring import commercial_scorecard
-from . import project_lease
+from .config.pricing_policy import calculate_credits
 try:
     from .verify import verify_render as _verify_render_constitution
     VERIFY_AVAILABLE = True
@@ -373,18 +375,6 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _as_utc(dt: datetime) -> datetime:
-    """Normalize a datetime to timezone-aware UTC.
-
-    The Motor client is created without ``tz_aware=True``, so BSON dates read
-    back from Mongo are naive (but stored as UTC). Mixing them with the aware
-    values from ``_now()`` raises TypeError on arithmetic/comparison.
-    """
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
-
-
 def _safe_name(s: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_\-]", "_", s or "")[:80]
 
@@ -420,9 +410,12 @@ def validate_prerequisites(project: dict, script: dict | None,
     full_voice = next((a for a in assets
                        if a.get("asset_type") == "voiceover_audio"
                        and not a.get("scene_id")
+                       and not a.get("stale")
+                       and a.get("status") != "outdated"
                        and a.get("id") == project.get("selected_voiceover_asset_id")), None)
     scene_voices = [a for a in assets if a.get("asset_type") == "voiceover_audio"
-                    and a.get("scene_id") and a.get("status") != "rejected"]
+                    and a.get("scene_id") and a.get("status") != "rejected"
+                    and not a.get("stale") and a.get("status") != "outdated"]
     has_voice = bool(full_voice) or len(scene_voices) > 0
     _add("voiceover", "Voiceover ready (full or per-scene)", has_voice,
          "Generate a full-script voiceover, or scene voiceovers.")
@@ -446,12 +439,20 @@ def validate_prerequisites(project: dict, script: dict | None,
                 latest_by_scene[scene_id] = voice
         voice_for_timing = {"duration": sum(float(voice.get("duration") or 0) for voice in latest_by_scene.values())}
     timing_status = build_timing_status(project=project, scenes=scenes, voiceover=voice_for_timing)
-    _add(
-        "timing",
-        "Voiceover fits selected duration",
-        timing_status["voiceover_action"] in {"ready", "tempo_fit"},
-        "Regenerate the script and voiceover; automatic tempo fitting is limited to 5%.",
-    )
+    timing_ok = timing_status["voiceover_action"] in {"ready", "tempo_fit"}
+    if has_voice and not timing_ok:
+        timing_label = "Voiceover timing does not fit selected duration"
+        timing_hint = timing_status.get("duration_message") or (
+            "The recording is kept. Use the explicit duration fit if one is available, "
+            "or regenerate narration within the shared ±5% timing range."
+        )
+    elif not has_voice:
+        timing_label = "Voiceover timing (waiting for a recording)"
+        timing_hint = "Generate a voiceover first; no duration judgment is possible yet."
+    else:
+        timing_label = "Voiceover timing fits selected duration"
+        timing_hint = timing_status.get("duration_message") or ""
+    _add("timing", timing_label, timing_ok, timing_hint)
     autofit_suggestion = suggest_duration_autofit(
         project, voice_for_timing, timing_status
     )
@@ -483,25 +484,41 @@ def validate_prerequisites(project: dict, script: dict | None,
     # Editorial projects retain their legacy stock/fallback behaviour.  A
     # commercial project is stricter: no auto-stock or caption card can fill a
     # missing client scene.
+    #
+    # scene_count and attached_clip_count are distinct metrics.  Assets left
+    # over from a previous scene plan must not inflate coverage (the old
+    # ``len(covered_ids)/len(scenes)`` calculation could report "8/4 scenes"
+    # after a regeneration changed the scene ids).
     current_scene_ids = {s.get("id") for s in scenes if s.get("id")}
-    scene_assets = [
+    stock_assets = [
         a for a in assets
         if a.get("asset_type") in ("stock_image", "stock_video")
-        and a.get("scene_id") in current_scene_ids
+    ]
+    scene_assets = [
+        a for a in stock_assets
+        if a.get("scene_id") and a.get("scene_id") in current_scene_ids
+    ]
+    orphaned_assets = [
+        a for a in stock_assets
+        if a.get("scene_id") and a.get("scene_id") not in current_scene_ids
     ]
     covered_ids = {a["scene_id"] for a in scene_assets}
     coverage = (len(covered_ids) / max(1, len(scenes))) if scenes else 0
+    clips_by_scene: dict[str, int] = {}
+    for asset in scene_assets:
+        sid = asset.get("scene_id")
+        clips_by_scene[sid] = clips_by_scene.get(sid, 0) + 1
     if commercial:
         grounding = validate_commercial_grounding(project, script, scenes, assets)
         for item in grounding["checklist"]:
             _add(item["key"], item["label"], item["ok"], "Resolve this commercial grounding requirement before rendering.")
     else:
-        # A single stock image in each 30-second scene is NOT sufficient.
-        # Gate render-readiness on visual segment coverage (max 3s per segment).
-        # Legacy mock items are never valid footage for customer-facing videos.
+        # 27a483e: gate render-readiness on visual pacing - one valid segment per 3s of
+        # scene. Mock/legacy items are never valid footage for customer-facing videos.
+        # Running-image diagnostics (orphaned clips, coverage, caption fallback) retained.
         valid = [a for a in scene_assets if str(a.get("source") or "").lower() != "mock"
                  and a.get("status") != "rejected"]
-        counts = {}
+        counts: dict[str, int] = {}
         for asset in valid:
             counts[asset["scene_id"]] = counts.get(asset["scene_id"], 0) + 1
         needs = {
@@ -510,19 +527,30 @@ def validate_prerequisites(project: dict, script: dict | None,
         }
         missing = sum(max(0, count - counts.get(sid, 0)) for sid, count in needs.items())
         total_required = sum(needs.values())
+        hint = (
+            f"{len(covered_ids)}/{len(scenes)} scenes have stock visuals "
+            f"({len(scene_assets)} clip{'s' if len(scene_assets) != 1 else ''} attached); "
+            f"{len(valid)}/{total_required} usable visual segments, {missing} still missing."
+        )
+        if orphaned_assets:
+            hint += f" {len(orphaned_assets)} clip(s) belong to an older scene plan and are ignored."
+        hint += " Run auto-attach top-up or select relevant footage before rendering."
         _add("scene_assets", "Scene visuals meet 3-second pacing",
-             bool(needs) and missing == 0,
-             f"{len(valid)}/{total_required} usable visual segments; {missing} still missing. "
-             "Run auto-attach top-up or select relevant footage before rendering.")
+             bool(needs) and missing == 0 and coverage >= 0.5, hint)
 
     return {
         "ok": all(c["ok"] for c in checklist),
         "issues": issues,
         "checklist": checklist,
+        "scene_count": len(scenes),
+        "attached_clip_count": len(scene_assets),
+        "orphaned_clip_count": len(orphaned_assets),
+        "asset_candidate_count": len([a for a in stock_assets if not a.get("scene_id")]),
+        "attached_clips_by_scene": clips_by_scene,
         "scene_coverage": round(coverage, 2),
         "selected_thumbnail_asset_id": (sel_thumb or {}).get("id"),
         "selected_voiceover_asset_id": (full_voice or {}).get("id"),
-        "scene_voiceover_count": len(scene_voices),
+        "scene_voiceover_count": len({v.get("scene_id") for v in scene_voices if v.get("scene_id")}),
         "selected_music_asset_id": (sel_music or {}).get("id"),
         "music_state": {
             "enabled": music_enabled,
@@ -534,6 +562,9 @@ def validate_prerequisites(project: dict, script: dict | None,
                 or project.get("music_rights_confirmed")),
         },
         "timing": timing_status,
+        "voiceover_present": has_voice,
+        "voiceover_duration_status": timing_status.get("duration_status"),
+        "voiceover_duration_message": timing_status.get("duration_message"),
         "autofit_suggestion": autofit_suggestion,
     }
 
@@ -564,7 +595,7 @@ def suggest_duration_autofit(
         current = int(project.get("target_duration") or 0)
     except (TypeError, ValueError):
         return None
-    intro = 0.0 if (project or {}).get("production_mode") == "commercial_ad" else 2.5
+    intro = NarrationPlan.from_project(project).intro_seconds
     fitted = suggest_fitted_duration(
         voiceover_seconds=float(measured), intro_seconds=intro
     )
@@ -580,33 +611,16 @@ async def autofit_project_duration(project_id: str) -> dict:
     callers must surface that instead of queueing.
     """
     db = get_db()
-    # The selected target is a render input, just like mode/ground truth. Read,
-    # calculate and CAS it under the same lease as submission and project edits.
     project = await db.projects.find_one({"id": project_id}, {"_id": 0})
     if not project:
         raise RuntimeError(f"Project {project_id} not found for duration auto-fit.")
-    lease = await project_lease.acquire(
-        db, project_id, project_lease.RENDER_LEASE, ttl_seconds=project_lease.RENDER_LEASE_TTL_SECONDS,
-    )
-    if lease is None:
-        raise RenderSubmissionBusy("Project inputs are being updated; retry the explicit duration fit.")
-    try:
-        return await _autofit_project_duration_locked(db, lease, project_id)
-    finally:
-        await project_lease.release(db, lease)
-
-
-async def _autofit_project_duration_locked(db, lease, project_id: str) -> dict:
-    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
-    if not project:
-        raise RuntimeError(f"Project {project_id} not found for duration auto-fit.")
-    if await is_render_active(project_id):
-        raise RenderSubmissionBusy("A render is active; wait before changing its selected duration.")
     full_voice = await db.assets.find_one(
         {
             "project_id": project_id,
             "asset_type": "voiceover_audio",
             "id": project.get("selected_voiceover_asset_id"),
+            "stale": {"$ne": True},
+            "status": {"$ne": "outdated"},
         },
         {"_id": 0},
     )
@@ -614,18 +628,47 @@ async def _autofit_project_duration_locked(db, lease, project_id: str) -> dict:
         raise RuntimeError(
             "Duration auto-fit needs the selected full-script voiceover."
         )
+    if not full_voice.get("duration"):
+        raise RuntimeError(
+            "Duration auto-fit needs a measured voiceover duration. "
+            "Repair audio measurement first; the recording is still preserved."
+        )
     suggestion = suggest_duration_autofit(project, full_voice)
     if not suggestion:
         raise RuntimeError(
             "No in-bounds duration fits the measured narration; "
             "regenerate the script and voiceover."
         )
-    updated = await db.projects.update_one(
-        {"id": project_id, **lease.guard()},
-        {"$set": {"target_duration": suggestion["to"], "updated_at": _now()}},
+    await db.projects.update_one(
+        {"id": project_id},
+        {"$set": {
+            "target_duration": suggestion["to"],
+            "voiceover_duration_status": "fit_applied",
+            "updated_at": _now(),
+        }},
     )
-    if getattr(updated, "matched_count", 0) != 1:
-        raise RenderSubmissionBusy("Project inputs changed during duration fit; retry.")
+    try:
+        plan = NarrationPlan.from_target(
+            suggestion["to"],
+            intro_seconds=NarrationPlan.from_project(project).intro_seconds,
+        )
+        duration_status = plan.classify_measured(full_voice.get("duration"))
+        fits = duration_status["status"] in {"ready", "tempo_fit"}
+        await db.assets.update_one(
+            {"id": full_voice["id"], "project_id": project_id},
+            {"$set": {
+                "target_duration": float(suggestion["to"]),
+                "narration_budget_seconds": round(plan.narration_seconds, 3),
+                "duration_status": duration_status["status"],
+                "duration_message": duration_status["message"],
+                "fits_target": fits,
+                "duration_fit_required": not fits,
+                "autofit_suggestion": None,
+                "updated_at": _now(),
+            }},
+        )
+    except Exception as exc:  # noqa: BLE001 — the project fit already landed
+        logger.warning("voiceover asset fit metadata refresh failed: %s", exc)
     logger.info(
         "duration autofit project=%s %ss -> %ss (VO %.2fs)",
         project_id, suggestion["from"], suggestion["to"],
@@ -1218,8 +1261,13 @@ async def _resolve_scene_visuals(scene: dict, attached_assets: list[dict],
             logger.info("scene=%02d FOOTAGE_SKIP reason=ext_id_used_project_wide ext_id=%s",
                         idx + 1, ext)
             continue
-        path, kind, ext_id = await _resolve_scene_visual(
-            scene, [a], project, work_dir, idx, used_ext_ids=used_ext_ids, allow_fallback=allow_fallback)
+        try:
+            path, kind, ext_id = await _resolve_scene_visual(
+                scene, [a], project, work_dir, idx, used_ext_ids=used_ext_ids, allow_fallback=False)
+        except RuntimeError:
+            logger.warning("scene=%02d FOOTAGE_ATTACHMENT_SKIP asset_id=%s; trying remaining attachments",
+                           idx + 1, a.get("id"))
+            continue
         # Allow both video and image (Ken Burns) — previously was video-only
         if kind not in ("video", "image") or str(path) in seen:
             continue  # rejected/fallback already handled — try the next candidate
@@ -1316,7 +1364,9 @@ async def _resolve_audio(project: dict, scenes: list[dict], assets: list[dict],
 
     full = next((a for a in assets if a.get("asset_type") == "voiceover_audio"
                  and not a.get("scene_id")
-                 and a.get("id") == project.get("selected_voiceover_asset_id")), None)
+                 and a.get("id") == project.get("selected_voiceover_asset_id")
+                 and not a.get("stale")
+                 and a.get("status") != "outdated"), None)
     if _is_real(full):
         local = await _ensure_audio_local(full, work_dir, "voiceover_full")
         if local:
@@ -1326,6 +1376,7 @@ async def _resolve_audio(project: dict, scenes: list[dict], assets: list[dict],
     for s in scenes:
         ss = [a for a in assets if a.get("asset_type") == "voiceover_audio"
               and a.get("scene_id") == s.get("id") and a.get("status") != "rejected"
+              and not a.get("stale") and a.get("status") != "outdated"
               and _is_real(a)]
         if not ss:
             continue
@@ -1763,7 +1814,62 @@ def _project_lock(project_id: str) -> asyncio.Lock:
 async def _set_job(job_id: str, **patch):
     db = get_db()
     patch.setdefault("updated_at", _now())
+    if patch.get("current_step"):
+        _ACTIVE_JOB_STAGE[job_id] = str(patch["current_step"])
     await db.render_jobs.update_one({"id": job_id}, {"$set": patch})
+
+
+_ACTIVE_JOB_STAGE: dict[str, str] = {}
+
+
+def _classify_render_error(exc: BaseException) -> str:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    if "timeout" in text or "timed out" in text:
+        return "render_timeout"
+    if "verification" in text or "constitution" in text:
+        return "render_verification_failed"
+    if "qa" in text or "release gate" in text:
+        return "render_qa_blocked"
+    if "storage" in text or "upload" in text:
+        return "render_storage_error"
+    if "ffmpeg" in text or "encode" in text or "mux" in text or "concat" in text:
+        return "render_ffmpeg_error"
+    if "prerequisite" in text or "missing requirements" in text:
+        return "render_prerequisites_failed"
+    return "render_error"
+
+
+def _render_tags(job: dict, *, stage: str, terminal_status: str,
+                 **extra) -> dict:
+    """Render telemetry tags; counts come from the job doc, never recomputed."""
+    attempt = int(job.get("attempt_number") or 1)
+    tags = {
+        "operation": "render",
+        "stage": stage,
+        "terminal_status": terminal_status,
+        "release": obs.release(),
+        "provider": job.get("provider") or "ffmpeg",
+        "model": job.get("model") or "h264+aac",
+        "error_code": job.get("error_code"),
+        "attempt_number": attempt,
+        "retry_count": max(0, attempt - 1),
+        "output_saved": bool(job.get("output_url") or job.get("output_storage_key")),
+        "frontend_outcome": job.get("frontend_outcome"),
+        "backend_outcome": job.get("backend_outcome"),
+        "duration_ms": job.get("duration_ms") or job.get("render_duration_ms"),
+        "requested_duration_seconds": job.get("requested_duration_seconds"),
+        "scene_count": job.get("scene_count"),
+        "attached_clip_count": job.get("attached_clip_count"),
+        "asset_candidate_count": job.get("asset_candidate_count"),
+        "audio_duration_seconds": job.get("audio_duration_seconds"),
+        "client_disconnected": job.get("client_disconnected"),
+        "completed_after_disconnect": job.get("completed_after_disconnect"),
+        "idempotency_result": job.get("idempotency_result"),
+        "job_id": job.get("id"),
+        "project_id": job.get("project_id"),
+    }
+    tags.update(extra)
+    return {k: v for k, v in tags.items() if v is not None}
 
 
 async def is_render_active(project_id: str) -> bool:
@@ -1775,8 +1881,19 @@ async def is_render_active(project_id: str) -> bool:
     return bool(job)
 
 
-# 1 render = 3 credits. Single source of truth for deduct and reversal.
-RENDER_CREDIT_COST = 3
+# Export credit cost derives from PRICING_POLICY_CANONICAL.md (calculate_credits).
+# Single source of truth for deduct and reversal.
+def _render_complexity(resolution: str | None) -> str:
+    res = (resolution or "").lower().replace(" ", "")
+    if "3840" in res or "2160" in res or "4k" in res:
+        return "4K"
+    if "720" in res:
+        return "720p"
+    return "1080p"
+
+
+def _render_credit_cost(duration_seconds: float, resolution: str | None) -> int:
+    return calculate_credits(duration_seconds, _render_complexity(resolution))
 
 # Unique index on credit_transactions.refund_id backs the idempotency guarantee
 # for render-failure reversals (at most one refund:<job_id> row can ever exist).
@@ -1877,68 +1994,17 @@ async def reverse_render_credits(job_id: str, *, reason: str) -> dict:
     )
 
 
-class RenderSubmissionBusy(RuntimeError):
-    """Submission cannot proceed because project inputs are being changed or released."""
-
-
-async def queue_render(
-    project_id: str,
-    *,
-    requested_by: str,
-    burn_subtitles: bool = False,
-    aspect_ratio: str | None = None,
-    expected_inputs: dict | None = None,
-) -> dict:
-    """Create a job in 'queued' state and start the background worker. Queue limit 3 concurrent, rest queued.
-
-    Submission runs under the project's render lease, the same lease that
-    serializes project-mode/commercial updates and render release. ``expected_inputs``
-    (from ``project_lease.render_input_snapshot``) is the project state the caller
-    validated; if it changed before the lease was granted the submission is refused.
-    """
+async def queue_render(project_id: str, *, requested_by: str, burn_subtitles: bool = False, aspect_ratio: str | None = None) -> dict:
+    """Create a job in 'queued' state and start the background worker. Queue limit 3 concurrent, rest queued."""
     db = get_db()
-    lease = await project_lease.acquire(
-        db, project_id, project_lease.RENDER_LEASE, ttl_seconds=project_lease.RENDER_LEASE_TTL_SECONDS,
-    )
-    if lease is None:
-        raise RenderSubmissionBusy(
-            "The project is being updated or another render is being released; retry shortly."
-        )
-    try:
-        return await _queue_render_locked(
-            db, lease, project_id,
-            requested_by=requested_by,
-            burn_subtitles=burn_subtitles,
-            aspect_ratio=aspect_ratio,
-            expected_inputs=expected_inputs,
-        )
-    finally:
-        await project_lease.release(db, lease)
-
-
-async def _queue_render_locked(
-    db,
-    lease: "project_lease.Lease",
-    project_id: str,
-    *,
-    requested_by: str,
-    burn_subtitles: bool,
-    aspect_ratio: str | None,
-    expected_inputs: dict | None,
-) -> dict:
-    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
-    if expected_inputs is not None and not project_lease.render_inputs_match(project, expected_inputs):
-        raise RenderSubmissionBusy(
-            "Project settings changed while the render was being prepared; re-check the project and retry."
-        )
     if await is_render_active(project_id):
         raise RuntimeError("A render is already in progress for this project.")
-    # The job records the mode it was submitted under. Mode changes are refused
-    # while the job is active (update_project) and release re-checks it.
-    render_mode = (project or {}).get("production_mode") or "editorial"
     job_id = str(uuid.uuid4())
     charge = {"user_id": requested_by, "amount": 0, "store": "none", "ledger_id": None}
-    # Atomic deduct 3 credits (1 render = 3cr) before queue — prevents double-spend
+    # Atomic deduct the export credit cost before queue — prevents double-spend.
+    # Cost derives from PRICING_POLICY_CANONICAL.md (blocks * 3 * multiplier).
+    project = await db.projects.find_one({"id": project_id}, {"_id": 0, "target_duration": 1, "resolution": 1})
+    cost = _render_credit_cost(float((project or {}).get("target_duration") or 30), (project or {}).get("resolution"))
     try:
         from pymongo import ReturnDocument
         from fastapi import HTTPException
@@ -1972,39 +2038,51 @@ async def _queue_render_locked(
         _full_access = bool(
             sub and sub.get("full_access") is True and sub.get("access_status") == "active"
         )
-        # Atomic findAndModify: only deduct if >=3
+        # Atomic findAndModify: only deduct if the export cost is covered
         if _full_access:
             result = dict(sub)  # truthy sentinel: bypass deduction
         else:
             result = await db.subscriptions.find_one_and_update(
-                {"user_id": requested_by, "credits_remaining": {"$gte": 3}},
-                {"$inc": {"credits_remaining": -RENDER_CREDIT_COST}, "$set": {"updated_at": _now()}},
+                {"user_id": requested_by, "credits_remaining": {"$gte": cost}},
+                {"$inc": {"credits_remaining": -cost}, "$set": {"updated_at": _now()}},
                 return_document=ReturnDocument.AFTER,
             )
         if not result:
             # Also try ff_credits if subscriptions failed
             ff_result = await db.ff_credits.find_one_and_update(
-                {"tenant_id": requested_by, "credits": {"$gte": RENDER_CREDIT_COST}},
-                {"$inc": {"credits": -RENDER_CREDIT_COST}, "$set": {"updated_at": _now()}},
+                {"tenant_id": requested_by, "credits": {"$gte": cost}},
+                {"$inc": {"credits": -cost}, "$set": {"updated_at": _now()}},
                 return_document=ReturnDocument.AFTER,
             )
             if not ff_result:
                 remaining = int((sub or {}).get("credits_remaining", 0))
-                raise HTTPException(status_code=402, detail={"code": "credits_exhausted", "required": RENDER_CREDIT_COST, "remaining": remaining, "message": f"Insufficient credits: {remaining} remaining, {RENDER_CREDIT_COST} required"})
+                raise HTTPException(status_code=402, detail={"code": "credits_exhausted", "required": cost, "remaining": remaining, "message": f"Insufficient credits: {remaining} remaining, {cost} required"})
             # Log ff_credits deduct (job_id links the charge to its eventual reversal)
             charge_ledger_id = str(uuid.uuid4())
-            await db.credit_transactions.insert_one({"id": charge_ledger_id, "job_id": job_id, "user_id": requested_by, "amount": -RENDER_CREDIT_COST, "reason": f"render {project_id}", "created_at": _now()})
-            charge = {"user_id": requested_by, "amount": RENDER_CREDIT_COST, "store": "ff_credits", "ledger_id": charge_ledger_id}
+            await db.credit_transactions.insert_one({"id": charge_ledger_id, "job_id": job_id, "user_id": requested_by, "amount": -cost, "reason": f"render {project_id}", "created_at": _now()})
+            charge = {"user_id": requested_by, "amount": cost, "store": "ff_credits", "ledger_id": charge_ledger_id}
         elif _full_access:
             pass  # bypass: do not log a deduction that never happened
         else:
             charge_ledger_id = str(uuid.uuid4())
-            await db.credit_transactions.insert_one({"id": charge_ledger_id, "job_id": job_id, "user_id": requested_by, "amount": -RENDER_CREDIT_COST, "reason": f"render {project_id}", "created_at": _now()})
-            charge = {"user_id": requested_by, "amount": RENDER_CREDIT_COST, "store": "subscriptions", "ledger_id": charge_ledger_id}
+            await db.credit_transactions.insert_one({"id": charge_ledger_id, "job_id": job_id, "user_id": requested_by, "amount": -cost, "reason": f"render {project_id}", "created_at": _now()})
+            charge = {"user_id": requested_by, "amount": cost, "store": "subscriptions", "ledger_id": charge_ledger_id}
     except HTTPException:
         raise
     except Exception as e:
         logger.exception("credit authorization failed for %s", requested_by)
+        obs.capture_exception(e, tags={
+            "operation": "render.queue",
+            "stage": "credit_authorization",
+            "terminal_status": "failed",
+            "error_code": "render_credit_auth_failed",
+            "provider": "credits",
+            "output_saved": False,
+            "requested_duration_seconds": int((project or {}).get("target_duration") or 0),
+            "project_id": project_id,
+            "user_id": requested_by,
+            "backend_outcome": "failed",
+        }, user=requested_by)
         raise RuntimeError(
             "Unable to authorize render credits; render not queued."
         ) from e
@@ -2015,6 +2093,26 @@ async def _queue_render_locked(
         logger.info("queue limit hit active=%s max=%s — job %s will queue", active, MAX_CONCURRENT_RENDERS, project_id)
 
     now = _now()
+    # Distinct metrics: scene_count is the number of timeline scenes, while
+    # attached_clip_count is the number of stock clips attached to those
+    # scenes.  They must never be divided into each other.
+    scene_docs = await db.scenes.find(
+        {"project_id": project_id}, {"_id": 0, "id": 1, "scene_number": 1}
+    ).to_list(500)
+    scene_ids = {s.get("id") for s in scene_docs if s.get("id")}
+    project_assets = await db.assets.find(
+        {"project_id": project_id},
+        {"_id": 0, "id": 1, "scene_id": 1, "asset_type": 1},
+    ).to_list(2000)
+    stock_assets = [
+        a for a in project_assets
+        if a.get("asset_type") in ("stock_video", "stock_image")
+    ]
+    attached_assets = [a for a in stock_assets if a.get("scene_id") in scene_ids]
+    clips_by_scene: dict[str, int] = {}
+    for asset in attached_assets:
+        sid = asset.get("scene_id")
+        clips_by_scene[sid] = clips_by_scene.get(sid, 0) + 1
     job = {
         "id": job_id,
         "project_id": project_id,
@@ -2031,15 +2129,35 @@ async def _queue_render_locked(
         "completed_at": None,
         "created_at": now,
         "updated_at": now,
+        "queue_duration_ms": None,
+        "scene_count": len(scene_docs),
+        "attached_clip_count": len(attached_assets),
+        "orphaned_clip_count": len([
+            a for a in stock_assets
+            if a.get("scene_id") and a.get("scene_id") not in scene_ids
+        ]),
+        "asset_candidate_count": len([a for a in stock_assets if not a.get("scene_id")]),
+        "attached_clips_by_scene": clips_by_scene,
+        "requested_duration_seconds": int((project or {}).get("target_duration") or 0),
         "burn_subtitles": bool(burn_subtitles),
         "aspect_ratio": aspect_ratio or "9:16",
+        "attempt_number": 1,
+        "retry_count": 0,
+        "backend_outcome": "queued",
+        "frontend_outcome": "pending",
+        "idempotency_result": "created",
         "credit_charge": charge,
-        "render_mode": render_mode,
     }
     try:
         await db.render_jobs.insert_one(dict(job))
     except Exception:
         # Charge already taken but the job never existed — refund before surfacing.
+        obs.capture_exception(
+            RuntimeError("render job insert failed"),
+            tags=_render_tags(job, stage="enqueue", terminal_status="failed",
+                              error_code="render_enqueue_failed",
+                              backend_outcome="failed", output_saved=False),
+            user=requested_by)
         if charge.get("amount", 0) > 0 and charge.get("store") in ("subscriptions", "ff_credits"):
             try:
                 await _apply_credit_refund(
@@ -2054,15 +2172,6 @@ async def _queue_render_locked(
             except Exception:  # noqa: BLE001 — never mask the original insert failure
                 logger.exception("credit reversal failed after queue insert error job=%s", job_id)
         raise
-
-    # Fenced check: the job exists now, so a mode switch would be refused, but a
-    # stale submission (lease expired and taken over) must not start a worker.
-    if not await project_lease.still_held(db, lease):
-        logger.warning("render submission lost its lease job=%s project=%s", job_id, project_id)
-        await reverse_render_credits(job_id, reason="render_lease_lost")
-        await _set_job(job_id, status="failed", current_step="failed", completed_at=_now(),
-                       error_message="Render submission lost its project lease; resubmit the render.")
-        raise RenderSubmissionBusy("Render submission was interrupted by a project update; retry the render.")
 
     task = asyncio.create_task(_run_render_safe(job_id, project_id))
     _ACTIVE_TASKS[project_id] = task
@@ -2089,15 +2198,48 @@ async def cancel_render(project_id: str, job_id: str) -> bool:
 
 async def _run_render_safe(job_id: str, project_id: str):
     # Hetzner 16GB 4 at once, thread-capped BullMQ + Redis style
+    db = get_db()
+    try:
+        job_doc = await db.render_jobs.find_one({"id": job_id}, {"_id": 0}) or {}
+    except Exception:  # noqa: BLE001 — telemetry must never block a render
+        job_doc = {}
+    request_started = asyncio.get_event_loop().time()
     async with _RENDER_SEMAPHORE:
         try:
             await _run_render(job_id, project_id)
-        except asyncio.CancelledError:
+            try:
+                finished_job = await db.render_jobs.find_one(
+                    {"id": job_id}, {"_id": 0}) or job_doc
+            except Exception:  # noqa: BLE001
+                finished_job = job_doc
+            duration_ms = int((asyncio.get_event_loop().time() - request_started) * 1000)
+            obs.record_terminal("render.job", tags=_render_tags(
+                finished_job, stage="completed", terminal_status="success",
+                output_saved=bool(finished_job.get("output_url") or
+                                  finished_job.get("output_storage_key")),
+                duration_ms=duration_ms,
+                frontend_outcome="connected", backend_outcome="success",
+                request_started_at=str(request_started),
+            ), user=finished_job.get("requested_by"))
+        except asyncio.CancelledError as exc:
+            duration_ms = int((asyncio.get_event_loop().time() - request_started) * 1000)
+            stage = _ACTIVE_JOB_STAGE.get(job_id, "rendering")
             await _set_job(job_id, status="cancelled", current_step="cancelled",
-                           error_message="Cancelled by user", completed_at=_now())
+                           error_message="Cancelled by user", completed_at=_now(),
+                           duration_ms=duration_ms, backend_outcome="cancelled",
+                           frontend_outcome="disconnected")
+            obs.capture_exception(exc, tags=_render_tags(
+                job_doc, stage=stage, terminal_status="cancelled",
+                error_code="render_cancelled", output_saved=False,
+                duration_ms=duration_ms, frontend_outcome="disconnected",
+                backend_outcome="cancelled",
+            ), user=job_doc.get("requested_by"))
             raise
         except Exception as e:  # noqa: BLE001
             logger.exception("Render job failed")
+            duration_ms = int((asyncio.get_event_loop().time() - request_started) * 1000)
+            stage = _ACTIVE_JOB_STAGE.get(job_id, "rendering")
+            error_code = _classify_render_error(e)
             # Reverse the render credit charge BEFORE the job is marked failed.
             # Reversal is idempotent (refund:<job_id> unique) and must never
             # block the failure transition itself.
@@ -2107,7 +2249,15 @@ async def _run_render_safe(job_id: str, project_id: str):
                 logger.exception("credit reversal failed for failed job %s", job_id)
             await _set_job(job_id, status="failed", current_step="failed",
                            error_message=f"{type(e).__name__}: {e}"[:240],
-                           completed_at=_now(), release_eligible=False)
+                           completed_at=_now(), release_eligible=False,
+                           duration_ms=duration_ms, error_code=error_code,
+                           backend_outcome="failed", frontend_outcome="connected")
+            obs.capture_exception(e, tags=_render_tags(
+                {**job_doc, "error_code": error_code}, stage=stage,
+                terminal_status="failed", error_code=error_code,
+                output_saved=False, duration_ms=duration_ms,
+                frontend_outcome="connected", backend_outcome="failed",
+            ), user=job_doc.get("requested_by"))
             try:
                 from . import alerts as _alerts
                 await _alerts.notify(
@@ -2116,13 +2266,13 @@ async def _run_render_safe(job_id: str, project_id: str):
                     {"job_id": job_id, "project_id": project_id}, priority=6)
             except Exception:  # noqa: BLE001 — alerting never fails the job path
                 pass
-            db = get_db()
             await db.projects.update_one(
                 {"id": project_id},
                 {"$set": {"status": "FAILED"}, "$currentDate": {"updated_at": True}},
             )
         finally:
             _ACTIVE_TASKS.pop(project_id, None)
+            _ACTIVE_JOB_STAGE.pop(job_id, None)
 
 
 STALE_JOB_TIMEOUT_SECONDS = int(
@@ -2164,74 +2314,23 @@ async def recover_stale_jobs() -> int:
             "STALE_JOB_RECOVERED job=%s project=%s was=%s",
             j["id"], j.get("project_id"), j.get("status"),
         )
+        obs.record_terminal("render.recovery", tags={
+            "operation": "render.recovery",
+            "stage": "stale_job_recovery",
+            "terminal_status": "failed",
+            "error_code": "stale_job_recovered",
+            "provider": "ffmpeg",
+            "output_saved": False,
+            "job_id": j["id"],
+            "project_id": j.get("project_id"),
+            "backend_outcome": "failed",
+        })
         # Crashed/orphaned jobs are terminal failures — reverse their charge too.
         try:
             await reverse_render_credits(j["id"], reason="stale_job_recovery")
         except Exception:  # noqa: BLE001 — recovery of one refund must not block the rest
             logger.exception("credit reversal failed for stale job %s", j["id"])
     return res.modified_count or len(stale)
-
-
-async def _release_side_effects(
-    db,
-    project_id: str,
-    job_id: str,
-    *,
-    release_eligible: bool,
-    commercial: bool,
-    validated_mode: str,
-    duration,
-    saved,
-    final,
-) -> None:
-    """Auto-post and ready-email for a release-eligible, non-commercial render.
-
-    Called only while the caller holds the project's render lease. Both side
-    effects are refused unless the project's production mode still equals the
-    mode the render was validated under, so a mode switch can never ungate a post.
-    """
-    current = await db.projects.find_one({"id": project_id}, {"_id": 0}) or {}
-    if (current.get("production_mode") or "editorial") != validated_mode:
-        logger.warning("release side effects skipped project=%s job=%s: mode no longer matches", project_id, job_id)
-        return
-    # ── Auto-post engine: if project.auto_post=true, post to platform of choice (no manual prep) ──
-    try:
-        proj_for_post = await db.projects.find_one({"id": project_id}, {"_id": 0})
-        if release_eligible and not commercial and proj_for_post and proj_for_post.get("auto_post"):
-            # fetch metadata for title/description
-            meta_for_post = await db.metadata_packages.find_one({"project_id": project_id}, {"_id": 0}) or {}
-            meta_for_post["duration"] = duration
-            # build render_job dict for autopost
-            rj = {"output_url": saved.url, "output_path": str(saved.file_path) if saved.file_path else str(final), "duration": duration, "id": job_id}
-            try:
-                from .workers.autopost import autopost_after_render
-                # fire-and-forget but await quickly with timeout 20s
-                try:
-                    await asyncio.wait_for(autopost_after_render(proj_for_post, rj, meta_for_post), timeout=20)
-                except asyncio.TimeoutError:
-                    logger.warning(f"[AUTOPOST] timeout project={project_id}")
-            except Exception as ae:
-                logger.warning(f"[AUTOPOST] hook failed project={project_id}: {ae}")
-    except Exception as ae:
-        logger.warning(f"[AUTOPOST] outer failed {ae}")
-
-    # ── Cold email: Your video IS ready — {FirstName} {company.com} ──
-    try:
-        from .email import send_video_ready_email
-        project = await db.projects.find_one({"id": project_id}, {"_id": 0})
-        if release_eligible and project and not commercial:
-            user = await db.users.find_one({"id": project.get("user_id")}, {"_id": 0})
-            if user and user.get("email"):
-                share_token = project.get("share_token")
-                frontend = os.environ.get("FRONTEND_URL", "https://facelessforge.ethinx.solutions").rstrip("/")
-                share_url = f"{frontend}/s/{share_token}" if share_token and project.get("share_enabled") else None
-                # Fire-and-forget email (log_only in dev, smtp/sendgrid if configured)
-                try:
-                    await send_video_ready_email(user=user, project=project, mp4_url=saved.url, share_url=share_url)
-                except Exception as email_exc:
-                    logger.warning("[EMAIL] send failed project=%s user=%s: %s", project_id, user.get("email"), email_exc)
-    except Exception as e:
-        logger.warning("[EMAIL] hook failed project=%s: %s", project_id, e)
 
 
 async def _run_render(job_id: str, project_id: str):
@@ -2244,9 +2343,9 @@ async def _run_render(job_id: str, project_id: str):
         queue_ms = None
         created_at = queued.get("created_at")
         if isinstance(created_at, datetime):
-            # created_at comes back naive from Mongo; normalize before subtracting
-            # from the timezone-aware started_at.
-            created_at = _as_utc(created_at)
+            # Mongo returns UTC datetimes as naive; started_at is timezone-aware.
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
             queue_ms = max(0, int((started_at - created_at).total_seconds() * 1000))
         await _set_job(job_id, status="validating", current_step="validating",
                        progress=5, started_at=started_at,
@@ -2255,13 +2354,6 @@ async def _run_render(job_id: str, project_id: str):
         # Fetch job for per-render overrides (burn_subtitles, aspect_ratio) — default off for captions, 9:16 default
         job_doc = await db.render_jobs.find_one({"id": job_id}, {"_id": 0}) or {}
         project = await db.projects.find_one({"id": project_id}, {"_id": 0})
-        # The render is validated and released under the mode it was submitted with.
-        # Mode switches are refused while the job is active, so a difference here
-        # means the submission was not serialized: refuse to run rather than guess.
-        start_mode = (project or {}).get("production_mode") or "editorial"
-        validated_mode = job_doc.get("render_mode") or start_mode
-        if validated_mode != start_mode:
-            raise RuntimeError("Project production mode changed after render submission; resubmit the render.")
         # Aspect: job overrides project (allows landscape/portrait choice at render time)
         aspect = (job_doc.get("aspect_ratio") or project.get("aspect_ratio") or "9:16")
         if aspect not in ("9:16", "1:1", "16:9"):
@@ -2632,7 +2724,7 @@ async def _run_render(job_id: str, project_id: str):
         # The narration reaching this point is already fitted to the exact
         # budget (see fitting step above); the mux must not time-stretch it.
         tempo_ratio = 1.0
-        if audio_duration and abs(tempo_ratio - 1.0) > 0.05:
+        if audio_duration and abs(tempo_ratio - 1.0) > 0.15:
             raise RuntimeError(
                 f"Voiceover is {audio_duration:.2f}s but the narration budget is "
                 f"{narration_duration:.2f}s. Regenerate the script and voiceover before rendering."
@@ -2889,49 +2981,69 @@ async def _run_render(job_id: str, project_id: str):
             probe_target = final
         final_has_audio = await _final_has_audio_stream(probe_target)
         captions_present = _verification_check_passed(verification_result, "captions_present")
-        # Release is decided and executed under the project's render lease, so a
-        # project-mode update cannot land between the mode check and the auto-post
-        # or ready-email side effects. Fails closed when the lease cannot be
-        # obtained or the project's mode no longer matches the validated mode.
-        release_lease = await project_lease.acquire_with_retry(
-            db, project_id, project_lease.RENDER_LEASE,
-            ttl_seconds=project_lease.RENDER_LEASE_TTL_SECONDS,
+        release_eligible = release_eligible_after_qa(
+            commercial=commercial,
+            deterministic_blocked=deterministic_qa_blocked,
+            video_qa=qa_result,
+            verification_passed=verification_passed,
         )
-        try:
-            current_project = await db.projects.find_one({"id": project_id}, {"_id": 0}) or {}
-            current_mode = current_project.get("production_mode") or "editorial"
-            mode_consistent = release_lease is not None and current_mode == validated_mode
-            if not mode_consistent:
-                logger.warning(
-                    "release blocked project=%s job=%s validated_mode=%s current_mode=%s lease=%s",
-                    project_id, job_id, validated_mode, current_mode, release_lease is not None,
-                )
-            release_eligible = release_eligible_after_qa(
-                commercial=commercial,
-                deterministic_blocked=deterministic_qa_blocked,
-                video_qa=qa_result,
-                verification_passed=verification_passed,
-            ) and mode_consistent
-            final_step = "completed" if release_eligible else "qa_blocked"
-            await _set_job(job_id, status="completed", current_step=final_step, progress=100,
-                output_path=str(saved.file_path) if saved.file_path else None, output_url=saved.url,
-                output_relative_url=saved.preview_path, output_storage_mode=store.mode, output_storage_key=saved.key,
-                file_size=(saved.file_path.stat().st_size if saved.file_path and saved.file_path.exists() else final.stat().st_size if final.exists() else None),
-                duration=duration, completed_at=_now(), error_message=None, verification=verification_result,
-                video_qa=qa_result, commercial_report_path=str(report_path) if commercial else None,
-                timestamped_scene_review=scene_review if commercial else None,
-                scorecard=scorecard,
-                has_audio=final_has_audio if final_has_audio is not None else bool(audio_duration),
-                captions_burned=captions_present if captions_present is not None else bool(burn_enabled and burned_out != silent_out),
-                flags_derived_from="final_artifact_probe+verification",
-                flags_derived_at=_now(),
-                release_eligible=release_eligible,
-                deterministic_qa_blocked=deterministic_qa_blocked)
-            project_status = "COMPLETED" if release_eligible else "QA_PENDING"
-            await db.projects.update_one({"id": project_id}, {"$set": {"status": project_status, "rendered_video_asset_id": job_id, "updated_at": _now()}})
+        final_step = "completed" if release_eligible else "qa_blocked"
+        await _set_job(job_id, status="completed", current_step=final_step, progress=100,
+            output_path=str(saved.file_path) if saved.file_path else None, output_url=saved.url,
+            output_relative_url=saved.preview_path, output_storage_mode=store.mode, output_storage_key=saved.key,
+            file_size=(saved.file_path.stat().st_size if saved.file_path and saved.file_path.exists() else final.stat().st_size if final.exists() else None),
+            duration=duration, completed_at=_now(), error_message=None, verification=verification_result,
+            video_qa=qa_result, commercial_report_path=str(report_path) if commercial else None,
+            timestamped_scene_review=scene_review if commercial else None,
+            scorecard=scorecard,
+            has_audio=final_has_audio if final_has_audio is not None else bool(audio_duration),
+            captions_burned=captions_present if captions_present is not None else bool(burn_enabled and burned_out != silent_out),
+            flags_derived_from="final_artifact_probe+verification",
+            flags_derived_at=_now(),
+            release_eligible=release_eligible,
+            deterministic_qa_blocked=deterministic_qa_blocked,
+            audio_duration_seconds=float(audio_duration) if audio_duration else None,
+            render_duration_ms=int((_now() - started_at).total_seconds() * 1000),
+            backend_outcome="success",
+            frontend_outcome="connected")
+        project_status = "COMPLETED" if release_eligible else "QA_PENDING"
+        await db.projects.update_one({"id": project_id}, {"$set": {"status": project_status, "rendered_video_asset_id": job_id, "updated_at": _now()}})
 
-            await _release_side_effects(db, project_id, job_id, release_eligible=release_eligible,
-                                        commercial=commercial, validated_mode=validated_mode,
-                                        duration=duration, saved=saved, final=final)
-        finally:
-            await project_lease.release(db, release_lease)
+        # ── Auto-post engine: if project.auto_post=true, post to platform of choice (no manual prep) ──
+        try:
+            proj_for_post = await db.projects.find_one({"id": project_id}, {"_id":0})
+            if release_eligible and not commercial and proj_for_post and proj_for_post.get("auto_post"):
+                # fetch metadata for title/description
+                meta_for_post = await db.metadata_packages.find_one({"project_id": project_id}, {"_id":0}) or {}
+                meta_for_post["duration"] = duration
+                # build render_job dict for autopost
+                rj = {"output_url": saved.url, "output_path": str(saved.file_path) if saved.file_path else str(final), "duration": duration, "id": job_id}
+                try:
+                    from .workers.autopost import autopost_after_render
+                    # fire-and-forget but await quickly with timeout 20s
+                    try:
+                        await asyncio.wait_for(autopost_after_render(proj_for_post, rj, meta_for_post), timeout=20)
+                    except asyncio.TimeoutError:
+                        logger.warning(f"[AUTOPOST] timeout project={project_id}")
+                except Exception as ae:
+                    logger.warning(f"[AUTOPOST] hook failed project={project_id}: {ae}")
+        except Exception as ae:
+            logger.warning(f"[AUTOPOST] outer failed {ae}")
+
+        # ── Cold email: Your video IS ready — {FirstName} {company.com} ──
+        try:
+            from .email import send_video_ready_email
+            project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+            if release_eligible and project and not commercial:
+                user = await db.users.find_one({"id": project.get("user_id")}, {"_id": 0})
+                if user and user.get("email"):
+                    share_token = project.get("share_token")
+                    frontend = os.environ.get("FRONTEND_URL", "https://facelessforge.ethinx.solutions").rstrip("/")
+                    share_url = f"{frontend}/s/{share_token}" if share_token and project.get("share_enabled") else None
+                    # Fire-and-forget email (log_only in dev, smtp/sendgrid if configured)
+                    try:
+                        await send_video_ready_email(user=user, project=project, mp4_url=saved.url, share_url=share_url)
+                    except Exception as email_exc:
+                        logger.warning("[EMAIL] send failed project=%s user=%s: %s", project_id, user.get("email"), email_exc)
+        except Exception as e:
+            logger.warning("[EMAIL] hook failed project=%s: %s", project_id, e)
