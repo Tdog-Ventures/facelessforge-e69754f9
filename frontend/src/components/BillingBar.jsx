@@ -13,7 +13,7 @@ export default function BillingBar() {
       try {
         // Primary: /api/billing/balance (real Dodo per task spec), fallback to status/credits/dodo
         let data = null;
-        const endpoints = ["/billing/balance", "/billing/dodo/credits", "/billing/status", "/billing/credits"];
+        const endpoints = ["/billing/credits", "/billing/balance", "/billing/dodo/credits", "/billing/status"];
         for (const ep of endpoints) {
           try {
             const res = await api.get(ep);
@@ -51,7 +51,7 @@ export default function BillingBar() {
     const id = setInterval(async () => {
       try {
         let data = null;
-        for (const ep of ["/billing/balance", "/billing/dodo/credits", "/billing/status", "/billing/credits"]) {
+        for (const ep of ["/billing/credits", "/billing/balance", "/billing/dodo/credits", "/billing/status"]) {
           try { const r = await api.get(ep); if (r?.data) { data = r.data; break; } } catch {}
         }
         if (!alive || !data) return;
