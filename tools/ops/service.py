@@ -89,6 +89,13 @@ def status():
         pass
     with LOCK:
         active = ACTIVE
+    active_work = {"verified": False}
+    if (ROOT / "guard-idle.py").is_file():
+        try:
+            check = command(["python3", str(ROOT / "guard-idle.py"), "--report"], timeout=20)
+            active_work = {"verified": True, **json.loads(check.stdout)}
+        except Exception:
+            pass
     return {
         "product": "FacelessForge", "observed_at": now(),
         "container": {"name": CONTAINER, "running": bool(state.get("Running")), "health": state.get("Health", {}).get("Status"), "started_at": state.get("StartedAt"), "image": config.get("Image"), "image_id": info.get("Image"), "revision_label": labels.get("org.opencontainers.image.revision"), "revision_label_is_not_source_verification": True},
@@ -97,6 +104,7 @@ def status():
         "external_api": {"key_configured": bool(names.get("EXTERNAL_RENDER_API_KEY")), "enabled": names.get("EXTERNAL_RENDER_ENABLED", "").lower() in ("1", "true", "yes")},
         "mutation_guards": {"idle_guard_installed": (ROOT / "guard-idle.py").is_file(), "deploy_helper_installed": (ROOT / "deploy-revision.sh").is_file()},
         "active_task_id": active,
+        "active_work": active_work,
     }
 
 
