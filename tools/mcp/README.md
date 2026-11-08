@@ -1,29 +1,83 @@
-# FacelessForge MCP connector for OpenCode
+# FacelessForge MCP connector
 
-This connector belongs to `Tdog-Ventures/facelessforge-e69754f9`. It calls the existing FacelessForge backend directly, without requiring VideoForge, Everygen, a new subscription, or a model provider change. Python 3.12 standard library only.
+This connector belongs to `Tdog-Ventures/facelessforge-e69754f9`. It calls the existing
+FacelessForge backend and the `facelessforge-ops` operations bridge directly, without
+requiring VideoForge, Everygen, a new subscription, or a model provider change. Python 3.12
+standard library only, stdio transport, MCP `initialize`/`tools/list`/`tools/call` lifecycle
+(protocol revisions 2025-06-18, 2024-11-05 and 2025-11-25 for handshake downgrades).
 
-## Available tools
+## Available tools (9)
 
-- `render_video`: submit an existing script and optional duration, voice notes and footage search terms.
-- `render_status`: retrieve the real backend job status and download URL when available.
-- `cancel_render`: cancel the specified render through the existing cancellation endpoint.
+Read-only:
 
-The routes and `X-FacelessForge-Key` header match `backend/app/external_api.py`. No automatic retries: a timed-out submission may already have created a chargeable job. Reconcile before resubmitting. This connector does not modify billing, publish to YouTube, enable scheduled delivery, deploy code, or assert that completed videos passed quality checks.
+- `connection_status` — backend reachability + health payload, whether render/ops credentials are configured (booleans only; never values).
+- `render_status` — one backend render job by `job_id`. A completed status is not proof that the MP4 passes media verification.
+- `ops_status` — production status: container health, deployed revision, backend health, external render flags, mutation guards, active task.
+- `ops_logs` — redacted container log tail via the bridge, `lines` 20–200.
+- `ops_task_status` — one ops deploy/restart task by UUID. `queued`/`running` is not success; `reconcile_required` needs host inspection.
 
-## Install in the actual FacelessForge checkout
+Controlled writes:
 
-Merge the `mcp.facelessforge` entry from `opencode.example.json` into the project's existing OpenCode configuration. Preserve all existing model/provider and MCP settings. Run OpenCode from that checkout, or use an absolute server path in `command` when configuring it globally. Do not replace an existing configuration with the example.
+- `render_video` — submit one render from an existing script (title, script, optional target_duration 15–3600 s, voiceover_notes, stock_footage_terms). May consume provider credits. Never retry an ambiguous submission.
+- `cancel_render` — cancel the existing cancellation endpoint for one job.
+- `ops_restart` — queue one guarded restart with a 1–300 character reason; blocked while a render or deployment is active.
+- `ops_deploy` — queue one guarded deployment of a full lowercase 40-character commit SHA. The 202 receipt is not deployment; poll `ops_task_status`, verify revision and health before reporting success.
 
-Start OpenCode with the existing `EXTERNAL_RENDER_API_KEY` environment variable available to its process. The connector reads it at runtime; do not put the key in a committed configuration. The backend must already have `EXTERNAL_RENDER_ENABLED=true` and the matching key. This change does not enable that backend feature itself.
+Routes and headers match `backend/app/external_api.py` (`X-FacelessForge-Key`) and the
+owner-only bridge in `service.py` (`Authorization: Bearer`). No automatic retries anywhere.
 
-`FACELESSFORGE_API_URL` defaults to `http://127.0.0.1:7001`, matching the recorded host port. Override it with the confirmed backend origin if different. Remote connections require HTTPS. The URL must be an origin with no path, credentials, query or fragment. All redirects are rejected, so credentials cannot be forwarded. Port 8000 is forbidden.
+## Configuration
 
-Check registration with `opencode mcp list`. Ask OpenCode to use `facelessforge` to inspect an existing job first. Then submit one approved script, record the returned job ID, and poll using `render_status`. Verify the returned MP4 independently with ffprobe and a complete FFmpeg decode before treating it as production acceptance. Do not retry a submission just because it timed out.
+| Variable | Default | Meaning |
+|---|---|---|
+| `FACELESSFORGE_API_URL` | `http://127.0.0.1:7001` | Backend origin. `http` only for loopback hosts; remote origins require HTTPS; origin-only; redirects refused; port 8000 forbidden. |
+| `FACELESSFORGE_OPS_URL` | `http://127.0.0.1:7012` | Operations bridge origin; same URL rules. |
+| `FACELESSFORGE_MCP_ENV_FILE` | `/opt/ethinx/deployment/secrets-vault/facelessforge-deploy.env` and `/opt/ethinx/facelessforge-ops/ops.env` | `:`-separated `KEY=VALUE` credential files. |
+| `EXTERNAL_RENDER_API_KEY`, `FACELESSFORGE_OPS_KEY`, `EXTERNAL_RENDER_ENABLED` | – | Process-environment values override files. Only these three names are ever parsed. |
 
-## Verification and limits
+Credentials are never logged, returned or committed; every returned string is filtered so
+credential values become `[REDACTED]`. Off-box clients set
+`FACELESSFORGE_API_URL=https://facelessforge.ethinx.solutions` (render tools only — the ops
+bridge is loopback-only).
 
-Run `python3 -m unittest discover -s tools/mcp/tests -v`. Eight local integration tests exercise the actual stdio subprocess and a controlled HTTP contract fixture: initialization/discovery, authenticated render, exact status/cancel routes, argument rejection, missing credentials, redirect rejection, port 8000 rejection, and lifecycle ordering.
+## Install
 
-These are connector tests, not a successful production render. OpenCode model execution, the deployed server version, credits, live jobs, downloadable production media and deployment remain unverified. The current repository references runtime modules absent from its tree, so it must not be assumed identical to the deployed server. No production service was changed during development.
+Per-client templates live in `integrations/mcp-clients/` (OpenCode global registration is
+already in place on the VPS at `~/.config/opencode/opencode.json`):
 
-Protocol compatibility: MCP 2025-06-18 and 2024-11-05 initialization/stdio lifecycle. Newer protocol revisions are not claimed. OpenCode v1-style local MCP configuration follows https://docs.opencode.ai/docs/mcp-servers/; check the installed major version before applying the example.
+```json
+"mcp": { "servers": { "facelessforge": {
+  "type": "local",
+  "command": ["python3", "<REPO_PATH>/tools/mcp/server.py"],
+  "disabled": false } } }
+```
+
+OpenCode names the tools `facelessforge_<tool>`, exposed through Code Mode as
+`tools.facelessforge.*`. Nothing else in the client configuration changes.
+
+## Verification
+
+```sh
+cd <REPO_PATH>
+python3 tools/mcp/verify_connection.py            # handshake + 9-tool discovery + live connection_status
+python3 -m unittest discover -s tools/mcp/tests   # 15 offline contract tests
+```
+
+Test coverage: handshake/discovery, render contract, exact render routes, ops read routes,
+ops write bodies, argument rejection (all tools), missing credentials (render and ops),
+redirect credential refusal, port-8000 rejection for both origins, lifecycle ordering,
+secret redaction, and regression that the `EXTERNAL_RENDER_ENABLED` value can never mangle
+output.
+
+Ask the agent to run `connection_status` and `ops_status` first. Then submit one approved
+script with `render_video`, record the job ID, and poll with `render_status`. Verify the
+MP4 independently (ffprobe plus a full FFmpeg decode) before treating it as accepted. Do
+not retry a submission because it timed out — reconcile first.
+
+## Limits
+
+These are connector tests, not a successful production render. Deployments through the ops
+bridge currently fail closed on the production host because the guarded deploy helper is
+not installed under `/opt/ethinx/facelessforge-ops/` (the source copies live at
+`/opt/ethinx/facelessforge-ops-source/tools/ops/`); restoring them is a host operation and
+is not part of this connector. No production service is modified by this directory.

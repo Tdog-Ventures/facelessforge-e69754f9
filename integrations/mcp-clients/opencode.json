@@ -1,0 +1,12 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "facelessforge": {
+        "type": "local",
+        "command": ["python3", "<REPO_PATH>/tools/mcp/server.py"],
+        "disabled": false
+      }
+    }
+  }
+}

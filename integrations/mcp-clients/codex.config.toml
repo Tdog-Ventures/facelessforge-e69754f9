@@ -1,0 +1,7 @@
+# Codex CLI — add to ~/.codex/config.toml
+[mcp_servers.facelessforge]
+command = "python3"
+args = ["<REPO_PATH>/tools/mcp/server.py"]
+
+[mcp_servers.facelessforge.env]
+FACELESSFORGE_MCP_ENV_FILE = "/root/.secrets/facelessforge/mcp.env"

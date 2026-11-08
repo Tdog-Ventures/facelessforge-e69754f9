@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "facelessforge": {
+      "command": "python3",
+      "args": ["<REPO_PATH>/tools/mcp/server.py"],
+      "env": {
+        "FACELESSFORGE_MCP_ENV_FILE": "/root/.secrets/facelessforge/mcp.env"
+      }
+    }
+  }
+}
