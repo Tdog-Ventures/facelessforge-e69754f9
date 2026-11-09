@@ -83,7 +83,7 @@ function CopyChip({ text, label, testId }) {
     <button
       onClick={copy}
       data-testid={testId}
-      className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-400 hover:text-[#00E5FF] border border-zinc-800 hover:border-[#00E5FF] px-2 py-1 rounded-sm transition-colors"
+      className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] hover:text-[#00E5FF] border border-[var(--ff-border)] hover:border-[#00E5FF] px-2 py-1 rounded-sm transition-colors"
     >
       {copied ? <Check size={12} strokeWidth={1.8} /> : <Copy size={12} strokeWidth={1.5} />}
       {copied ? "Copied" : label}
@@ -112,7 +112,7 @@ export default function PublicSharePage() {
 
   if (error) {
     return (
-      <div className="min-h-screen bg-[#0A0A0A] text-white flex items-center justify-center px-6">
+      <div className="min-h-screen bg-[var(--ff-input-bg)] text-[var(--ff-text)] flex items-center justify-center px-6">
         <div className="text-center space-y-4">
           <div className="font-mono text-[10px] uppercase tracking-widest text-[#FF3366]">404 · Not found</div>
           <h1 className="text-3xl font-bold tracking-tight">{error}</h1>
@@ -126,7 +126,7 @@ export default function PublicSharePage() {
 
   if (!data) {
     return (
-      <div className="min-h-screen bg-[#0A0A0A] text-zinc-500 font-mono text-sm flex items-center justify-center">
+      <div className="min-h-screen bg-[var(--ff-input-bg)] text-[var(--ff-text-muted)] font-mono text-sm flex items-center justify-center">
         Loading…
       </div>
     );
@@ -136,24 +136,24 @@ export default function PublicSharePage() {
   const color = qualityColor(quality_score);
 
   return (
-    <div className="min-h-screen bg-[#0A0A0A] text-white">
+    <div className="min-h-screen bg-[var(--ff-input-bg)] text-[var(--ff-text)]">
       <Toaster
-        theme="dark"
+        theme="system"
         position="top-right"
         toastOptions={{
-          style: { background: "#121212", border: "1px solid #27272A", color: "#fff", borderRadius: 2, fontFamily: "'JetBrains Mono', monospace", fontSize: 12 },
+          style: { background: "var(--ff-surface)", border: "1px solid var(--ff-border)", color: "var(--ff-text)", borderRadius: 2, fontFamily: "'JetBrains Mono', monospace", fontSize: 12 },
         }}
       />
 
-      <header className="ff-grid border-b border-zinc-800">
+      <header className="ff-grid border-b border-[var(--ff-border)]">
         <div className="max-w-5xl mx-auto px-6 py-8 md:py-14">
           <div className="flex items-center gap-3 mb-8">
             <StatusBadge status={status} />
-            <span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">{niche}</span>
+            <span className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">{niche}</span>
           </div>
 
           {selected_thumbnail_url && (
-            <div className="mb-10 border border-zinc-800 rounded-sm overflow-hidden bg-[#121212]" data-testid="share-hero-thumbnail">
+            <div className="mb-10 border border-[var(--ff-border)] rounded-sm overflow-hidden bg-[var(--ff-surface)]" data-testid="share-hero-thumbnail">
               {final_video?.url ? (
                 <video
                   data-testid="share-final-video"
@@ -180,17 +180,17 @@ export default function PublicSharePage() {
             {display_title}
           </h1>
           {display_title !== project_name && (
-            <div className="mt-4 font-mono text-[10px] uppercase tracking-widest text-zinc-600">
+            <div className="mt-4 font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-dim)]">
               Internal name · {project_name}
             </div>
           )}
 
           <div className="mt-8 flex items-center gap-6">
             <div>
-              <div className="font-mono text-[10px] uppercase tracking-widest text-zinc-500 mb-1">Quality score</div>
+              <div className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] mb-1">Quality score</div>
               <div className="flex items-center gap-3">
                 <span className="font-mono text-3xl font-semibold tabular-nums" style={{ color }}>
-                  {quality_score}<span className="text-zinc-600 text-lg">/100</span>
+                  {quality_score}<span className="text-[var(--ff-text-dim)] text-lg">/100</span>
                 </span>
                 <span className="font-mono text-[10px] uppercase tracking-widest" style={{ color }}>
                   {qualityLabel(quality_score)}
@@ -202,14 +202,14 @@ export default function PublicSharePage() {
           {selected_voiceover?.preview_url && (
             <div
               data-testid="share-voiceover-player"
-              className="mt-8 border border-zinc-800 bg-[#121212] rounded-sm p-4 space-y-2 max-w-2xl"
+              className="mt-8 border border-[var(--ff-border)] bg-[var(--ff-surface)] rounded-sm p-4 space-y-2 max-w-2xl"
             >
               <div className="flex items-center gap-2">
                 <span className="font-mono text-[10px] uppercase tracking-widest text-[#FF66CC]">
                   Preview voiceover
                 </span>
                 {selected_voiceover.voice_style && (
-                  <span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+                  <span className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">
                     · {selected_voiceover.voice_style}
                   </span>
                 )}
@@ -222,30 +222,30 @@ export default function PublicSharePage() {
 
       <main className="max-w-5xl mx-auto px-6 py-10 space-y-6">
         {!metadata ? (
-          <div className="border border-zinc-800 border-dashed p-10 text-center rounded-sm text-zinc-400">
+          <div className="border border-[var(--ff-border)] border-dashed p-10 text-center rounded-sm text-[var(--ff-text-muted)]">
             Metadata is not ready yet.
           </div>
         ) : (
           <>
             {/* Selected title */}
-            <div className="border border-zinc-800 bg-[#121212] rounded-sm">
-              <div className="px-5 py-3 border-b border-zinc-800 flex items-center justify-between">
-                <span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">YouTube title</span>
+            <div className="border border-[var(--ff-border)] bg-[var(--ff-surface)] rounded-sm">
+              <div className="px-5 py-3 border-b border-[var(--ff-border)] flex items-center justify-between">
+                <span className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">YouTube title</span>
                 <CopyChip text={metadata.selected_title} label="Copy" testId="share-copy-title" />
               </div>
-              <div className="p-5 text-lg text-white font-medium leading-relaxed">
+              <div className="p-5 text-lg text-[var(--ff-text)] font-medium leading-relaxed">
                 {metadata.selected_title}
               </div>
             </div>
 
             {/* Description */}
             {metadata.description && (
-              <div className="border border-zinc-800 bg-[#121212] rounded-sm">
-                <div className="px-5 py-3 border-b border-zinc-800 flex items-center justify-between">
-                  <span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Description</span>
+              <div className="border border-[var(--ff-border)] bg-[var(--ff-surface)] rounded-sm">
+                <div className="px-5 py-3 border-b border-[var(--ff-border)] flex items-center justify-between">
+                  <span className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">Description</span>
                   <CopyChip text={metadata.description} label="Copy" testId="share-copy-description" />
                 </div>
-                <pre className="p-5 text-sm text-zinc-200 leading-relaxed whitespace-pre-wrap font-sans">
+                <pre className="p-5 text-sm text-[var(--ff-text)] leading-relaxed whitespace-pre-wrap font-sans">
                   {metadata.description}
                 </pre>
               </div>
@@ -254,42 +254,42 @@ export default function PublicSharePage() {
             {/* Tags + Hashtags + Chapters */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
               {metadata.tags?.length > 0 && (
-                <div className="border border-zinc-800 bg-[#121212] rounded-sm">
-                  <div className="px-5 py-3 border-b border-zinc-800 flex items-center justify-between">
-                    <span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Tags</span>
+                <div className="border border-[var(--ff-border)] bg-[var(--ff-surface)] rounded-sm">
+                  <div className="px-5 py-3 border-b border-[var(--ff-border)] flex items-center justify-between">
+                    <span className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">Tags</span>
                     <CopyChip text={metadata.tags.join(", ")} label="Copy all" testId="share-copy-tags" />
                   </div>
                   <div className="p-5 flex flex-wrap gap-2">
                     {metadata.tags.map((t) => (
-                      <span key={`tag-${t}`} className="font-mono text-xs px-2 py-1 border border-zinc-800 text-zinc-300 rounded-sm">{t}</span>
+                      <span key={`tag-${t}`} className="font-mono text-xs px-2 py-1 border border-[var(--ff-border)] text-[var(--ff-text)] rounded-sm">{t}</span>
                     ))}
                   </div>
                 </div>
               )}
               {(metadata.hashtags?.length > 0 || metadata.chapters?.length > 0) && (
-                <div className="border border-zinc-800 bg-[#121212] rounded-sm">
+                <div className="border border-[var(--ff-border)] bg-[var(--ff-surface)] rounded-sm">
                   {metadata.hashtags?.length > 0 && (
                     <>
-                      <div className="px-5 py-3 border-b border-zinc-800 flex items-center justify-between">
-                        <span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Hashtags</span>
+                      <div className="px-5 py-3 border-b border-[var(--ff-border)] flex items-center justify-between">
+                        <span className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">Hashtags</span>
                       </div>
                       <div className="p-5 flex flex-wrap gap-2">
                         {metadata.hashtags.map((h) => (
-                          <span key={`hashtag-${h}`} className="font-mono text-xs px-2 py-1 border border-zinc-800 text-[#7B61FF] rounded-sm">{h}</span>
+                          <span key={`hashtag-${h}`} className="font-mono text-xs px-2 py-1 border border-[var(--ff-border)] text-[#7B61FF] rounded-sm">{h}</span>
                         ))}
                       </div>
                     </>
                   )}
                   {metadata.chapters?.length > 0 && (
                     <>
-                      <div className="px-5 py-3 border-t border-b border-zinc-800">
-                        <span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Chapters</span>
+                      <div className="px-5 py-3 border-t border-b border-[var(--ff-border)]">
+                        <span className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">Chapters</span>
                       </div>
                       <ul className="p-5 space-y-1.5">
                         {metadata.chapters.map((c) => (
                           <li key={`chapter-${c.timestamp}-${c.title}`} className="flex items-center gap-3 text-sm">
                             <span className="font-mono text-[11px] text-[#00E5FF] w-14">{c.timestamp}</span>
-                            <span className="text-zinc-300">{c.title}</span>
+                            <span className="text-[var(--ff-text)]">{c.title}</span>
                           </li>
                         ))}
                       </ul>
@@ -301,12 +301,12 @@ export default function PublicSharePage() {
 
             {/* Pinned comment */}
             {metadata.pinned_comment && (
-              <div className="border border-zinc-800 bg-[#121212] rounded-sm">
-                <div className="px-5 py-3 border-b border-zinc-800 flex items-center justify-between">
-                  <span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Pinned comment</span>
+              <div className="border border-[var(--ff-border)] bg-[var(--ff-surface)] rounded-sm">
+                <div className="px-5 py-3 border-b border-[var(--ff-border)] flex items-center justify-between">
+                  <span className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">Pinned comment</span>
                   <CopyChip text={metadata.pinned_comment} label="Copy" testId="share-copy-pinned" />
                 </div>
-                <div className="p-5 text-sm text-zinc-200 leading-relaxed italic">
+                <div className="p-5 text-sm text-[var(--ff-text)] leading-relaxed italic">
                   "{metadata.pinned_comment}"
                 </div>
               </div>
@@ -330,15 +330,15 @@ export default function PublicSharePage() {
                     href={data.download?.gcs_mirror || data.final_video.url}
                     target="_blank"
                     rel="noreferrer"
-                    className="inline-flex items-center gap-2 border border-zinc-700 text-white hover:border-[#00E5FF] hover:text-[#00E5FF] font-mono text-[11px] uppercase tracking-widest px-4 py-2 rounded-sm"
+                    className="inline-flex items-center gap-2 border border-[var(--ff-input-border)] text-[var(--ff-text)] hover:border-[#00E5FF] hover:text-[#00E5FF] font-mono text-[11px] uppercase tracking-widest px-4 py-2 rounded-sm"
                   >
                     GCS Mirror (R2) — videos.ethinx.solutions
                   </a>
                 </div>
-                <div className="font-mono text-[11px] text-zinc-500 break-all">
+                <div className="font-mono text-[11px] text-[var(--ff-text-muted)] break-all">
                   {data.final_video.url}
                 </div>
-                <div className="font-mono text-[10px] text-zinc-600">
+                <div className="font-mono text-[10px] text-[var(--ff-text-dim)]">
                   R2 bucket facelessforge-prod · GCS mirror compatible · 1080p H.264/AAC
                 </div>
               </div>
@@ -347,7 +347,7 @@ export default function PublicSharePage() {
             {/* Posting Guidance */}
             <div className="border border-[#00E5FF]/20 bg-[#00E5FF]/5 rounded-sm p-5 space-y-3" data-testid="share-posting-guidance">
               <div className="font-mono text-[10px] uppercase tracking-widest text-[#00E5FF]">Posting Guidance — YouTube / TikTok / Reels</div>
-              <ol className="list-decimal list-inside space-y-1.5 text-sm text-zinc-200">
+              <ol className="list-decimal list-inside space-y-1.5 text-sm text-[var(--ff-text)]">
                 <li>Upload MP4 native — don't re-encode (1080p 30fps H.264/AAC)</li>
                 <li>Title: Copy YouTube title above (&lt;70 chars for CTR)</li>
                 <li>Description: Paste full description + add your company link first line</li>
@@ -356,7 +356,7 @@ export default function PublicSharePage() {
                 <li>Scheduling: Post 10am-2pm local, add chapters, pin comment</li>
                 <li>Shorts/Reels: Crop center 1080×1920 if vertical needed — audio already mixed</li>
               </ol>
-              <p className="font-mono text-[11px] text-zinc-500">
+              <p className="font-mono text-[11px] text-[var(--ff-text-muted)]">
                 Questions? Reply — support@ethinx.solutions · EthinX Solutions ABN 60 578 933 517
               </p>
             </div>
@@ -367,9 +367,9 @@ export default function PublicSharePage() {
                 <h2 className="text-sm font-semibold mb-3">Thumbnail concepts</h2>
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   {thumbnails.map((t, i) => (
-                    <div key={t.id || `thumb-${i}`} className="border border-zinc-800 bg-[#121212] rounded-sm overflow-hidden">
-                      <div className="px-5 py-4 border-b border-zinc-800 bg-[#0A0A0A]">
-                        <div className="font-mono text-[10px] uppercase tracking-widest text-zinc-500 mb-2">
+                    <div key={t.id || `thumb-${i}`} className="border border-[var(--ff-border)] bg-[var(--ff-surface)] rounded-sm overflow-hidden">
+                      <div className="px-5 py-4 border-b border-[var(--ff-border)] bg-[var(--ff-input-bg)]">
+                        <div className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] mb-2">
                           Concept · {String(i + 1).padStart(2, "0")}
                         </div>
                         <div className="text-xl font-bold tracking-tight">{t.brief.thumbnail_title_text}</div>
@@ -389,7 +389,7 @@ export default function PublicSharePage() {
         )}
       </main>
 
-      <footer className="mt-12 border-t border-zinc-800 bg-[#0A0A0A]">
+      <footer className="mt-12 border-t border-[var(--ff-border)] bg-[var(--ff-input-bg)]">
         <div className="max-w-5xl mx-auto px-6 py-8 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <div
@@ -400,7 +400,7 @@ export default function PublicSharePage() {
             </div>
             <div className="leading-tight">
               <div className="font-semibold tracking-tight">Created with {data.branding?.white_label_enabled && data.branding?.brand_name ? data.branding.brand_name : "FacelessForge"}</div>
-              <div className="font-mono text-[10px] text-zinc-500 tracking-widest uppercase">
+              <div className="font-mono text-[10px] text-[var(--ff-text-muted)] tracking-widest uppercase">
                 {data.branding?.white_label_enabled ? `White-label via tenant settings · custom domain ${data.branding?.custom_domain || "—"}` : "Turn any idea into a YouTube-ready content package."}
               </div>
               {data.branding?.brand_logo_url && data.branding?.white_label_enabled && (
@@ -424,8 +424,8 @@ export default function PublicSharePage() {
 function Row({ label, value }) {
   return (
     <div className="grid grid-cols-[100px_1fr] gap-3">
-      <span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500 pt-0.5">{label}</span>
-      <span className="text-zinc-200 leading-relaxed">{value}</span>
+      <span className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] pt-0.5">{label}</span>
+      <span className="text-[var(--ff-text)] leading-relaxed">{value}</span>
     </div>
   );
 }

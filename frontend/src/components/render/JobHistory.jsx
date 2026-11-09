@@ -3,8 +3,8 @@ import React from "react";
 export default function JobHistory({ jobs, projectId }) {
   if (!jobs || jobs.length === 0) return null;
   return (
-    <div className="border border-zinc-800 bg-[#121212] rounded-sm overflow-hidden">
-      <div className="px-4 py-3 border-b border-zinc-800 font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+    <div className="border border-[var(--ff-border)] bg-[var(--ff-surface)] rounded-sm overflow-hidden">
+      <div className="px-4 py-3 border-b border-[var(--ff-border)] font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">
         Render history · {jobs.length} jobs
       </div>
       <div className="divide-y divide-zinc-800">
@@ -24,7 +24,7 @@ export default function JobHistory({ jobs, projectId }) {
                   }}>
               {status}
             </span>
-            <span className="font-mono text-[10px] text-zinc-500">
+            <span className="font-mono text-[10px] text-[var(--ff-text-muted)]">
               {new Date(j.created_at).toLocaleString('en-AU', {timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, hour12:true})}
             </span>
             <span className="flex-1" />

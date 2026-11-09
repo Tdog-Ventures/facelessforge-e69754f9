@@ -19,7 +19,7 @@ export default function CopyButton({ text, label = "Copy", testId }) {
       type="button"
       onClick={copy}
       data-testid={testId || "copy-btn"}
-      className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-400 hover:text-[#00E5FF] border border-zinc-800 hover:border-[#00E5FF] px-2 py-1 rounded-sm transition-colors"
+      className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] hover:text-[#00E5FF] border border-[var(--ff-border)] hover:border-[#00E5FF] px-2 py-1 rounded-sm transition-colors"
     >
       {copied ? <Check size={12} strokeWidth={1.8} /> : <Copy size={12} strokeWidth={1.5} />}
       {copied ? "Copied" : label}

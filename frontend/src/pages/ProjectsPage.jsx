@@ -49,20 +49,20 @@ export default function ProjectsPage() {
       <div className="p-8 space-y-6">
         <div className="flex flex-col md:flex-row gap-3 md:items-center">
           <div className="relative flex-1">
-            <Search size={14} strokeWidth={1.5} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
+            <Search size={14} strokeWidth={1.5} className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--ff-text-muted)]" />
             <input
               data-testid="projects-search"
               value={q}
               onChange={(e) => setQ(e.target.value)}
               placeholder="Search by name, niche, topic…"
-              className="w-full bg-[#121212] border border-zinc-800 pl-9 pr-3 py-2.5 text-sm rounded-sm focus:border-[#00E5FF]"
+              className="w-full bg-[var(--ff-surface)] border border-[var(--ff-border)] pl-9 pr-3 py-2.5 text-sm rounded-sm focus:border-[#00E5FF]"
             />
           </div>
           <select
             data-testid="projects-status-filter"
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
-            className="bg-[#121212] border border-zinc-800 px-3 py-2.5 text-sm rounded-sm focus:border-[#00E5FF] font-mono uppercase tracking-wider"
+            className="bg-[var(--ff-surface)] border border-[var(--ff-border)] px-3 py-2.5 text-sm rounded-sm focus:border-[#00E5FF] font-mono uppercase tracking-wider"
           >
             <option value="all">All statuses</option>
             {Object.keys(STATUS_META).map((s) => (
@@ -72,10 +72,10 @@ export default function ProjectsPage() {
         </div>
 
         {loading ? (
-          <div className="text-sm text-zinc-500 font-mono">Loading projects…</div>
+          <div className="text-sm text-[var(--ff-text-muted)] font-mono">Loading projects…</div>
         ) : filtered.length === 0 ? (
-          <div className="border border-zinc-800 border-dashed p-10 text-center rounded-sm">
-            <p className="text-sm text-zinc-400 mb-4">No projects match your filter.</p>
+          <div className="border border-[var(--ff-border)] border-dashed p-10 text-center rounded-sm">
+            <p className="text-sm text-[var(--ff-text-muted)] mb-4">No projects match your filter.</p>
             <Link
               to="/app/projects/new"
               className="inline-flex items-center gap-2 bg-[#00E5FF] text-black px-4 py-2 text-sm font-semibold rounded-sm"

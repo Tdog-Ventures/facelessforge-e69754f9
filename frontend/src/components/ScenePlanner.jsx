@@ -259,8 +259,8 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
   if (!scenes || scenes.length === 0) {
     return (
       <div>
-        <div className="border border-[rgba(59,130,246,0.15)] border-dashed p-10 text-center rounded-lg bg-[#1c2333]">
-          <p className="text-sm text-slate-400 mb-4">
+        <div className="border border-[rgba(59,130,246,0.15)] border-dashed p-10 text-center rounded-lg bg-[var(--ff-surface)]">
+          <p className="text-sm text-[var(--ff-text-muted)] mb-4">
             {hasScript ? "No scene plan yet. Generate one from the script." : "Generate a script first, then break it into scenes."}
           </p>
           {canEdit && hasScript && (
@@ -269,7 +269,7 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
               onClick={generate}
               disabled={generating || exhausted}
               title={exhausted ? `0 left, resets ${resetLabel}` : undefined}
-              className={`inline-flex items-center gap-2 font-semibold text-sm px-4 py-2 rounded-md transition-colors disabled:opacity-60 ${exhausted ? "bg-slate-800 text-slate-500 cursor-not-allowed" : "bg-blue-600 text-white hover:bg-blue-500"}`}
+              className={`inline-flex items-center gap-2 font-semibold text-sm px-4 py-2 rounded-md transition-colors disabled:opacity-60 ${exhausted ? "bg-[var(--ff-surface-2)] text-[var(--ff-text-muted)] cursor-not-allowed" : "bg-blue-600 text-white hover:bg-blue-500"}`}
             >
               {generating ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} strokeWidth={2} />}
               {exhausted ? `0 left, resets ${resetLabel}` : generating ? "Generating…" : "Generate Scenes"}
@@ -295,7 +295,7 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
         )}
         <BillingBar />
         <div className="flex items-center justify-between">
-          <div className="font-mono text-[11px] text-slate-500" title="Expected scene count is ceil((target − intro) / 30). Intro is 2.5s for editorial videos.">
+          <div className="font-mono text-[11px] text-[var(--ff-text-muted)]" title="Expected scene count is ceil((target − intro) / 30). Intro is 2.5s for editorial videos.">
             {(() => {
               const budget = sceneBudgetLabel({
                 targetDuration: innerProject?.target_duration || project?.target_duration || 0,
@@ -316,7 +316,7 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
                 onClick={autoAttach}
                 disabled={autoAttaching || (exhausted && !pendingAttachment)}
                 title={exhausted && !pendingAttachment ? `0 left, resets ${resetLabel}` : undefined}
-                className={`flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest px-2.5 py-1 rounded-md transition-colors disabled:opacity-60 ${exhausted && !pendingAttachment ? "bg-slate-800 text-slate-500 cursor-not-allowed" : "text-white bg-emerald-600 hover:bg-emerald-500"}`}
+                className={`flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest px-2.5 py-1 rounded-md transition-colors disabled:opacity-60 ${exhausted && !pendingAttachment ? "bg-[var(--ff-surface-2)] text-[var(--ff-text-muted)] cursor-not-allowed" : "text-white bg-emerald-600 hover:bg-emerald-500"}`}
               >
                 {autoAttaching ? <Loader2 size={12} className="animate-spin" /> : <Wand2 size={12} strokeWidth={1.8} />}
                 {autoAttaching ? "Auto-attaching…" : pendingAttachment ? "Retry asset update" : exhausted ? `0 left, resets ${resetLabel}` : "Auto-attach Assets"}
@@ -331,7 +331,7 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
             <button
               data-testid="export-scenes-csv"
               onClick={exportCsv}
-              className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-slate-400 hover:text-blue-400 border border-[rgba(59,130,246,0.15)] hover:border-blue-400 px-2 py-1 rounded-md transition-colors"
+              className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] hover:text-blue-400 border border-[rgba(59,130,246,0.15)] hover:border-blue-400 px-2 py-1 rounded-md transition-colors"
             >
               <Download size={12} strokeWidth={1.5} /> CSV
             </button>
@@ -341,7 +341,7 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
                 onClick={generate}
                 disabled={generating || exhausted}
                 title={exhausted ? `0 left, resets ${resetLabel}` : undefined}
-                className={`flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest px-2 py-1 rounded-md border transition-colors disabled:opacity-50 ${exhausted ? "border-slate-700 text-slate-600 cursor-not-allowed" : "text-slate-400 hover:text-blue-400 border-[rgba(59,130,246,0.15)] hover:border-blue-400"}`}
+                className={`flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest px-2 py-1 rounded-md border transition-colors disabled:opacity-50 ${exhausted ? "border-[var(--ff-input-border)] text-[var(--ff-text-dim)] cursor-not-allowed" : "text-[var(--ff-text-muted)] hover:text-blue-400 border-[rgba(59,130,246,0.15)] hover:border-blue-400"}`}
               >
                 {generating ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} strokeWidth={1.5} />}
                 {exhausted ? `0 left, resets ${resetLabel}` : "Regenerate"}
@@ -350,10 +350,10 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
           </div>
         </div>
 
-        <div className="border border-[rgba(59,130,246,0.15)] bg-[#1c2333] rounded-lg overflow-hidden">
+        <div className="border border-[rgba(59,130,246,0.15)] bg-[var(--ff-surface)] rounded-lg overflow-hidden">
           <table className="w-full text-sm">
-            <thead className="border-b border-[rgba(59,130,246,0.15)] bg-[#0f141f]">
-              <tr className="font-mono text-[10px] text-slate-500 uppercase tracking-widest">
+            <thead className="border-b border-[rgba(59,130,246,0.15)] bg-[var(--ff-bg)]">
+              <tr className="font-mono text-[10px] text-[var(--ff-text-muted)] uppercase tracking-widest">
                 <th className="text-left px-4 py-3 w-12">#</th>
                 <th className="text-left px-4 py-3 w-28">Time</th>
                 <th className="text-left px-4 py-3">Narration</th>
@@ -365,12 +365,12 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
               {scenes.map((s) => {
                 const sceneAssets = assetsForScene(s.id);
                 return (
-                  <tr key={s.id} className="border-b border-slate-800 hover:bg-[#1e293b] transition-colors align-top">
+                  <tr key={s.id} className="border-b border-[var(--ff-border)] hover:bg-[#1e293b] transition-colors align-top">
                     <td className="px-4 py-3 font-mono text-blue-400 text-xs">{String(s.scene_number).padStart(2, "0")}</td>
-                    <td className="px-4 py-3 font-mono text-xs text-slate-400">
+                    <td className="px-4 py-3 font-mono text-xs text-[var(--ff-text-muted)]">
                       {formatDuration(s.start_time || 0)} → {formatDuration(s.end_time || 0)}
                     </td>
-                    <td className="px-4 py-3 text-slate-200 leading-relaxed">
+                    <td className="px-4 py-3 text-[var(--ff-text)] leading-relaxed">
                       {s.narration_text}
                       {(() => {
                         const v = voiceoverForScene(s.id);
@@ -398,14 +398,14 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
                       })()}
                     </td>
                     <td className="px-4 py-3">
-                      <div className="text-slate-300 mb-1">{s.visual_direction}</div>
+                      <div className="text-[var(--ff-text)] mb-1">{s.visual_direction}</div>
                       <div className="font-mono text-[10px] uppercase tracking-widest text-amber-400">
                         {(s.asset_type || "").replace(/_/g, " ")}
                       </div>
                       {s.search_terms?.length > 0 && (
                         <div className="mt-2 flex flex-wrap gap-1">
                           {s.search_terms.map((t) => (
-                            <span key={`term-${s.id}-${t}`} className="font-mono text-[10px] px-1.5 py-0.5 border border-slate-700 text-slate-400 rounded-md">
+                            <span key={`term-${s.id}-${t}`} className="font-mono text-[10px] px-1.5 py-0.5 border border-[var(--ff-input-border)] text-[var(--ff-text-muted)] rounded-md">
                               {t}
                             </span>
                           ))}
@@ -413,14 +413,14 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
                       )}
                     </td>
                     <td className="px-4 py-3 space-y-2">
-                      <div className="text-slate-300 italic">"{s.caption_text}"</div>
+                      <div className="text-[var(--ff-text)] italic">"{s.caption_text}"</div>
                       {sceneAssets.length > 0 && (
                         <>
                           <div className="grid grid-cols-3 gap-2 max-w-[420px]">
                             {sceneAssets.slice(0,10).map((a, i) => (
-                              <div key={a.id} data-testid={`scene-asset-${a.id}`} className="relative aspect-video bg-black border border-slate-700 group overflow-hidden rounded-md cursor-pointer" title={`${a.name} · ${a.attribution_name || ""} — click to preview`} onClick={() => setPreviewAsset(a)}>
-                                {a.preview_url ? <img src={a.preview_url} alt="" className="w-full h-full object-cover" loading="lazy" referrerPolicy="no-referrer" onError={(e)=>{e.currentTarget.src='/fallback-thumb.png'; e.currentTarget.onerror=null;}} /> : <div className="w-full h-full bg-[#0f141f]" />}
-                                <span className="absolute bottom-0 left-0 text-[7px] bg-black/70 px-1 text-white">{i*3}s</span>
+                              <div key={a.id} data-testid={`scene-asset-${a.id}`} className="relative aspect-video bg-black border border-[var(--ff-input-border)] group overflow-hidden rounded-md cursor-pointer" title={`${a.name} · ${a.attribution_name || ""} — click to preview`} onClick={() => setPreviewAsset(a)}>
+                                {a.preview_url ? <img src={a.preview_url} alt="" className="w-full h-full object-cover" loading="lazy" referrerPolicy="no-referrer" onError={(e)=>{e.currentTarget.src='/fallback-thumb.png'; e.currentTarget.onerror=null;}} /> : <div className="w-full h-full bg-[var(--ff-bg)]" />}
+                                <span className="absolute bottom-0 left-0 text-[7px] bg-black/70 px-1 text-[var(--ff-text)]">{i*3}s</span>
                                 {a.source && <span className="absolute top-0 left-0 text-[6px] bg-blue-500 text-white px-0.5">{a.source[0].toUpperCase()}</span>}
                                 {canEdit && (
                                   <button data-testid={`detach-asset-${a.id}`} onClick={(e) => { e.stopPropagation(); detach(a); }} className="absolute top-1 right-1 w-6 h-6 bg-black/80 hover:bg-red-500 rounded-full flex items-center justify-center text-white hover:text-white opacity-0 group-hover:opacity-100 transition-opacity">
@@ -430,7 +430,7 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
                               </div>
                             ))}
                           </div>
-                          <div className="text-[9px] text-slate-500 mt-1">{credits?.remaining ?? 30} credits · {sceneAssets.length} clips · {Math.round((s.end_time - s.start_time) || s.duration || 30)}s · 3s each</div>
+                          <div className="text-[9px] text-[var(--ff-text-muted)] mt-1">{credits?.remaining ?? 30} credits · {sceneAssets.length} clips · {Math.round((s.end_time - s.start_time) || s.duration || 30)}s · 3s each</div>
                         </>
                       )}
                       {canEdit && (
@@ -441,7 +441,7 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
                               <input data-testid={`upload-client-asset-${s.id}`} type="file" accept="image/*,video/*" className="hidden" onChange={(e) => uploadClientAsset(s, e.target.files?.[0])} />
                             </label>
                           ) : (
-                            <button data-testid={`find-assets-btn-${s.id}`} onClick={() => setActiveScene(s)} className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-blue-400 hover:text-white border border-blue-500/30 hover:border-blue-400 px-2 py-1 rounded-md transition-colors">
+                            <button data-testid={`find-assets-btn-${s.id}`} onClick={() => setActiveScene(s)} className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-blue-400 hover:text-[var(--ff-text)] border border-blue-500/30 hover:border-blue-400 px-2 py-1 rounded-md transition-colors">
                               <Search size={11} strokeWidth={1.5} /> {sceneAssets.length > 0 ? "Find more" : "Find Assets"}
                             </button>
                           )}
@@ -470,8 +470,8 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
 
         {previewAsset && (
           <div data-testid="preview-modal" className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4" onClick={() => setPreviewAsset(null)}>
-            <div className="relative bg-[#1c2333] border border-slate-700 rounded-lg max-w-3xl w-full overflow-hidden" onClick={(e) => e.stopPropagation()}>
-              <button onClick={() => setPreviewAsset(null)} className="absolute top-2 right-2 w-8 h-8 bg-black/60 hover:bg-black rounded-full flex items-center justify-center text-white z-10">
+            <div className="relative bg-[var(--ff-surface)] border border-[var(--ff-input-border)] rounded-lg max-w-3xl w-full overflow-hidden" onClick={(e) => e.stopPropagation()}>
+              <button onClick={() => setPreviewAsset(null)} className="absolute top-2 right-2 w-8 h-8 bg-black/60 hover:bg-black rounded-full flex items-center justify-center text-[var(--ff-text)] z-10">
                 <XIcon size={16} />
               </button>
               <div className="aspect-video bg-black">
@@ -482,11 +482,11 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
                 )}
               </div>
               <div className="p-4 space-y-2">
-                <div className="text-sm text-white font-medium">{previewAsset.name}</div>
-                <div className="text-xs text-slate-400">{previewAsset.attribution_name || previewAsset.source || ""} · {previewAsset.width}×{previewAsset.height}</div>
+                <div className="text-sm text-[var(--ff-text)] font-medium">{previewAsset.name}</div>
+                <div className="text-xs text-[var(--ff-text-muted)]">{previewAsset.attribution_name || previewAsset.source || ""} · {previewAsset.width}×{previewAsset.height}</div>
                 <div className="flex gap-2 pt-2">
                   <a href={previewAsset.preview_url} target="_blank" rel="noreferrer" className="text-xs text-blue-400 hover:underline">Open original</a>
-                  <span className="text-xs text-slate-600">|</span>
+                  <span className="text-xs text-[var(--ff-text-dim)]">|</span>
                   <button onClick={() => { setPreviewAsset(null); detach(previewAsset); }} className="text-xs text-red-400 hover:underline">Detach</button>
                 </div>
               </div>
@@ -496,10 +496,10 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
 
         {showPricingModal && (
           <div data-testid="credits-exhausted-modal" className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
-            <div className="bg-[#1c2333] border border-[rgba(59,130,246,0.15)] rounded-lg max-w-lg w-full p-6 space-y-4">
+            <div className="bg-[var(--ff-surface)] border border-[rgba(59,130,246,0.15)] rounded-lg max-w-lg w-full p-6 space-y-4">
               <div className="flex items-center gap-2 text-amber-400 font-mono text-xs uppercase tracking-widest"><CreditCard size={14} /> Credits exhausted</div>
-              <h3 className="text-lg font-semibold text-white">0 credits left</h3>
-              <p className="text-sm text-slate-400">Resets {resetLabel} · Plan {(exhaustedInfo?.plan || credits?.plan || "free")} · {exhaustedInfo?.remaining ?? credits?.remaining ?? 0} / {exhaustedInfo?.quota ?? credits?.monthly ?? 30}</p>
+              <h3 className="text-lg font-semibold text-[var(--ff-text)]">0 credits left</h3>
+              <p className="text-sm text-[var(--ff-text-muted)]">Resets {resetLabel} · Plan {(exhaustedInfo?.plan || credits?.plan || "free")} · {exhaustedInfo?.remaining ?? credits?.remaining ?? 0} / {exhaustedInfo?.quota ?? credits?.monthly ?? 30}</p>
               <div className="grid grid-cols-2 gap-3 pt-2">
                 <button
                   data-testid="modal-buy-extra-100"
@@ -518,7 +518,7 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
               </div>
               <div className="flex gap-2 pt-2">
                 <button data-testid="modal-upgrade" onClick={() => navigate("/pricing")} className="flex-1 flex items-center justify-center gap-1 bg-white text-slate-900 font-mono text-xs uppercase tracking-widest px-3 py-2 rounded-md hover:bg-slate-200"><Zap size={12} /> Upgrade plan</button>
-                <button data-testid="modal-close" onClick={() => setShowPricingModal(false)} className="px-3 py-2 font-mono text-xs text-slate-400 hover:text-white border border-slate-700 rounded-md">Close</button>
+                <button data-testid="modal-close" onClick={() => setShowPricingModal(false)} className="px-3 py-2 font-mono text-xs text-[var(--ff-text-muted)] hover:text-[var(--ff-text)] border border-[var(--ff-input-border)] rounded-md">Close</button>
               </div>
             </div>
           </div>

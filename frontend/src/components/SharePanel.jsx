@@ -76,11 +76,11 @@ export default function SharePanel({ projectId, share, projectStatus, canEdit, o
   };
 
   return (
-    <div className="border border-zinc-800 bg-[#121212] rounded-sm" data-testid="share-panel">
-      <div className="px-5 py-3 border-b border-zinc-800 flex items-center justify-between">
+    <div className="border border-[var(--ff-border)] bg-[var(--ff-surface)] rounded-sm" data-testid="share-panel">
+      <div className="px-5 py-3 border-b border-[var(--ff-border)] flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Share2 size={14} strokeWidth={1.5} className="text-[#00E5FF]" />
-          <span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Public share link</span>
+          <span className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">Public share link</span>
         </div>
         {share?.enabled && (
           <span className="font-mono text-[10px] uppercase tracking-widest text-[#00FF66] flex items-center gap-1.5">
@@ -91,13 +91,13 @@ export default function SharePanel({ projectId, share, projectStatus, canEdit, o
 
       <div className="p-5 space-y-4">
         {!shareable ? (
-          <div className="text-sm text-zinc-400">
+          <div className="text-sm text-[var(--ff-text-muted)]">
             Sharing becomes available once the project reaches{" "}
             <span className="font-mono text-[#7B61FF]">METADATA_GENERATED</span> or later.
           </div>
         ) : !share?.enabled ? (
           <div className="space-y-3">
-            <p className="text-sm text-zinc-300 leading-relaxed">
+            <p className="text-sm text-[var(--ff-text)] leading-relaxed">
               Create a read-only public page at <span className="font-mono text-[#00E5FF]">/s/{"{token}"}</span> showing
               your title, description, tags, thumbnail briefs, and quality score. Private notes, costs, and provider
               details stay hidden.
@@ -123,12 +123,12 @@ export default function SharePanel({ projectId, share, projectStatus, canEdit, o
                 readOnly
                 value={shareUrl || ""}
                 onClick={(e) => e.target.select()}
-                className="flex-1 bg-[#0A0A0A] border border-zinc-800 px-3 py-2 text-xs font-mono text-[#00E5FF] rounded-sm focus:border-[#00E5FF]"
+                className="flex-1 bg-[var(--ff-input-bg)] border border-[var(--ff-border)] px-3 py-2 text-xs font-mono text-[#00E5FF] rounded-sm focus:border-[#00E5FF]"
               />
               <button
                 data-testid="share-copy-btn"
                 onClick={copy}
-                className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-400 hover:text-[#00E5FF] border border-zinc-800 hover:border-[#00E5FF] px-2 py-2 rounded-sm transition-colors"
+                className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] hover:text-[#00E5FF] border border-[var(--ff-border)] hover:border-[#00E5FF] px-2 py-2 rounded-sm transition-colors"
               >
                 <Copy size={12} strokeWidth={1.5} /> Copy
               </button>
@@ -137,7 +137,7 @@ export default function SharePanel({ projectId, share, projectStatus, canEdit, o
                 href={shareUrl || "#"}
                 target="_blank"
                 rel="noreferrer"
-                className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-400 hover:text-[#00E5FF] border border-zinc-800 hover:border-[#00E5FF] px-2 py-2 rounded-sm transition-colors"
+                className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] hover:text-[#00E5FF] border border-[var(--ff-border)] hover:border-[#00E5FF] px-2 py-2 rounded-sm transition-colors"
               >
                 <ExternalLink size={12} strokeWidth={1.5} /> Open
               </a>
@@ -145,7 +145,7 @@ export default function SharePanel({ projectId, share, projectStatus, canEdit, o
 
             {/* Title override */}
             <div>
-              <div className="font-mono text-[10px] uppercase tracking-widest text-zinc-500 mb-2">
+              <div className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] mb-2">
                 Public title override (optional)
               </div>
               {editingTitle ? (
@@ -156,7 +156,7 @@ export default function SharePanel({ projectId, share, projectStatus, canEdit, o
                     onChange={(e) => setTitleDraft(e.target.value)}
                     placeholder="Leave empty to use selected title"
                     maxLength={200}
-                    className="flex-1 bg-[#0A0A0A] border border-zinc-800 px-3 py-2 text-sm rounded-sm focus:border-[#00E5FF]"
+                    className="flex-1 bg-[var(--ff-input-bg)] border border-[var(--ff-border)] px-3 py-2 text-sm rounded-sm focus:border-[#00E5FF]"
                   />
                   <button
                     data-testid="share-title-save"
@@ -169,7 +169,7 @@ export default function SharePanel({ projectId, share, projectStatus, canEdit, o
                   <button
                     data-testid="share-title-cancel"
                     onClick={() => { setEditingTitle(false); setTitleDraft(share?.title_override || ""); }}
-                    className="border border-zinc-800 text-zinc-400 hover:text-white px-2 py-2 rounded-sm transition-colors"
+                    className="border border-[var(--ff-border)] text-[var(--ff-text-muted)] hover:text-[var(--ff-text)] px-2 py-2 rounded-sm transition-colors"
                   >
                     <X size={14} strokeWidth={2} />
                   </button>
@@ -179,29 +179,29 @@ export default function SharePanel({ projectId, share, projectStatus, canEdit, o
                   data-testid="share-title-edit"
                   onClick={() => { setTitleDraft(share?.title_override || ""); setEditingTitle(true); }}
                   disabled={!canEdit}
-                  className="flex items-center gap-2 text-sm text-zinc-300 hover:text-[#00E5FF] border border-dashed border-zinc-800 hover:border-[#00E5FF] px-3 py-2 w-full rounded-sm transition-colors disabled:opacity-50"
+                  className="flex items-center gap-2 text-sm text-[var(--ff-text)] hover:text-[#00E5FF] border border-dashed border-[var(--ff-border)] hover:border-[#00E5FF] px-3 py-2 w-full rounded-sm transition-colors disabled:opacity-50"
                 >
                   <Pencil size={12} strokeWidth={1.5} />
                   {share?.title_override ? (
                     <span className="truncate">{share.title_override}</span>
                   ) : (
-                    <span className="text-zinc-500">Using selected metadata title</span>
+                    <span className="text-[var(--ff-text-muted)]">Using selected metadata title</span>
                   )}
                 </button>
               )}
             </div>
 
             {/* Analytics */}
-            <div className="grid grid-cols-2 gap-3 pt-3 border-t border-zinc-800">
+            <div className="grid grid-cols-2 gap-3 pt-3 border-t border-[var(--ff-border)]">
               <div>
-                <div className="font-mono text-[10px] uppercase tracking-widest text-zinc-500 mb-1">Views</div>
+                <div className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] mb-1">Views</div>
                 <div className="font-mono text-2xl tabular-nums text-[#00E5FF]" data-testid="share-view-count">
                   {share.view_count}
                 </div>
               </div>
               <div>
-                <div className="font-mono text-[10px] uppercase tracking-widest text-zinc-500 mb-1">Last viewed</div>
-                <div className="font-mono text-sm text-zinc-300">
+                <div className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] mb-1">Last viewed</div>
+                <div className="font-mono text-sm text-[var(--ff-text)]">
                   {share.last_viewed_at ? relativeTime(share.last_viewed_at) : "never"}
                 </div>
               </div>
@@ -209,12 +209,12 @@ export default function SharePanel({ projectId, share, projectStatus, canEdit, o
 
             {/* Actions */}
             {canEdit && (
-              <div className="flex items-center gap-2 pt-3 border-t border-zinc-800">
+              <div className="flex items-center gap-2 pt-3 border-t border-[var(--ff-border)]">
                 <button
                   data-testid="share-regenerate-btn"
                   onClick={regenerate}
                   disabled={busy}
-                  className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-400 hover:text-[#FFB020] border border-zinc-800 hover:border-[#FFB020] px-3 py-2 rounded-sm transition-colors disabled:opacity-50"
+                  className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] hover:text-[#FFB020] border border-[var(--ff-border)] hover:border-[#FFB020] px-3 py-2 rounded-sm transition-colors disabled:opacity-50"
                 >
                   {busy ? <Loader2 size={12} className="animate-spin" /> : <RefreshCcw size={12} strokeWidth={1.5} />}
                   Regenerate token
@@ -223,7 +223,7 @@ export default function SharePanel({ projectId, share, projectStatus, canEdit, o
                   data-testid="share-disable-btn"
                   onClick={disable}
                   disabled={busy}
-                  className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-400 hover:text-[#FF3366] border border-zinc-800 hover:border-[#FF3366] px-3 py-2 rounded-sm transition-colors disabled:opacity-50"
+                  className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] hover:text-[#FF3366] border border-[var(--ff-border)] hover:border-[#FF3366] px-3 py-2 rounded-sm transition-colors disabled:opacity-50"
                 >
                   <EyeOff size={12} strokeWidth={1.5} /> Disable
                 </button>

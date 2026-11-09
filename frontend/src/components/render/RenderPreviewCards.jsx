@@ -10,8 +10,8 @@ function fmtSec(s) {
 export default function RenderPreviewCards({ selectedThumbnail, selectedVoice }) {
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-      <div className="border border-zinc-800 bg-[#121212] rounded-sm overflow-hidden">
-        <div className="px-4 py-3 border-b border-zinc-800 font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+      <div className="border border-[var(--ff-border)] bg-[var(--ff-surface)] rounded-sm overflow-hidden">
+        <div className="px-4 py-3 border-b border-[var(--ff-border)] font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">
           Intro · selected thumbnail
         </div>
         {selectedThumbnail ? (
@@ -22,13 +22,13 @@ export default function RenderPreviewCards({ selectedThumbnail, selectedVoice })
             className="w-full aspect-video object-cover"
           />
         ) : (
-          <div className="aspect-video flex items-center justify-center text-zinc-500 font-mono text-xs">
+          <div className="aspect-video flex items-center justify-center text-[var(--ff-text-muted)] font-mono text-xs">
             No selected thumbnail
           </div>
         )}
       </div>
-      <div className="border border-zinc-800 bg-[#121212] rounded-sm overflow-hidden">
-        <div className="px-4 py-3 border-b border-zinc-800 font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+      <div className="border border-[var(--ff-border)] bg-[var(--ff-surface)] rounded-sm overflow-hidden">
+        <div className="px-4 py-3 border-b border-[var(--ff-border)] font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">
           Audio bed · voiceover
         </div>
         {selectedVoice ? (
@@ -37,7 +37,7 @@ export default function RenderPreviewCards({ selectedThumbnail, selectedVoice })
               <span className="font-mono text-[10px] uppercase tracking-widest text-[#FF66CC]">
                 {selectedVoice.voice_style}
               </span>
-              <span className="font-mono text-[10px] text-zinc-500">
+              <span className="font-mono text-[10px] text-[var(--ff-text-muted)]">
                 {fmtSec(selectedVoice.duration)}
               </span>
             </div>
@@ -50,7 +50,7 @@ export default function RenderPreviewCards({ selectedThumbnail, selectedVoice })
             />
           </div>
         ) : (
-          <div className="aspect-video flex items-center justify-center text-zinc-500 font-mono text-xs">
+          <div className="aspect-video flex items-center justify-center text-[var(--ff-text-muted)] font-mono text-xs">
             No selected full-script voiceover (will use scene-level audio if available)
           </div>
         )}

@@ -24,11 +24,11 @@ export default function ForgotPasswordPage() {
   };
 
   return (
-    <div className="min-h-screen ff-grid bg-[#0A0A0A] text-white flex items-center justify-center px-6">
+    <div className="min-h-screen ff-grid bg-[var(--ff-input-bg)] text-[var(--ff-text)] flex items-center justify-center px-6">
       <div className="w-full max-w-md">
         <div className="mb-8 text-center">
           <h1 className="text-3xl md:text-4xl font-bold tracking-tight mb-3">Reset your password</h1>
-          <p className="text-sm text-zinc-400">
+          <p className="text-sm text-[var(--ff-text-muted)]">
             Enter your email and we'll send a reset link if an account exists.
           </p>
         </div>
@@ -36,13 +36,13 @@ export default function ForgotPasswordPage() {
         {sent ? (
           <div
             data-testid="forgot-success"
-            className="border border-zinc-800 bg-[#121212] p-7 rounded-sm space-y-5"
+            className="border border-[var(--ff-border)] bg-[var(--ff-surface)] p-7 rounded-sm space-y-5"
           >
             <div className="flex items-start gap-3">
               <CheckCircle2 size={20} strokeWidth={1.5} color="#00FF66" className="mt-0.5" />
               <div>
-                <div className="font-semibold text-white mb-1">Check your inbox</div>
-                <div className="text-sm text-zinc-400 leading-relaxed">{sent.message}</div>
+                <div className="font-semibold text-[var(--ff-text)] mb-1">Check your inbox</div>
+                <div className="text-sm text-[var(--ff-text-muted)] leading-relaxed">{sent.message}</div>
               </div>
             </div>
 
@@ -51,7 +51,7 @@ export default function ForgotPasswordPage() {
                 <div className="font-mono text-[10px] uppercase tracking-widest text-[#FFB020] mb-2">
                   Dev mode · email delivery simulated
                 </div>
-                <div className="text-xs text-zinc-300 mb-2">
+                <div className="text-xs text-[var(--ff-text)] mb-2">
                   Reset link (valid for {sent.dev_expires_in_minutes} min):
                 </div>
                 <Link
@@ -67,7 +67,7 @@ export default function ForgotPasswordPage() {
             <Link
               to="/login"
               data-testid="forgot-back-to-login"
-              className="inline-flex items-center gap-2 text-sm text-zinc-400 hover:text-[#00E5FF] transition-colors"
+              className="inline-flex items-center gap-2 text-sm text-[var(--ff-text-muted)] hover:text-[#00E5FF] transition-colors"
             >
               <ArrowLeft size={14} strokeWidth={1.5} /> Back to sign in
             </Link>
@@ -76,17 +76,17 @@ export default function ForgotPasswordPage() {
           <form
             onSubmit={submit}
             data-testid="forgot-form"
-            className={`border border-zinc-800 bg-[#121212] p-7 rounded-sm space-y-5 ${error ? "ff-shake" : ""}`}
+            className={`border border-[var(--ff-border)] bg-[var(--ff-surface)] p-7 rounded-sm space-y-5 ${error ? "ff-shake" : ""}`}
           >
             <div className="space-y-2">
-              <label className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Email</label>
+              <label className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">Email</label>
               <input
                 data-testid="forgot-email"
                 type="email"
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                className="w-full bg-[#0A0A0A] border border-zinc-800 px-3 py-2.5 text-sm rounded-sm focus:border-[#00E5FF]"
+                className="w-full bg-[var(--ff-input-bg)] border border-[var(--ff-border)] px-3 py-2.5 text-sm rounded-sm focus:border-[#00E5FF]"
                 autoComplete="email"
               />
             </div>
@@ -105,8 +105,8 @@ export default function ForgotPasswordPage() {
               {loading ? "Sending" : "Send reset link"}
             </button>
 
-            <div className="pt-2 border-t border-zinc-800 text-center">
-              <Link to="/login" className="text-xs text-zinc-400 hover:text-[#00E5FF]" data-testid="forgot-goto-login">
+            <div className="pt-2 border-t border-[var(--ff-border)] text-center">
+              <Link to="/login" className="text-xs text-[var(--ff-text-muted)] hover:text-[#00E5FF]" data-testid="forgot-goto-login">
                 Back to sign in
               </Link>
             </div>

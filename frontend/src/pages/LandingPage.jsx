@@ -35,7 +35,7 @@ export default function LandingPage() {
         <Link to="/" className={"font-semibold text-lg " + focus} style={serif}>FacelessForge</Link>
         <nav className="flex items-center gap-6 text-sm" style={{ color: SLATE }}>
           <Link to="/login" className={"hover:underline " + focus}>Log in</Link>
-          <Link to="/register" className={"px-4 py-2 rounded-md text-white " + focus} style={{ background: INK }}>Create an account</Link>
+          <Link to="/register" className={"px-4 py-2 rounded-md text-[var(--ff-text)] " + focus} style={{ background: INK }}>Create an account</Link>
         </nav>
       </header>
 
@@ -49,7 +49,7 @@ export default function LandingPage() {
               Give FacelessForge a topic. It writes the script, records the voiceover, adds footage and captions, and uploads the video to your channel on the schedule you set.
             </p>
             <div className="mt-8 flex flex-wrap items-center gap-4">
-              <Link to="/register" className={"px-6 py-3 rounded-md text-white font-medium " + focus} style={{ background: REC }}>Create an account</Link>
+              <Link to="/register" className={"px-6 py-3 rounded-md text-[var(--ff-text)] font-medium " + focus} style={{ background: REC }}>Create an account</Link>
               <Link to="/login" className={"px-6 py-3 rounded-md font-medium border " + focus} style={{ borderColor: INK }}>Log in</Link>
             </div>
           </div>

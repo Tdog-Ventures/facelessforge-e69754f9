@@ -25,11 +25,11 @@ function StatusDot({ ok }) {
 
 function Row({ label, value, ok }) {
   return (
-    <div className="flex items-start gap-3 py-2 border-b border-zinc-800 last:border-b-0">
-      <div className="font-mono text-[10px] uppercase tracking-widest text-zinc-500 w-44 pt-0.5 shrink-0">
+    <div className="flex items-start gap-3 py-2 border-b border-[var(--ff-border)] last:border-b-0">
+      <div className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] w-44 pt-0.5 shrink-0">
         {label}
       </div>
-      <div className="flex-1 text-sm text-zinc-200 break-all">{value}</div>
+      <div className="flex-1 text-sm text-[var(--ff-text)] break-all">{value}</div>
       {ok !== undefined && <StatusDot ok={ok} />}
     </div>
   );
@@ -78,7 +78,7 @@ export default function AdminDiagnosticsPage() {
     return (
       <AppShell>
         <TopBar title="Diagnostics" />
-        <div className="p-8 text-sm text-zinc-500 font-mono">Loading…</div>
+        <div className="p-8 text-sm text-[var(--ff-text-muted)] font-mono">Loading…</div>
       </AppShell>
     );
   }
@@ -107,7 +107,7 @@ export default function AdminDiagnosticsPage() {
             <button
               data-testid="diag-refresh"
               onClick={fetchOne}
-              className="flex items-center gap-1 font-mono text-[10px] uppercase tracking-widest text-zinc-400 hover:text-[#00E5FF] border border-zinc-800 hover:border-[#00E5FF] px-3 py-1.5 rounded-sm transition-colors"
+              className="flex items-center gap-1 font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] hover:text-[#00E5FF] border border-[var(--ff-border)] hover:border-[#00E5FF] px-3 py-1.5 rounded-sm transition-colors"
             >
               <RefreshCw size={11} /> Refresh
             </button>
@@ -115,7 +115,7 @@ export default function AdminDiagnosticsPage() {
               data-testid="diag-run-retention"
               onClick={runRetention}
               disabled={running}
-              className="flex items-center gap-1 font-mono text-[10px] uppercase tracking-widest text-zinc-300 hover:text-white border border-[#FFB020]/40 hover:border-[#FFB020] bg-[#FFB020]/10 px-3 py-1.5 rounded-sm transition-colors disabled:opacity-50"
+              className="flex items-center gap-1 font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text)] hover:text-[var(--ff-text)] border border-[#FFB020]/40 hover:border-[#FFB020] bg-[#FFB020]/10 px-3 py-1.5 rounded-sm transition-colors disabled:opacity-50"
             >
               {running ? <Loader2 size={11} className="animate-spin" /> : <HardDrive size={11} />}
               Run retention sweep
@@ -141,7 +141,7 @@ export default function AdminDiagnosticsPage() {
                  style={{ color: allOk ? "#00FF66" : "#FFB020" }}>
               {allOk ? "All checks pass" : "Review required"}
             </div>
-            <div className="text-sm text-zinc-300 mt-1">
+            <div className="text-sm text-[var(--ff-text)] mt-1">
               {allOk
                 ? "ffmpeg available, CORS locked to FRONTEND_URL, cookies in production mode."
                 : data.dev_mode
@@ -152,8 +152,8 @@ export default function AdminDiagnosticsPage() {
         </div>
 
         {/* Binaries */}
-        <section className="border border-zinc-800 bg-[#121212] rounded-sm p-5" data-testid="diag-binaries">
-          <h2 className="text-sm font-semibold text-white mb-3 flex items-center gap-2">
+        <section className="border border-[var(--ff-border)] bg-[var(--ff-surface)] rounded-sm p-5" data-testid="diag-binaries">
+          <h2 className="text-sm font-semibold text-[var(--ff-text)] mb-3 flex items-center gap-2">
             <Zap size={14} className="text-[#00E5FF]" /> Binaries
           </h2>
           <Row label="ffmpeg path" value={data.binaries.ffmpeg_path || "missing"}
@@ -165,8 +165,8 @@ export default function AdminDiagnosticsPage() {
         </section>
 
         {/* Security */}
-        <section className="border border-zinc-800 bg-[#121212] rounded-sm p-5" data-testid="diag-security">
-          <h2 className="text-sm font-semibold text-white mb-3 flex items-center gap-2">
+        <section className="border border-[var(--ff-border)] bg-[var(--ff-surface)] rounded-sm p-5" data-testid="diag-security">
+          <h2 className="text-sm font-semibold text-[var(--ff-text)] mb-3 flex items-center gap-2">
             <Shield size={14} className="text-[#7B61FF]" /> Security
           </h2>
           <Row label="DEV_MODE" value={data.dev_mode ? "true" : "false"} ok={!data.dev_mode} />
@@ -180,8 +180,8 @@ export default function AdminDiagnosticsPage() {
         </section>
 
         {/* Providers */}
-        <section className="border border-zinc-800 bg-[#121212] rounded-sm p-5" data-testid="diag-providers">
-          <h2 className="text-sm font-semibold text-white mb-3 flex items-center gap-2">
+        <section className="border border-[var(--ff-border)] bg-[var(--ff-surface)] rounded-sm p-5" data-testid="diag-providers">
+          <h2 className="text-sm font-semibold text-[var(--ff-text)] mb-3 flex items-center gap-2">
             <Database size={14} className="text-[#FFB020]" /> Providers
           </h2>
           {Object.entries(data.providers).map(([key, p]) => (
@@ -202,7 +202,7 @@ export default function AdminDiagnosticsPage() {
                   >
                     {p.mode}
                   </span>
-                  <span className="font-mono text-[11px] text-zinc-500">{p.provider}{p.model ? ` · ${p.model}` : ""}</span>
+                  <span className="font-mono text-[11px] text-[var(--ff-text-muted)]">{p.provider}{p.model ? ` · ${p.model}` : ""}</span>
                 </span>
               }
             />
@@ -210,8 +210,8 @@ export default function AdminDiagnosticsPage() {
         </section>
 
         {/* Storage */}
-        <section className="border border-zinc-800 bg-[#121212] rounded-sm p-5" data-testid="diag-storage">
-          <h2 className="text-sm font-semibold text-white mb-3 flex items-center gap-2">
+        <section className="border border-[var(--ff-border)] bg-[var(--ff-surface)] rounded-sm p-5" data-testid="diag-storage">
+          <h2 className="text-sm font-semibold text-[var(--ff-text)] mb-3 flex items-center gap-2">
             <HardDrive size={14} className="text-[#00FF66]" /> Storage
           </h2>
           <Row label="Mode" value={
@@ -227,7 +227,7 @@ export default function AdminDiagnosticsPage() {
                 {data.storage.mode}
               </span>
               {data.storage.bucket && (
-                <span className="font-mono text-[11px] text-zinc-500">{data.storage.bucket}</span>
+                <span className="font-mono text-[11px] text-[var(--ff-text-muted)]">{data.storage.bucket}</span>
               )}
             </span>
           } ok={data.storage.mode === "object" || data.dev_mode} />
@@ -265,15 +265,15 @@ export default function AdminDiagnosticsPage() {
 
         {/* Render queue + counts */}
         <section className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="border border-zinc-800 bg-[#121212] rounded-sm p-5" data-testid="diag-render">
-            <h2 className="text-sm font-semibold text-white mb-3">Render queue</h2>
+          <div className="border border-[var(--ff-border)] bg-[var(--ff-surface)] rounded-sm p-5" data-testid="diag-render">
+            <h2 className="text-sm font-semibold text-[var(--ff-text)] mb-3">Render queue</h2>
             <Row label="Active jobs" value={String(data.render_queue.active_jobs)} />
             <Row label="Concurrency" value={data.render_queue.concurrency} />
             <Row label="Lock" value={data.render_queue.lock} />
             <Row label="Timeout" value={`${data.render_queue.timeout_seconds}s`} />
           </div>
-          <div className="border border-zinc-800 bg-[#121212] rounded-sm p-5" data-testid="diag-counts">
-            <h2 className="text-sm font-semibold text-white mb-3">Data</h2>
+          <div className="border border-[var(--ff-border)] bg-[var(--ff-surface)] rounded-sm p-5" data-testid="diag-counts">
+            <h2 className="text-sm font-semibold text-[var(--ff-text)] mb-3">Data</h2>
             <Row label="Users" value={String(data.data_counts.users)} />
             <Row label="Projects" value={String(data.data_counts.projects)} />
           </div>

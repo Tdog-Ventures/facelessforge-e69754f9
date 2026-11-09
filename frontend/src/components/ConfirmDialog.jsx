@@ -63,23 +63,23 @@ export function ConfirmProvider({ children }) {
       >
         <AlertDialogContent
           data-testid="confirm-dialog"
-          className="bg-[#121212] border border-zinc-800 rounded-sm max-w-md"
+          className="bg-[var(--ff-surface)] border border-[var(--ff-border)] rounded-sm max-w-md"
         >
           <AlertDialogHeader>
-            <AlertDialogTitle className="text-white text-base font-semibold tracking-tight">
+            <AlertDialogTitle className="text-[var(--ff-text)] text-base font-semibold tracking-tight">
               {state.title}
             </AlertDialogTitle>
             {state.description && (
-              <AlertDialogDescription className="text-zinc-400 text-sm leading-relaxed">
+              <AlertDialogDescription className="text-[var(--ff-text-muted)] text-sm leading-relaxed">
                 {state.description}
               </AlertDialogDescription>
             )}
           </AlertDialogHeader>
-          <AlertDialogFooter className="pt-2 border-t border-zinc-800">
+          <AlertDialogFooter className="pt-2 border-t border-[var(--ff-border)]">
             <AlertDialogCancel
               data-testid="confirm-dialog-cancel"
               onClick={() => close(false)}
-              className="bg-transparent border border-zinc-800 text-zinc-300 hover:bg-[#1A1A1A] hover:text-white rounded-sm text-sm font-medium"
+              className="bg-transparent border border-[var(--ff-border)] text-[var(--ff-text)] hover:bg-[var(--ff-surface-2)] hover:text-[var(--ff-text)] rounded-sm text-sm font-medium"
             >
               {state.cancelLabel}
             </AlertDialogCancel>

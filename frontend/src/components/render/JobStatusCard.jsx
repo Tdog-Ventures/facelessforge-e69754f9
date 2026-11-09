@@ -45,14 +45,14 @@ export default function JobStatusCard({
       <div className="flex items-start gap-3">
         {failed ? <AlertCircle size={18} className="text-[#FF3366] mt-0.5" />
           : completed ? <CheckCircle2 size={18} className="text-[#00FF66] mt-0.5" />
-          : status === "cancelled" ? <StopIcon size={18} className="text-zinc-500 mt-0.5" />
+          : status === "cancelled" ? <StopIcon size={18} className="text-[var(--ff-text-muted)] mt-0.5" />
           : <Loader2 size={18} className="text-[#00E5FF] mt-0.5 animate-spin" />}
         <div className="flex-1 min-w-0">
           <div className="font-mono text-[11px] uppercase tracking-widest mb-1"
                style={{ color: failed ? "#FF3366" : completed ? "#00FF66" : "#00E5FF" }}>
             Render · {status}
           </div>
-          <div className="text-sm text-zinc-300">
+          <div className="text-sm text-[var(--ff-text)]">
             Progress {job.progress}% · step{" "}
             <span className="font-mono text-[#00E5FF]">{job.current_step}</span>
           </div>
@@ -67,7 +67,7 @@ export default function JobStatusCard({
             data-testid="render-cancel-btn"
             onClick={onCancel}
             disabled={cancelling}
-            className="flex items-center gap-1 font-mono text-[10px] uppercase tracking-widest border border-zinc-700 text-zinc-300 hover:text-[#FF3366] hover:border-[#FF3366] px-3 py-1.5 rounded-sm transition-colors disabled:opacity-50"
+            className="flex items-center gap-1 font-mono text-[10px] uppercase tracking-widest border border-[var(--ff-input-border)] text-[var(--ff-text)] hover:text-[#FF3366] hover:border-[#FF3366] px-3 py-1.5 rounded-sm transition-colors disabled:opacity-50"
           >
             {cancelling ? <Loader2 size={11} className="animate-spin" /> : <StopIcon size={11} />}
             Cancel
@@ -93,9 +93,9 @@ export default function JobStatusCard({
             src={deliveryUrl}
             preload="metadata"
             poster={selectedThumbnail?.preview_url}
-            className="w-full rounded-sm border border-zinc-800 bg-black aspect-video"
+            className="w-full rounded-sm border border-[var(--ff-border)] bg-black aspect-video"
           />
-          <div className="flex flex-wrap items-center gap-2 font-mono text-[10px] text-zinc-500 uppercase tracking-widest">
+          <div className="flex flex-wrap items-center gap-2 font-mono text-[10px] text-[var(--ff-text-muted)] uppercase tracking-widest">
             <span>1920×1080</span>
             <span>· 30 fps</span>
             <span>· H.264 / AAC</span>
@@ -116,7 +116,7 @@ export default function JobStatusCard({
                 data-testid="render-retry-btn"
                 onClick={onRetry}
                 disabled={starting}
-                className="inline-flex items-center gap-2 border border-zinc-700 text-zinc-300 hover:text-[#00E5FF] hover:border-[#00E5FF] font-mono text-[11px] uppercase tracking-widest px-3 py-2 rounded-sm transition-colors"
+                className="inline-flex items-center gap-2 border border-[var(--ff-input-border)] text-[var(--ff-text)] hover:text-[#00E5FF] hover:border-[#00E5FF] font-mono text-[11px] uppercase tracking-widest px-3 py-2 rounded-sm transition-colors"
               >
                 {starting ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
                 Render again
@@ -131,7 +131,7 @@ export default function JobStatusCard({
           data-testid="render-retry-btn"
           onClick={onRetry}
           disabled={starting}
-          className="inline-flex items-center gap-2 border border-zinc-700 text-zinc-300 hover:text-[#00E5FF] hover:border-[#00E5FF] font-mono text-[11px] uppercase tracking-widest px-3 py-2 rounded-sm transition-colors"
+          className="inline-flex items-center gap-2 border border-[var(--ff-input-border)] text-[var(--ff-text)] hover:text-[#00E5FF] hover:border-[#00E5FF] font-mono text-[11px] uppercase tracking-widest px-3 py-2 rounded-sm transition-colors"
         >
           {starting ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
           Retry render

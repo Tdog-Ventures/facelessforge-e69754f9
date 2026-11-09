@@ -123,9 +123,9 @@ export default function ScriptPanel({ projectId, script, canEdit, onChange }) {
     if (generating) {
       return (
         <div className="space-y-6 animate-pulse">
-          <div className="h-6 bg-zinc-800 rounded w-1/3" />
-          <div className="h-32 bg-zinc-800 rounded" />
-          <div className="h-6 bg-zinc-800 rounded w-1/4" />
+          <div className="h-6 bg-[var(--ff-surface-2)] rounded w-1/3" />
+          <div className="h-32 bg-[var(--ff-surface-2)] rounded" />
+          <div className="h-6 bg-[var(--ff-surface-2)] rounded w-1/4" />
         </div>
       );
     }
@@ -138,15 +138,15 @@ export default function ScriptPanel({ projectId, script, canEdit, onChange }) {
     if (hasLocal) {
       // Will be picked up by useEffect on next render — show skeleton briefly
       return (
-        <div className="border border-zinc-800 p-10 text-center rounded-sm">
+        <div className="border border-[var(--ff-border)] p-10 text-center rounded-sm">
           <Loader2 size={18} className="animate-spin text-[#00E5FF] mx-auto mb-3" />
-          <p className="text-sm text-zinc-400">Restoring script…</p>
+          <p className="text-sm text-[var(--ff-text-muted)]">Restoring script…</p>
         </div>
       );
     }
     return (
-      <div className="border border-zinc-800 border-dashed p-10 text-center rounded-sm space-y-4">
-        <p className="text-sm text-zinc-400">No script yet. Generate one to get started.</p>
+      <div className="border border-[var(--ff-border)] border-dashed p-10 text-center rounded-sm space-y-4">
+        <p className="text-sm text-[var(--ff-text-muted)]">No script yet. Generate one to get started.</p>
         {canEdit && !manualMode && (
           <div className="flex items-center justify-center gap-3 flex-wrap">
             <button
@@ -163,7 +163,7 @@ export default function ScriptPanel({ projectId, script, canEdit, onChange }) {
               data-testid="manual-script-btn"
               onClick={() => setManualMode(true)}
               disabled={generating}
-              className="inline-flex items-center gap-2 border border-zinc-700 text-zinc-200 font-semibold text-sm px-4 py-2 rounded-sm hover:border-[#00E5FF] hover:text-[#00E5FF] disabled:opacity-60 transition-colors"
+              className="inline-flex items-center gap-2 border border-[var(--ff-input-border)] text-[var(--ff-text)] font-semibold text-sm px-4 py-2 rounded-sm hover:border-[#00E5FF] hover:text-[#00E5FF] disabled:opacity-60 transition-colors"
             >
               <PenLine size={14} strokeWidth={2} />
               Write or Paste Script
@@ -209,14 +209,14 @@ export default function ScriptPanel({ projectId, script, canEdit, onChange }) {
           <button
             data-testid="cancel-overwrite-btn"
             onClick={() => setConfirmOverwrite(false)}
-            className="font-mono text-[10px] uppercase tracking-widest text-zinc-400 hover:text-white border border-zinc-700 px-3 py-1.5 rounded-sm"
+            className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] hover:text-[var(--ff-text)] border border-[var(--ff-input-border)] px-3 py-1.5 rounded-sm"
           >
             Keep mine
           </button>
         </div>
       )}
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-4 font-mono text-[11px] text-zinc-500">
+        <div className="flex items-center gap-4 font-mono text-[11px] text-[var(--ff-text-muted)]">
           <span>{script?.word_count ?? 0} words</span>
           <span>·</span>
           <span>~{Math.floor(script.estimated_duration / 60)}:{String(script.estimated_duration % 60).padStart(2, "0")} narration</span>
@@ -226,7 +226,7 @@ export default function ScriptPanel({ projectId, script, canEdit, onChange }) {
               className={`uppercase tracking-widest border px-1.5 py-0.5 rounded-sm ${
                 script.source === "manual"
                   ? "text-[#00E5FF] border-[#00E5FF]/40"
-                  : "text-zinc-400 border-zinc-700"
+                  : "text-[var(--ff-text-muted)] border-[var(--ff-input-border)]"
               }`}
             >
               {script.source === "manual" ? "Manual" : "AI"}
@@ -239,7 +239,7 @@ export default function ScriptPanel({ projectId, script, canEdit, onChange }) {
               data-testid="regenerate-script-btn"
               onClick={startGenerate}
               disabled={generating}
-              className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-400 hover:text-[#00E5FF] border border-zinc-800 hover:border-[#00E5FF] px-2 py-1 rounded-sm transition-colors disabled:opacity-50"
+              className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] hover:text-[#00E5FF] border border-[var(--ff-border)] hover:border-[#00E5FF] px-2 py-1 rounded-sm transition-colors disabled:opacity-50"
             >
               {generating ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} strokeWidth={1.5} />}
               Regenerate
@@ -260,16 +260,16 @@ export default function ScriptPanel({ projectId, script, canEdit, onChange }) {
       </div>
 
       {/* Hook options */}
-      <div className="border border-zinc-800 bg-[#121212] rounded-sm">
-        <div className="px-5 py-3 border-b border-zinc-800 flex items-center justify-between">
-          <span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Hook options · pick one</span>
+      <div className="border border-[var(--ff-border)] bg-[var(--ff-surface)] rounded-sm">
+        <div className="px-5 py-3 border-b border-[var(--ff-border)] flex items-center justify-between">
+          <span className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">Hook options · pick one</span>
           {canEdit && (
-            <label className="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer">
+            <label className="flex items-center gap-2 text-xs text-[var(--ff-text-muted)] cursor-pointer">
               <input
                 type="checkbox"
                 checked={autoSelectFirst}
                 onChange={(e) => setAutoSelectFirst(e.target.checked)}
-                className="h-3 w-3 accent-[#00E5FF] bg-[#0A0A0A] border-zinc-700 rounded"
+                className="h-3 w-3 accent-[#00E5FF] bg-[var(--ff-input-bg)] border-[var(--ff-input-border)] rounded"
               />
               Auto-select first hook
             </label>
@@ -286,14 +286,14 @@ export default function ScriptPanel({ projectId, script, canEdit, onChange }) {
                 data-testid={`hook-option-${i}`}
                 onClick={() => canEdit && pickHook(h)}
                 className={`w-full text-left p-5 transition-colors ${
-                  selected ? "bg-[#00E5FF]/5 border-l-2 border-[#00E5FF]" : "hover:bg-[#1A1A1A] border-l-2 border-transparent"
+                  selected ? "bg-[#00E5FF]/5 border-l-2 border-[#00E5FF]" : "hover:bg-[var(--ff-surface-2)] border-l-2 border-transparent"
                 }`}
               >
                 <div className="flex items-start gap-3">
-                  <span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500 mt-1">
+                  <span className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] mt-1">
                     Hook {i + 1}
                   </span>
-                  <p className="flex-1 text-sm text-white leading-relaxed">{h}</p>
+                  <p className="flex-1 text-sm text-[var(--ff-text)] leading-relaxed">{h}</p>
                   {selected && <span className="font-mono text-[10px] text-[#00E5FF] uppercase tracking-widest">Selected</span>}
                 </div>
               </button>
@@ -303,9 +303,9 @@ export default function ScriptPanel({ projectId, script, canEdit, onChange }) {
       </div>
 
       {/* Selected hook readonly / full script editor */}
-      <div className="border border-zinc-800 bg-[#121212] rounded-sm">
-        <div className="px-5 py-3 border-b border-zinc-800 flex items-center justify-between">
-          <span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Full script</span>
+      <div className="border border-[var(--ff-border)] bg-[var(--ff-surface)] rounded-sm">
+        <div className="px-5 py-3 border-b border-[var(--ff-border)] flex items-center justify-between">
+          <span className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">Full script</span>
           <CopyButton text={draft.full_script} testId="copy-script" />
         </div>
         <textarea
@@ -314,17 +314,17 @@ export default function ScriptPanel({ projectId, script, canEdit, onChange }) {
           value={draft.full_script}
           onChange={(e) => setDraft({ ...draft, full_script: e.target.value })}
           rows={16}
-          className="w-full bg-transparent p-5 text-sm leading-relaxed resize-none focus:outline-none text-zinc-200 disabled:opacity-80"
+          className="w-full bg-transparent p-5 text-sm leading-relaxed resize-none focus:outline-none text-[var(--ff-text)] disabled:opacity-80"
         />
       </div>
 
       {/* Retention beats */}
       {script.retention_beats?.length > 0 && (
-        <div className="border border-zinc-800 bg-[#121212] p-5 rounded-sm">
-          <div className="font-mono text-[10px] uppercase tracking-widest text-zinc-500 mb-3">Retention beats</div>
+        <div className="border border-[var(--ff-border)] bg-[var(--ff-surface)] p-5 rounded-sm">
+          <div className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] mb-3">Retention beats</div>
           <ul className="space-y-2">
             {script.retention_beats.map((b, i) => (
-              <li key={`beat-${i}-${String(b).slice(0, 32)}`} className="flex items-start gap-3 text-sm text-zinc-300">
+              <li key={`beat-${i}-${String(b).slice(0, 32)}`} className="flex items-start gap-3 text-sm text-[var(--ff-text)]">
                 <span className="font-mono text-[10px] text-[#7B61FF] mt-1">{String(i + 1).padStart(2, "0")}</span>
                 <span>{b}</span>
               </li>
@@ -334,9 +334,9 @@ export default function ScriptPanel({ projectId, script, canEdit, onChange }) {
       )}
 
       {/* CTA */}
-      <div className="border border-zinc-800 bg-[#121212] rounded-sm">
-        <div className="px-5 py-3 border-b border-zinc-800 flex items-center justify-between">
-          <span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">CTA block</span>
+      <div className="border border-[var(--ff-border)] bg-[var(--ff-surface)] rounded-sm">
+        <div className="px-5 py-3 border-b border-[var(--ff-border)] flex items-center justify-between">
+          <span className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">CTA block</span>
           <CopyButton text={draft.cta_block} testId="copy-cta" />
         </div>
         <textarea
@@ -345,7 +345,7 @@ export default function ScriptPanel({ projectId, script, canEdit, onChange }) {
           value={draft.cta_block}
           onChange={(e) => setDraft({ ...draft, cta_block: e.target.value })}
           rows={4}
-          className="w-full bg-transparent p-5 text-sm leading-relaxed resize-none focus:outline-none text-zinc-200 disabled:opacity-80"
+          className="w-full bg-transparent p-5 text-sm leading-relaxed resize-none focus:outline-none text-[var(--ff-text)] disabled:opacity-80"
         />
       </div>
     </div>

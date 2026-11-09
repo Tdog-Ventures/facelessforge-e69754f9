@@ -33,11 +33,11 @@ export default function ApprovalPanel({ projectId, jobId }) {
     }
   };
 
-  if (!manifest) return <div className="text-xs text-slate-500">No manifest — render not completed</div>;
+  if (!manifest) return <div className="text-xs text-[var(--ff-text-muted)]">No manifest — render not completed</div>;
 
   return (
-    <div className="border border-zinc-800 bg-[#121212] p-4 rounded-sm space-y-3">
-      <div className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Exact-version Approval</div>
+    <div className="border border-[var(--ff-border)] bg-[var(--ff-surface)] p-4 rounded-sm space-y-3">
+      <div className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">Exact-version Approval</div>
       <div className="text-xs font-mono break-all">video_hash: {manifest.video_hash}</div>
       <div className="text-xs font-mono break-all">manifest_hash: {hash?.checks ? JSON.stringify(hash).slice(0,60) : "..."}</div>
       <video src={manifest.video_hash ? `/api/projects/${projectId}/download` : ""} controls onTimeUpdate={handleWatch} className="w-full aspect-video bg-black" />

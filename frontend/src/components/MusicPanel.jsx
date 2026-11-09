@@ -77,23 +77,23 @@ export default function MusicPanel({ projectId, project, assets, canEdit, onProj
   };
 
   return (
-    <div data-testid="music-panel" className="border-t border-zinc-800 pt-4 mt-4">
-      <div className="font-mono text-[10px] uppercase tracking-widest text-zinc-500 mb-1 flex items-center gap-2">
+    <div data-testid="music-panel" className="border-t border-[var(--ff-border)] pt-4 mt-4">
+      <div className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] mb-1 flex items-center gap-2">
         <Music size={12} /> Background music
       </div>
-      <p data-testid="music-state" className="font-mono text-[11px] text-zinc-400 mb-3">
+      <p data-testid="music-state" className="font-mono text-[11px] text-[var(--ff-text-muted)] mb-3">
         {enabled
           ? `On · ${musicAsset.name || "track"} · ${project.music_gain_db ?? gain} dB · ducking ${project.music_ducking_enabled === false ? "off" : "on"}`
           : "Off · narrated videos render voice-only unless a track is selected"}
       </p>
 
       {enabled && (
-        <div className="bg-[#0A0A0A] border border-zinc-800 rounded-sm p-3 mb-3 space-y-2">
+        <div className="bg-[var(--ff-input-bg)] border border-[var(--ff-border)] rounded-sm p-3 mb-3 space-y-2">
           <div className="flex items-center gap-2">
-            <span className="text-sm text-white flex-1 truncate">{musicAsset.name}</span>
+            <span className="text-sm text-[var(--ff-text)] flex-1 truncate">{musicAsset.name}</span>
             {canEdit && (
               <button data-testid="music-remove-btn" onClick={remove} disabled={working}
-                className="font-mono text-[10px] uppercase tracking-widest text-zinc-400 hover:text-[#FF3366] border border-zinc-800 px-2 py-1 rounded-sm disabled:opacity-50">
+                className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] hover:text-[#FF3366] border border-[var(--ff-border)] px-2 py-1 rounded-sm disabled:opacity-50">
                 <span className="inline-flex items-center gap-1"><X size={12} /> Remove</span>
               </button>
             )}
@@ -101,7 +101,7 @@ export default function MusicPanel({ projectId, project, assets, canEdit, onProj
           {musicAsset.preview_url && (
             <audio data-testid="music-preview" controls src={musicAsset.preview_url} preload="metadata" className="w-full h-8" />
           )}
-          <div className="font-mono text-[10px] text-zinc-500">
+          <div className="font-mono text-[10px] text-[var(--ff-text-muted)]">
             Rights: {musicAsset.rights_note || (musicAsset.rights_confirmed ? "confirmed" : "unconfirmed")}
           </div>
         </div>
@@ -113,7 +113,7 @@ export default function MusicPanel({ projectId, project, assets, canEdit, onProj
             <input ref={fileRef} type="file" accept=".mp3,.wav,.m4a,.ogg,.flac,audio/*" className="hidden"
               onChange={(e) => { upload(e.target.files?.[0]); e.target.value = ""; }} />
             <button data-testid="music-upload-btn" onClick={() => fileRef.current?.click()} disabled={uploading}
-              className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-200 border border-zinc-700 px-3 py-2 rounded-sm hover:border-[#00E5FF] disabled:opacity-50">
+              className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text)] border border-[var(--ff-input-border)] px-3 py-2 rounded-sm hover:border-[#00E5FF] disabled:opacity-50">
               {uploading ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />}
               {uploading ? "Uploading…" : musicAsset ? "Change track" : "Upload track"}
             </button>
@@ -124,34 +124,34 @@ export default function MusicPanel({ projectId, project, assets, canEdit, onProj
               </button>
             )}
           </div>
-          <label className="flex items-center gap-2 text-sm text-zinc-300">
+          <label className="flex items-center gap-2 text-sm text-[var(--ff-text)]">
             <input type="checkbox" checked={ducking} onChange={(e) => setDucking(e.target.checked)}
-              className="h-4 w-4 accent-[#00E5FF] bg-[#0A0A0A] border-zinc-700 rounded" />
+              className="h-4 w-4 accent-[#00E5FF] bg-[var(--ff-input-bg)] border-[var(--ff-input-border)] rounded" />
             Dynamic ducking under narration
-            <span className="font-mono text-[10px] text-zinc-600">(default on)</span>
+            <span className="font-mono text-[10px] text-[var(--ff-text-dim)]">(default on)</span>
           </label>
           <div>
-            <label className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+            <label className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">
               Music level: {gain} dB (safe range −30…−6)
             </label>
             <input data-testid="music-gain-slider" type="range" min={-30} max={-6} step={1} value={gain}
               onChange={(e) => setGain(Number(e.target.value))} className="w-full accent-[#00E5FF]" />
           </div>
-          <label className="flex items-start gap-2 text-sm text-zinc-300">
+          <label className="flex items-start gap-2 text-sm text-[var(--ff-text)]">
             <input data-testid="music-rights-checkbox" type="checkbox" checked={rights}
               onChange={(e) => setRights(e.target.checked)}
-              className="h-4 w-4 mt-0.5 accent-[#00E5FF] bg-[#0A0A0A] border-zinc-700 rounded" />
+              className="h-4 w-4 mt-0.5 accent-[#00E5FF] bg-[var(--ff-input-bg)] border-[var(--ff-input-border)] rounded" />
             <span>I confirm I have the rights to use this track in this video.
-              <span className="block font-mono text-[10px] text-zinc-600">Required before a render will use uploaded music.</span>
+              <span className="block font-mono text-[10px] text-[var(--ff-text-dim)]">Required before a render will use uploaded music.</span>
             </span>
           </label>
           <input data-testid="music-rights-note" value={rightsNote} onChange={(e) => setRightsNote(e.target.value)}
             placeholder="Rights note, e.g. licensed from … / test fixture" maxLength={200}
-            className="w-full bg-[#0A0A0A] border border-zinc-800 px-3 py-2 text-sm rounded-sm focus:border-[#00E5FF] text-white placeholder:text-zinc-600" />
+            className="w-full bg-[var(--ff-input-bg)] border border-[var(--ff-border)] px-3 py-2 text-sm rounded-sm focus:border-[#00E5FF] text-[var(--ff-text)] placeholder:text-[var(--ff-input-placeholder)]" />
         </div>
       )}
       {!canEdit && !enabled && (
-        <p className="font-mono text-[10px] text-zinc-600 flex items-center gap-1"><Play size={12} /> No music on this project.</p>
+        <p className="font-mono text-[10px] text-[var(--ff-text-dim)] flex items-center gap-1"><Play size={12} /> No music on this project.</p>
       )}
     </div>
   );

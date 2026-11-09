@@ -24,7 +24,7 @@ class ErrorBoundary extends React.Component {
       return (
         <div className="min-h-screen bg-[var(--ff-bg)] text-[var(--ff-text-muted)] flex flex-col items-center justify-center p-8 font-mono text-sm">
           <h2 className="text-red-400 text-lg mb-2">Something went wrong</h2>
-          <p className="text-zinc-500 text-xs max-w-md text-center mb-4">{String(this.state.error?.message || this.state.error || "Unknown error")}</p>
+          <p className="text-[var(--ff-text-muted)] text-xs max-w-md text-center mb-4">{String(this.state.error?.message || this.state.error || "Unknown error")}</p>
           <button onClick={() => this.setState({ hasError: false, error: null })} className="border border-[var(--ff-border)] text-[var(--ff-text)] px-4 py-1 text-xs hover:border-[var(--ff-primary)] hover:text-[var(--ff-primary)]">Try again</button>
         </div>
       );

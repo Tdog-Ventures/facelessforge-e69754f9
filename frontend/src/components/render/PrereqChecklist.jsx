@@ -3,15 +3,15 @@ import { CheckCircle2, AlertCircle, RefreshCw } from "lucide-react";
 
 export default function PrereqChecklist({ preflight, onRefresh }) {
   return (
-    <div data-testid="render-checklist" className="border border-zinc-800 bg-[#121212] p-6 rounded-sm">
+    <div data-testid="render-checklist" className="border border-[var(--ff-border)] bg-[var(--ff-surface)] p-6 rounded-sm">
       <div className="flex items-center justify-between mb-4">
-        <div className="font-mono text-[11px] uppercase tracking-widest text-zinc-500">
+        <div className="font-mono text-[11px] uppercase tracking-widest text-[var(--ff-text-muted)]">
           Prerequisites
         </div>
         <button
           data-testid="render-refresh"
           onClick={onRefresh}
-          className="flex items-center gap-1 font-mono text-[10px] uppercase tracking-widest text-zinc-400 hover:text-[#00E5FF]"
+          className="flex items-center gap-1 font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] hover:text-[#00E5FF]"
         >
           <RefreshCw size={11} /> Refresh
         </button>
@@ -32,8 +32,8 @@ export default function PrereqChecklist({ preflight, onRefresh }) {
               <AlertCircle size={16} className="text-[#FF3366] mt-0.5" />
             )}
             <div className="flex-1 min-w-0">
-              <div className="text-sm text-white">{c.label}</div>
-              <div className="font-mono text-[10px] text-zinc-500 mt-1">{c.hint}</div>
+              <div className="text-sm text-[var(--ff-text)]">{c.label}</div>
+              <div className="font-mono text-[10px] text-[var(--ff-text-muted)] mt-1">{c.hint}</div>
             </div>
           </div>
         ))}

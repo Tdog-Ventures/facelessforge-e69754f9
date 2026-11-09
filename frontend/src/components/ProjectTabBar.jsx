@@ -22,7 +22,7 @@ export const RECORD_TABS = [
 
 function tabClass(active) {
   return `px-4 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
-    active ? "border-[#00E5FF] text-white" : "border-transparent text-zinc-500 hover:text-white"
+    active ? "border-[#00E5FF] text-[var(--ff-text)]" : "border-transparent text-[var(--ff-text-muted)] hover:text-[var(--ff-text)]"
   }`;
 }
 

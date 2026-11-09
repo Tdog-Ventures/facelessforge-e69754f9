@@ -45,11 +45,11 @@ export default function ResetPasswordPage() {
   };
 
   return (
-    <div className="min-h-screen ff-grid bg-[#0A0A0A] text-white flex items-center justify-center px-6">
+    <div className="min-h-screen ff-grid bg-[var(--ff-input-bg)] text-[var(--ff-text)] flex items-center justify-center px-6">
       <div className="w-full max-w-md">
         <div className="mb-8 text-center">
           <h1 className="text-3xl md:text-4xl font-bold tracking-tight mb-3">Choose a new password</h1>
-          <p className="text-sm text-zinc-400">This link can only be used once.</p>
+          <p className="text-sm text-[var(--ff-text-muted)]">This link can only be used once.</p>
         </div>
 
         {tokenMissing ? (
@@ -57,7 +57,7 @@ export default function ResetPasswordPage() {
             <AlertCircle size={20} strokeWidth={1.5} color="#FF3366" className="mt-0.5" />
             <div>
               <div className="font-semibold mb-1">Missing reset token</div>
-              <div className="text-sm text-zinc-300">
+              <div className="text-sm text-[var(--ff-text)]">
                 This page requires a valid token. Open the reset link from your email.
               </div>
               <Link to="/forgot-password" className="inline-block mt-3 text-sm text-[#00E5FF] hover:text-[#33EFFF]">
@@ -66,21 +66,21 @@ export default function ResetPasswordPage() {
             </div>
           </div>
         ) : done ? (
-          <div data-testid="reset-success" className="border border-zinc-800 bg-[#121212] p-6 rounded-sm flex items-start gap-3">
+          <div data-testid="reset-success" className="border border-[var(--ff-border)] bg-[var(--ff-surface)] p-6 rounded-sm flex items-start gap-3">
             <CheckCircle2 size={20} strokeWidth={1.5} color="#00FF66" className="mt-0.5" />
             <div>
               <div className="font-semibold mb-1">Password updated</div>
-              <div className="text-sm text-zinc-400">Redirecting to sign in…</div>
+              <div className="text-sm text-[var(--ff-text-muted)]">Redirecting to sign in…</div>
             </div>
           </div>
         ) : (
           <form
             onSubmit={submit}
             data-testid="reset-form"
-            className={`border border-zinc-800 bg-[#121212] p-7 rounded-sm space-y-5 ${error ? "ff-shake" : ""}`}
+            className={`border border-[var(--ff-border)] bg-[var(--ff-surface)] p-7 rounded-sm space-y-5 ${error ? "ff-shake" : ""}`}
           >
             <div className="space-y-2">
-              <label className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+              <label className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">
                 New password · min 6 chars
               </label>
               <input
@@ -90,12 +90,12 @@ export default function ResetPasswordPage() {
                 required
                 value={form.password}
                 onChange={(e) => setForm({ ...form, password: e.target.value })}
-                className="w-full bg-[#0A0A0A] border border-zinc-800 px-3 py-2.5 text-sm rounded-sm focus:border-[#00E5FF]"
+                className="w-full bg-[var(--ff-input-bg)] border border-[var(--ff-border)] px-3 py-2.5 text-sm rounded-sm focus:border-[#00E5FF]"
                 autoComplete="new-password"
               />
             </div>
             <div className="space-y-2">
-              <label className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+              <label className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">
                 Confirm password
               </label>
               <input
@@ -105,8 +105,8 @@ export default function ResetPasswordPage() {
                 required
                 value={form.confirm}
                 onChange={(e) => setForm({ ...form, confirm: e.target.value })}
-                className={`w-full bg-[#0A0A0A] border px-3 py-2.5 text-sm rounded-sm focus:border-[#00E5FF] ${
-                  mismatch ? "border-[#FF3366]/50" : "border-zinc-800"
+                className={`w-full bg-[var(--ff-input-bg)] border px-3 py-2.5 text-sm rounded-sm focus:border-[#00E5FF] ${
+                  mismatch ? "border-[#FF3366]/50" : "border-[var(--ff-border)]"
                 }`}
                 autoComplete="new-password"
               />
@@ -131,8 +131,8 @@ export default function ResetPasswordPage() {
               {loading ? "Updating" : "Update password"}
             </button>
 
-            <div className="pt-2 border-t border-zinc-800 text-center">
-              <Link to="/login" className="text-xs text-zinc-400 hover:text-[#00E5FF]" data-testid="reset-goto-login">
+            <div className="pt-2 border-t border-[var(--ff-border)] text-center">
+              <Link to="/login" className="text-xs text-[var(--ff-text-muted)] hover:text-[#00E5FF]" data-testid="reset-goto-login">
                 Back to sign in
               </Link>
             </div>
