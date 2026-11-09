@@ -41,27 +41,61 @@ def is_mock_mode() -> bool:
     return _use_mock()
 
 
+# Google's current recommended high-efficiency image model (Nano Banana 2.1).
+# https://ai.google.dev/gemini-api/docs/image-generation
+DEFAULT_IMAGE_MODEL = "gemini-nano-banana-2.1"
+
+
+def _emergent_key() -> str:
+    return os.environ.get("EMERGENT_LLM_KEY", "").strip()
+
+
+def _google_api_key() -> str:
+    for name in ("GOOGLE_API_KEY", "GOOGLE_GENAI_API_KEY", "GEMINI_API_KEY"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _pexels_api_key() -> str:
+    return os.environ.get("PEXELS_API_KEY", "").strip() or os.environ.get("PEXELS_KEY", "").strip()
+
+
+def _image_model() -> str:
+    return os.environ.get("THUMBNAIL_IMAGE_MODEL", "").strip() or DEFAULT_IMAGE_MODEL
+
+
+def _public_error(exc: BaseException) -> str:
+    text = f"{type(exc).__name__}: {exc}"
+    for secret in (_emergent_key(), _google_api_key(), _pexels_api_key()):
+        if secret:
+            text = text.replace(secret, "[redacted]")
+    return text[:240]
+
+
 def provider_info() -> dict:
     mock = _use_mock()
-    gemini_configured = bool(os.environ.get("EMERGENT_LLM_KEY", "") or os.environ.get("GEMINI_API_KEY", ""))
-    pexels_configured = bool(os.environ.get("PEXELS_API_KEY", ""))
+    gemini_configured = bool(_emergent_key() or _google_api_key())
+    pexels_configured = bool(_pexels_api_key())
     if mock:
         provider = "mock"
         model = "deterministic-svg"
     elif gemini_configured:
         provider = os.environ.get("THUMBNAIL_IMAGE_PROVIDER", "gemini_nano_banana")
-        model = os.environ.get("THUMBNAIL_IMAGE_MODEL", "gemini-3.1-flash-image-preview")
+        model = _image_model()
     elif pexels_configured:
         provider = "pexels_stock"
         model = "photo-search+local-compositor"
     else:
         provider = os.environ.get("THUMBNAIL_IMAGE_PROVIDER", "gemini_nano_banana")
-        model = os.environ.get("THUMBNAIL_IMAGE_MODEL", "gemini-3.1-flash-image-preview")
+        model = _image_model()
     return {
         "mock": mock,
         "configured": mock or gemini_configured or pexels_configured,
         "provider": provider,
         "model": model,
+        "gemini_via": "emergent" if _emergent_key() else ("google" if _google_api_key() else None),
     }
 
 
@@ -91,7 +125,35 @@ def _prompt_from_brief(project: dict, brief: dict) -> str:
     ]
     if title_text:
         parts.append(f"(The future title overlay will read: \"{title_text}\" — compose space for it.)")
+    image_prompt = str(brief.get("image_prompt") or "").strip()
+    if image_prompt:
+        parts.append(f"Concept direction: {image_prompt}")
     return "\n".join(parts)
+
+
+def thumbnail_search_query(project: dict, brief: dict) -> str:
+    """Search words for this concept, not one shared project query."""
+    inner = brief.get("brief") if isinstance(brief.get("brief"), dict) else brief
+    inner = inner or {}
+    parts = [
+        inner.get("subject_focal_point"),
+        inner.get("background_idea"),
+        inner.get("thumbnail_title_text"),
+        (project or {}).get("niche"),
+    ]
+    words = " ".join(str(part).strip() for part in parts if part and str(part).strip())
+    return (words or str((project or {}).get("topic") or "cinematic"))[:180]
+
+
+def choose_unused_photo(photos: list, exclude_ids: set[str]) -> dict | None:
+    for photo in photos or []:
+        photo_id = str((photo or {}).get("id") or "").strip()
+        if not photo_id or photo_id in exclude_ids:
+            continue
+        src = (photo or {}).get("src") or {}
+        if src.get("large2x") or src.get("large") or src.get("original"):
+            return photo
+    return None
 
 
 # ---------------- Mock SVG generation ----------------
@@ -141,67 +203,125 @@ def _mock_svg(seed: str, project: dict, brief: dict) -> bytes:
 
 # ---------------- Real generation ----------------
 
-async def _gemini_image(prompt: str, session_id: str) -> bytes | None:
-    """Call Gemini Nano Banana via emergentintegrations. Returns PNG bytes or None."""
-    api_key = os.environ.get("EMERGENT_LLM_KEY", "") or os.environ.get("GEMINI_API_KEY", "")
-    if not api_key:
+def _decode_image_payload(data) -> bytes | None:
+    if not data:
         return None
-    model = os.environ.get("THUMBNAIL_IMAGE_MODEL", "gemini-3.1-flash-image-preview")
+    if isinstance(data, str):
+        return base64.b64decode(data)
+    return bytes(data)
+
+
+async def _gemini_via_emergent(prompt: str, session_id: str, api_key: str, model: str) -> bytes | None:
+    from emergentintegrations.llm.chat import LlmChat, UserMessage
+    chat = LlmChat(
+        api_key=api_key,
+        session_id=session_id,
+        system_message="You are a cinematic YouTube thumbnail designer.",
+    )
+    chat.with_model("gemini", model).with_params(modalities=["image", "text"])
+    _, images = await chat.send_message_multimodal_response(UserMessage(text=prompt))
+    if images:
+        return _decode_image_payload(images[0].get("data"))
+    return None
+
+
+async def _gemini_via_google(prompt: str, api_key: str, model: str) -> bytes | None:
+    """Official google-genai client. A plain Google API key cannot use the Emergent client."""
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(api_key=api_key)
     try:
-        from emergentintegrations.llm.chat import LlmChat, UserMessage
-        chat = LlmChat(
-            api_key=api_key,
-            session_id=session_id,
-            system_message="You are a cinematic YouTube thumbnail designer.",
+        interaction = await asyncio.to_thread(
+            lambda: client.interactions.create(model=model, input=prompt)
         )
-        chat.with_model("gemini", model).with_params(modalities=["image", "text"])
-        _, images = await chat.send_message_multimodal_response(UserMessage(text=prompt))
-        if images:
-            # Use first image
-            data = images[0].get("data")
-            if data:
-                return base64.b64decode(data)
-        return None
-    except Exception as e:  # noqa: BLE001
-        logger.warning("Gemini image generation failed: %s", e)
-        return None
+        image = getattr(interaction, "output_image", None)
+        payload = _decode_image_payload(getattr(image, "data", None))
+        if payload:
+            return payload
+    except Exception as exc:  # noqa: BLE001
+        logger.info("Gemini interactions API missed (%s); trying generate_content", _public_error(exc))
+
+    response = await client.aio.models.generate_content(
+        model=model,
+        contents=prompt,
+        config=types.GenerateContentConfig(response_modalities=["IMAGE", "TEXT"]),
+    )
+    for candidate in getattr(response, "candidates", None) or []:
+        content = getattr(candidate, "content", None)
+        for part in getattr(content, "parts", None) or []:
+            inline = getattr(part, "inline_data", None)
+            payload = _decode_image_payload(getattr(inline, "data", None))
+            if payload:
+                return payload
+    return None
 
 
-async def _pexels_stock_image(project: dict) -> tuple[bytes | None, dict | None]:
-    """Return a real landscape stock photo when the image model is unavailable."""
-    api_key = os.environ.get("PEXELS_API_KEY", "").strip()
+async def _gemini_image(prompt: str, session_id: str) -> tuple[bytes | None, str | None]:
+    """Return image bytes, or a short reason when Gemini cannot produce one."""
+    model = _image_model()
+    emergent = _emergent_key()
+    google_key = _google_api_key()
+    if not emergent and not google_key:
+        return None, "Gemini is not configured."
+    try:
+        if emergent:
+            image = await _gemini_via_emergent(prompt, session_id, emergent, model)
+            path = "emergent"
+        else:
+            image = await _gemini_via_google(prompt, google_key, model)
+            path = "google"
+        if image:
+            return image, None
+        reason = f"Gemini ({path}, {model}) returned no image."
+        logger.warning(reason)
+        return None, reason
+    except Exception as exc:  # noqa: BLE001
+        reason = f"Gemini image generation failed: {_public_error(exc)}"
+        logger.warning(reason)
+        return None, reason
+
+
+async def _pexels_stock_image(
+    project: dict,
+    brief: dict,
+    exclude_ids: set[str],
+) -> tuple[bytes | None, dict | None, str | None]:
+    """Return a landscape photo that this project has not already used."""
+    api_key = _pexels_api_key()
     if not api_key:
-        return None, None
-
-    location = (project.get("location") or "Australia").strip()
-    niche = (project.get("niche") or "housing").strip()
-    query = f"{location} {niche} home"
+        return None, None, "Pexels is not configured."
+    query = thumbnail_search_query(project, brief)
     try:
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-            search = await client.get(
-                "https://api.pexels.com/v1/search",
-                headers={"Authorization": api_key},
-                params={"query": query, "per_page": 8, "orientation": "landscape"},
-            )
-            search.raise_for_status()
-            for photo in search.json().get("photos") or []:
+            for page in (1, 2):
+                search = await client.get(
+                    "https://api.pexels.com/v1/search",
+                    headers={"Authorization": api_key},
+                    params={"query": query, "per_page": 15, "orientation": "landscape", "page": page},
+                )
+                search.raise_for_status()
+                photo = choose_unused_photo(search.json().get("photos") or [], exclude_ids)
+                if photo is None:
+                    continue
                 src = photo.get("src") or {}
                 url = src.get("large2x") or src.get("large") or src.get("original")
-                if not url:
-                    continue
                 response = await client.get(url)
                 response.raise_for_status()
                 if len(response.content) > 20 * 1024 * 1024:
+                    exclude_ids.add(str(photo.get("id")))
                     continue
                 return response.content, {
                     "external_id": str(photo.get("id") or ""),
                     "source_url": photo.get("url"),
                     "download_url": url,
                     "photographer": photo.get("photographer"),
-                }
+                }, None
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Pexels thumbnail search/download failed: %s", exc)
-    return None, None
+        reason = f"Pexels photo search failed: {_public_error(exc)}"
+        logger.warning(reason)
+        return None, None, reason
+    return None, None, f"No unused Pexels photo matched “{query}”."
 
 
 def _compose_stock_thumbnail(image_bytes: bytes, title: str) -> bytes:
@@ -241,6 +361,93 @@ def _compose_stock_thumbnail(image_bytes: bytes, title: str) -> bytes:
     return output.getvalue()
 
 
+class ThumbnailBatch:
+    """Images ready to insert, plus a user-facing reason when none were made."""
+
+    def __init__(self, images: list[dict] | None = None, error: str | None = None):
+        self.images = images or []
+        self.error = error
+
+
+def generated_thumbnail_document(
+    *,
+    asset_id: str,
+    project_id: str,
+    brief: dict,
+    variant_number: int,
+    source: str,
+    saved,
+    store,
+    prompt: str,
+    info: dict,
+    stock_external_id: str | None = None,
+    source_url: str | None = None,
+) -> dict:
+    """A generated thumbnail must not occupy the stock unique key.
+
+    ``assets_stock_unique`` is (project_id, scene_id, external_id, source) for
+    any string external_id. Stock clips use the Pexels photo id there. A
+    generated thumbnail stores that photo id separately and leaves
+    ``external_id`` unset so a repeated photo cannot raise E11000.
+    """
+    title = brief.get("thumbnail_title_text") or brief.get("brief", {}).get("thumbnail_title_text") or "Thumbnail"
+    doc = {
+        "id": asset_id,
+        "project_id": project_id,
+        "scene_id": None,
+        "name": f"{title} · variant {variant_number}",
+        "asset_type": "generated_thumbnail",
+        "source": source,
+        "source_url": source_url,
+        "preview_url": saved.url,
+        "preview_path": saved.preview_path,
+        "file_path": str(saved.file_path) if saved.file_path else None,
+        "storage_mode": store.mode,
+        "storage_key": saved.key,
+        "width": 1280,
+        "height": 720,
+        "duration": None,
+        "tags": ["thumbnail", "generated"],
+        "prompt": prompt,
+        "provider": source,
+        "model": "photo-search+local-compositor" if source == "thumbnail_pexels" else info["model"],
+        "mock": _use_mock() or source == "mock_thumbnail",
+        "brief_snapshot": {k: brief.get(k) for k in (
+            "thumbnail_title_text", "visual_composition", "emotion_angle",
+            "background_idea", "subject_focal_point", "colour_direction",
+            "click_trigger", "image_prompt",
+        )},
+        "status": "generated",
+    }
+    if stock_external_id:
+        doc["stock_external_id"] = stock_external_id
+    return doc
+
+
+def _is_duplicate_key(exc: BaseException) -> bool:
+    return getattr(exc, "code", None) == 11000 or type(exc).__name__ == "DuplicateKeyError"
+
+
+async def insert_generated_thumbnails(db, docs: list[dict]) -> tuple[list[dict], str | None]:
+    """Insert thumbnails one at a time. A unique-index clash is skipped, not a 500."""
+    saved: list[dict] = []
+    for doc in docs:
+        try:
+            await db.assets.insert_one(dict(doc))
+            saved.append(doc)
+        except Exception as exc:  # noqa: BLE001
+            if _is_duplicate_key(exc):
+                logger.warning(
+                    "thumbnail insert skipped duplicate project=%s stock=%s",
+                    doc.get("project_id"), doc.get("stock_external_id"),
+                )
+                continue
+            raise
+    if docs and not saved:
+        return [], "That photo is already saved on this project. Generate again for a different image."
+    return saved, None
+
+
 # ---------------- Public ----------------
 
 async def generate_thumbnail_images(
@@ -249,17 +456,20 @@ async def generate_thumbnail_images(
     *,
     variants: int = 1,
     project_id: str,
-) -> list[dict]:
+    exclude_photo_ids: set[str] | None = None,
+) -> ThumbnailBatch:
     """Generate `variants` thumbnail images for the given brief + project.
 
-    Returns a list of normalised asset payloads ready to be inserted into the assets
-    collection. Mock mode writes .svg files; real mode writes .png files.
+    Mock mode writes .svg files; real mode writes .png files.
     Both served from /api/static/thumbs/{project_id}/{asset_id}.{ext}.
     """
     variants = max(1, min(int(variants or 1), 3))
-    prompt = _prompt_from_brief(project, brief)
+    inner = brief.get("brief") if isinstance(brief.get("brief"), dict) else brief
+    prompt = _prompt_from_brief(project, inner or {})
     info = provider_info()
     out: list[dict] = []
+    reasons: list[str] = []
+    used_photos = set(exclude_photo_ids or [])
     dir_path = STATIC_ROOT / project_id
     dir_path.mkdir(parents=True, exist_ok=True)
 
@@ -272,66 +482,66 @@ async def generate_thumbnail_images(
         source_item: dict | None = None
 
         if _use_mock():
-            image_bytes = _mock_svg(asset_id, project, brief)
+            image_bytes = _mock_svg(asset_id, project, inner or {})
         else:
-            image_bytes = await _gemini_image(prompt, session_id)
+            image_bytes, gemini_error = await _gemini_image(prompt, session_id)
             if image_bytes is not None:
                 ext = "png"
                 source = info["provider"]
             else:
-                stock_bytes, source_item = await _pexels_stock_image(project)
+                if gemini_error:
+                    reasons.append(gemini_error)
+                stock_bytes, source_item, pexels_error = await _pexels_stock_image(
+                    project, inner or {}, used_photos,
+                )
                 if stock_bytes is not None:
-                    image_bytes = _compose_stock_thumbnail(stock_bytes, brief.get("thumbnail_title_text", ""))
-                    ext = "png"
-                    source = "pexels_stock"
-                else:
-                    logger.warning(
-                        "Thumbnail providers failed for %s variant %s; mock fallback is disabled",
-                        project_id,
-                        i,
-                    )
+                    title = (inner or {}).get("thumbnail_title_text", "")
+                    try:
+                        image_bytes = _compose_stock_thumbnail(stock_bytes, title)
+                    except Exception as exc:  # noqa: BLE001
+                        image_bytes = None
+                        reasons.append(f"Could not compose the stock photo: {_public_error(exc)}")
+                    else:
+                        ext = "png"
+                        source = "thumbnail_pexels"
+                        photo_id = str((source_item or {}).get("external_id") or "")
+                        if photo_id:
+                            used_photos.add(photo_id)
+                elif pexels_error:
+                    reasons.append(pexels_error)
 
         if image_bytes is None:
-            # No mock fallback — return real only, frontend shows skeleton/Retry
-            logger.warning("Thumbnail generation failed for %s variant %s — no mock, will show Retry", project_id, i)
+            logger.warning(
+                "Thumbnail generation failed for %s variant %s: %s",
+                project_id, i, reasons[-1] if reasons else "no image",
+            )
             continue
 
         file_path = dir_path / f"{asset_id}.{ext}"
         file_path.write_bytes(image_bytes)
 
-        # Persist via storage backend
         store = get_storage()
         key = f"thumbs/{project_id}/{asset_id}.{ext}"
         content_type = "image/png" if ext == "png" else "image/svg+xml"
         saved = store.save_file(file_path, key, content_type=content_type)
-
-        out.append({
-            "id": asset_id,
-            "project_id": project_id,
-            "scene_id": None,
-            "name": f"{brief.get('thumbnail_title_text', 'Thumbnail')} · variant {i + 1}",
-            "asset_type": "generated_thumbnail",
-            "source": source,
-            "external_id": (source_item or {}).get("external_id"),
-            "source_url": (source_item or {}).get("source_url"),
-            "preview_url": saved.url,
-            "preview_path": saved.preview_path,
-            "file_path": str(saved.file_path) if saved.file_path else None,
-            "storage_mode": store.mode,
-            "storage_key": saved.key,
-            "width": 1280,
-            "height": 720,
-            "duration": None,
-            "tags": ["thumbnail", "generated"],
-            "prompt": prompt,
-            "provider": source,
-            "model": "photo-search+local-compositor" if source == "pexels_stock" else info["model"],
-            "mock": _use_mock() or source == "mock_thumbnail",
-            "brief_snapshot": {k: brief.get(k) for k in (
-                "thumbnail_title_text", "visual_composition", "emotion_angle",
-                "background_idea", "subject_focal_point", "colour_direction",
-                "click_trigger",
-            )},
-            "status": "generated",
-        })
-    return out
+        out.append(generated_thumbnail_document(
+            asset_id=asset_id,
+            project_id=project_id,
+            brief=inner or {},
+            variant_number=i + 1,
+            source=source,
+            saved=saved,
+            store=store,
+            prompt=prompt,
+            info=info,
+            stock_external_id=(source_item or {}).get("external_id"),
+            source_url=(source_item or {}).get("source_url"),
+        ))
+    error = None
+    if not out:
+        seen: list[str] = []
+        for reason in reasons:
+            if reason not in seen:
+                seen.append(reason)
+        error = " ".join(seen) or "Image generation failed. No image provider returned a picture."
+    return ThumbnailBatch(out, error)

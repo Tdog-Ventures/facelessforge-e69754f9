@@ -16,7 +16,8 @@ export default function ThumbnailPanel({
 }) {
   const [generating, setGenerating] = useState(null); // brief id currently generating
   const [working, setWorking] = useState(null); // asset id being acted on
-  const [autoSelectFirst, setAutoSelectFirst] = useState(true);
+  const [autoSelectFirst, setAutoSelectFirst] = useState(false);
+  const [variantChoice, setVariantChoice] = useState({});
   const [autoPendingBriefId, setAutoPendingBriefId] = useState(null);
   const [meta, setMeta] = useState({ mock: false, configured: false, provider: "gemini_nano_banana" });
   const [metaLoading, setMetaLoading] = useState(true);
@@ -227,7 +228,7 @@ export default function ThumbnailPanel({
                 onChange={(e) => setAutoSelectFirst(e.target.checked)}
                 className="h-3 w-3 accent-[#00E5FF] bg-[var(--ff-input-bg)] border-[var(--ff-input-border)] rounded"
               />
-              Auto-select first concept
+              Create an image for the first concept when this tab opens
             </label>
           )}
           <span className={`font-mono text-[10px] uppercase tracking-widest px-2 py-0.5 rounded-sm border ${meta.configured === false ? "text-[#FFB020] border-[#FFB020]/30 bg-[#FFB020]/10" : "text-[#00FF66] border-[#00FF66]/30 bg-[#00FF66]/10"}`}>
@@ -390,14 +391,32 @@ export default function ThumbnailPanel({
                     {isGen ? <Loader2 size={11} className="animate-spin" /> : <ImageIcon size={11} strokeWidth={1.8} />}
                     {gens.length > 0 ? "Generate Another" : "Generate Image"}
                   </button>
+                  <label className="flex items-center gap-1 font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">
+                    Count
+                    <select
+                      data-testid={`generate-count-${a.id}`}
+                      aria-label={`How many images for concept ${i + 1}`}
+                      value={variantChoice[a.id] || 1}
+                      disabled={isGen}
+                      onChange={(event) => setVariantChoice((current) => ({
+                        ...current,
+                        [a.id]: Number(event.target.value),
+                      }))}
+                      className="bg-[var(--ff-input-bg)] text-[var(--ff-input-text)] border border-[var(--ff-border)] rounded-sm px-1 py-1"
+                    >
+                      <option value={1}>1</option>
+                      <option value={2}>2</option>
+                      <option value={3}>3</option>
+                    </select>
+                  </label>
                   <button
                     data-testid={`generate-variants-btn-${a.id}`}
-                    onClick={() => generate(a.id, 3)}
+                    onClick={() => generate(a.id, Number(variantChoice[a.id] || 1))}
                     disabled={isGen}
                     className="flex items-center justify-center gap-1.5 font-mono text-[10px] uppercase tracking-widest border border-[#7B61FF]/40 text-[#7B61FF] hover:bg-[#7B61FF]/10 px-2 py-2 rounded-sm disabled:opacity-60 transition-colors"
                   >
                     {isGen ? <Loader2 size={11} className="animate-spin" /> : <Wand2 size={11} strokeWidth={1.8} />}
-                    3 Variants
+                    Generate {variantChoice[a.id] || 1}
                   </button>
                 </div>
               )}
