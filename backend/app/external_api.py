@@ -421,10 +421,10 @@ async def _prepare_external_render(
 
     if brief_assets:
         try:
-            imgs = await thumb_images.generate_thumbnail_images(
+            batch = await thumb_images.generate_thumbnail_images(
                 project_doc, brief_assets[0], variants=1, project_id=project_id,
             )
-            for img in imgs:
+            for img in getattr(batch, "images", batch):
                 img["created_at"] = _now()
                 img["updated_at"] = _now()
                 img["brief_asset_id"] = brief_assets[0]["id"]

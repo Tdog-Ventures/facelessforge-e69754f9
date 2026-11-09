@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import logging
 import math
 import re
 import os
@@ -2647,6 +2648,22 @@ async def thumbnails_meta(user=Depends(get_current_user)):
     return thumb_images.provider_info()
 
 
+async def _used_thumbnail_photo_ids(db, project_id: str) -> set[str]:
+    """Pexels photo ids already saved for this project, however they were stored."""
+    used: set[str] = set()
+    cursor = db.assets.find(
+        {"project_id": project_id},
+        {"_id": 0, "external_id": 1, "stock_external_id": 1, "source": 1, "asset_type": 1},
+    )
+    async for asset in cursor:
+        stock_id = asset.get("stock_external_id")
+        if stock_id:
+            used.add(str(stock_id))
+        if asset.get("source") in {"pexels", "pexels_stock", "thumbnail_pexels"} and asset.get("external_id"):
+            used.add(str(asset["external_id"]))
+    return used
+
+
 @router.post("/projects/{project_id}/thumbnails/{brief_asset_id}/generate")
 async def generate_thumbnail_image_endpoint(
     project_id: str, brief_asset_id: str,
@@ -2665,21 +2682,31 @@ async def generate_thumbnail_image_endpoint(
     if not brief_asset:
         raise HTTPException(status_code=404, detail="Thumbnail brief not found")
     brief = brief_asset.get("brief") or {}
+    used_photos = await _used_thumbnail_photo_ids(db, project_id)
 
-    generated = await thumb_images.generate_thumbnail_images(
+    batch = await thumb_images.generate_thumbnail_images(
         project, brief, variants=body.variants, project_id=project_id,
+        exclude_photo_ids=used_photos,
     )
+    generated = batch.images
     if not generated:
-        raise HTTPException(status_code=502, detail="Image generation failed. Please retry.")
+        raise HTTPException(
+            status_code=502,
+            detail=batch.error or "Image generation failed. No image provider returned a picture.",
+        )
 
     now = _now()
-    inserts = []
     for g in generated:
         g["brief_asset_id"] = brief_asset_id
         g["created_at"] = now
         g["updated_at"] = now
-        inserts.append(dict(g))
-    await db.assets.insert_many([dict(d) for d in inserts])
+    saved, duplicate_message = await thumb_images.insert_generated_thumbnails(db, generated)
+    if not saved:
+        raise HTTPException(
+            status_code=409,
+            detail=duplicate_message or "That photo is already saved on this project. Generate again for a different image.",
+        )
+    generated = saved
 
     est_cost = 0.02 * len(generated) if not generated[0].get("mock") else 0
     if est_cost:

@@ -80,7 +80,10 @@ async def test_tts_provider_error_does_not_fall_back_to_mock(monkeypatch):
 async def test_thumbnail_provider_error_does_not_create_mock_svg(monkeypatch):
     monkeypatch.delenv("EMERGENT_LLM_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_GENAI_API_KEY", raising=False)
     monkeypatch.delenv("PEXELS_API_KEY", raising=False)
+    monkeypatch.delenv("PEXELS_KEY", raising=False)
     monkeypatch.setenv("USE_MOCK_THUMBNAIL_IMAGES", "false")
     monkeypatch.setattr(
         thumbnail_images,
@@ -95,7 +98,8 @@ async def test_thumbnail_provider_error_does_not_create_mock_svg(monkeypatch):
         project_id="project-1",
     )
 
-    assert result == []
+    assert result.images == []
+    assert "Gemini is not configured" in (result.error or "")
 
 
 @pytest.mark.asyncio

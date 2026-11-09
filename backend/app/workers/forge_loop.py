@@ -335,11 +335,12 @@ async def _ensure_assets_and_render(project: dict) -> dict:
             try:
                 thumb_brief = concepts[0]
                 try:
-                    imgs = await asyncio.wait_for(thumb_images.generate_thumbnail_images(project, thumb_brief, variants=1, project_id=pid), timeout=15)
+                    batch = await asyncio.wait_for(thumb_images.generate_thumbnail_images(project, thumb_brief, variants=1, project_id=pid), timeout=15)
+                    imgs = getattr(batch, "images", batch)
                 except asyncio.TimeoutError:
                     logger.debug("thumbnail image timeout")
                     imgs = []
-                for img in imgs[:1]:
+                for img in list(imgs)[:1]:
                     img["created_at"] = _now()
                     img["updated_at"] = _now()
                     img["status"] = "selected"
