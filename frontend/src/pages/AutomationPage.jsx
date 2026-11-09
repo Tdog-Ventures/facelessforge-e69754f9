@@ -81,7 +81,7 @@ export default function AutomationPage() {
   };
 
   if (loading) {
-    return <AppShell><TopBar title="Automation" /><div className="p-8 text-sm text-zinc-500 font-mono">Loading automation…</div></AppShell>;
+    return <AppShell><TopBar title="Automation" /><div className="p-8 text-sm text-[var(--ff-text-muted)] font-mono">Loading automation…</div></AppShell>;
   }
 
   const enabled = status?.enabled ?? status?.auto_post_enabled ?? false;
@@ -93,17 +93,17 @@ export default function AutomationPage() {
       <TopBar title="Automation" subtitle="FacelessForge Auto-Post Loop — Monetisation Ready" />
       <div className="p-8 max-w-4xl space-y-6">
         {/* Toggle + Schedule + Niche */}
-        <div className="border border-zinc-800 bg-[#121212] p-6 rounded-sm space-y-6">
+        <div className="border border-[var(--ff-border)] bg-[var(--ff-surface)] p-6 rounded-sm space-y-6">
           <div className="flex items-center justify-between">
             <div>
-              <h3 className="text-sm font-semibold text-white flex items-center gap-2"><Zap size={14} className="text-[#00E5FF]" /> Auto-post Loop</h3>
-              <p className="font-mono text-[10px] text-zinc-500 mt-1">Daily 09:00 Australia/Adelaide — Topic → Project → Script → Render → YouTube → Shorts</p>
+              <h3 className="text-sm font-semibold text-[var(--ff-text)] flex items-center gap-2"><Zap size={14} className="text-[#00E5FF]" /> Auto-post Loop</h3>
+              <p className="font-mono text-[10px] text-[var(--ff-text-muted)] mt-1">Daily 09:00 Australia/Adelaide — Topic → Project → Script → Render → YouTube → Shorts</p>
             </div>
             <button
               data-testid="automation-toggle"
               onClick={toggle}
               disabled={toggling}
-              className={`flex items-center gap-2 px-4 py-2 rounded-sm font-mono text-xs tracking-widest uppercase border transition-colors ${enabled ? "bg-[#00E5FF] text-black border-[#00E5FF]" : "bg-zinc-900 text-zinc-400 border-zinc-700 hover:border-zinc-500"}`}
+              className={`flex items-center gap-2 px-4 py-2 rounded-sm font-mono text-xs tracking-widest uppercase border transition-colors ${enabled ? "bg-[#00E5FF] text-black border-[#00E5FF]" : "bg-[var(--ff-bg)] text-[var(--ff-text-muted)] border-[var(--ff-input-border)] hover:border-zinc-500"}`}
             >
               <Power size={14} /> {enabled ? "ON" : "OFF"}
             </button>
@@ -111,18 +111,18 @@ export default function AutomationPage() {
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div>
-              <label className="font-mono text-[10px] uppercase tracking-widest text-zinc-500 mb-2 block">Schedule time</label>
-              <div className="flex items-center gap-2 bg-[#0A0A0A] border border-zinc-800 px-3 py-2.5 rounded-sm font-mono text-sm text-zinc-300">
-                <Clock size={14} className="text-zinc-500" /> {scheduleTime}
+              <label className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] mb-2 block">Schedule time</label>
+              <div className="flex items-center gap-2 bg-[var(--ff-input-bg)] border border-[var(--ff-border)] px-3 py-2.5 rounded-sm font-mono text-sm text-[var(--ff-text)]">
+                <Clock size={14} className="text-[var(--ff-text-muted)]" /> {scheduleTime}
               </div>
             </div>
             <div>
-              <label className="font-mono text-[10px] uppercase tracking-widest text-zinc-500 mb-2 block">Niche selector</label>
+              <label className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] mb-2 block">Niche selector</label>
               <select
                 data-testid="niche-selector"
                 value={selectedNiche}
                 onChange={(e) => setSelectedNiche(e.target.value)}
-                className="w-full bg-[#0A0A0A] border border-zinc-800 px-3 py-2.5 text-sm rounded-sm focus:border-[#00E5FF] text-white"
+                className="w-full bg-[var(--ff-input-bg)] border border-[var(--ff-border)] px-3 py-2.5 text-sm rounded-sm focus:border-[#00E5FF] text-[var(--ff-text)]"
               >
                 {(status?.niches || ["AI side hustles","Faceless automation"]).map((n) => (
                   <option key={n} value={n}>{n}</option>
@@ -130,7 +130,7 @@ export default function AutomationPage() {
               </select>
             </div>
             <div>
-              <label className="font-mono text-[10px] uppercase tracking-widest text-zinc-500 mb-2 block">YouTube channel</label>
+              <label className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] mb-2 block">YouTube channel</label>
               <div data-testid="yt-connected-badge" className={`flex items-center gap-2 px-3 py-2.5 rounded-sm border font-mono text-xs ${ytStatus?.connected ? "bg-green-900/20 border-green-800 text-green-400" : "bg-red-900/20 border-red-800 text-red-400"}`}>
                 <Youtube size={14} /> {ytStatus?.connected ? "Connected" : "Not connected"}
                 {!ytStatus?.connected && <button onClick={connectYoutube} className="ml-auto underline">Connect</button>}
@@ -139,14 +139,14 @@ export default function AutomationPage() {
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
-            <div className="bg-[#0A0A0A] border border-zinc-800 p-4 rounded-sm">
-              <div className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Next run countdown</div>
-              <div data-testid="next-run-countdown" className="font-mono text-lg text-white mt-1">{countdown || "—"}</div>
-              <div className="font-mono text-[10px] text-zinc-600 mt-1">{status?.next_run ? new Date(status.next_run).toLocaleString("en-AU", { timeZone: "Australia/Adelaide" }) + " Adelaide" : ""}</div>
+            <div className="bg-[var(--ff-input-bg)] border border-[var(--ff-border)] p-4 rounded-sm">
+              <div className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">Next run countdown</div>
+              <div data-testid="next-run-countdown" className="font-mono text-lg text-[var(--ff-text)] mt-1">{countdown || "—"}</div>
+              <div className="font-mono text-[10px] text-[var(--ff-text-dim)] mt-1">{status?.next_run ? new Date(status.next_run).toLocaleString("en-AU", { timeZone: "Australia/Adelaide" }) + " Adelaide" : ""}</div>
             </div>
-            <div className="bg-[#0A0A0A] border border-zinc-800 p-4 rounded-sm">
-              <div className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Last run log</div>
-              <div data-testid="last-run-log" className="font-mono text-xs text-zinc-300 mt-2 max-h-24 overflow-auto whitespace-pre-wrap">
+            <div className="bg-[var(--ff-input-bg)] border border-[var(--ff-border)] p-4 rounded-sm">
+              <div className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">Last run log</div>
+              <div data-testid="last-run-log" className="font-mono text-xs text-[var(--ff-text)] mt-2 max-h-24 overflow-auto whitespace-pre-wrap">
                 {lastRun ? (Array.isArray(lastRun.log) ? lastRun.log.join("\n") : JSON.stringify(lastRun, null, 2).slice(0,800)) : "No runs yet"}
               </div>
               {lastRun?.youtube_url && <a href={lastRun.youtube_url} target="_blank" rel="noreferrer" className="font-mono text-[10px] text-[#00E5FF] underline">{lastRun.youtube_url}</a>}
@@ -164,13 +164,13 @@ export default function AutomationPage() {
           </button>
 
           {recent.length > 0 && (
-            <div className="border-t border-zinc-800 pt-4">
-              <div className="font-mono text-[10px] uppercase tracking-widest text-zinc-500 mb-2">Recent runs</div>
+            <div className="border-t border-[var(--ff-border)] pt-4">
+              <div className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] mb-2">Recent runs</div>
               <div className="space-y-1">
                 {recent.slice(0,5).map((r) => (
-                  <div key={r.id} className="flex items-center justify-between font-mono text-[11px] bg-[#0A0A0A] border border-zinc-800 px-3 py-2 rounded-sm">
-                    <span className="text-zinc-300 truncate">{r.project_id?.slice(0,8)} — {r.youtube_video_id || r.status}</span>
-                    <span className={`${r.status==="completed"?"text-green-400": r.status==="failed"?"text-red-400":"text-zinc-500"}`}>{r.status}</span>
+                  <div key={r.id} className="flex items-center justify-between font-mono text-[11px] bg-[var(--ff-input-bg)] border border-[var(--ff-border)] px-3 py-2 rounded-sm">
+                    <span className="text-[var(--ff-text)] truncate">{r.project_id?.slice(0,8)} — {r.youtube_video_id || r.status}</span>
+                    <span className={`${r.status==="completed"?"text-green-400": r.status==="failed"?"text-red-400":"text-[var(--ff-text-muted)]"}`}>{r.status}</span>
                   </div>
                 ))}
               </div>

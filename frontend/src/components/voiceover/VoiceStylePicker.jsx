@@ -12,8 +12,8 @@ export const VOICE_STYLES = [
 
 export default function VoiceStylePicker({ value, onChange }) {
   return (
-    <div className="border border-zinc-800 bg-[#0F0F10] rounded-sm p-4 space-y-3">
-      <div className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+    <div className="border border-[var(--ff-border)] bg-[#0F0F10] rounded-sm p-4 space-y-3">
+      <div className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">
         Voice style
       </div>
       <div className="flex flex-wrap gap-2" data-testid="vo-style-picker">
@@ -24,8 +24,8 @@ export default function VoiceStylePicker({ value, onChange }) {
             onClick={() => onChange(s.id)}
             className={`px-3 py-1.5 font-mono text-[10px] uppercase tracking-widest rounded-sm border transition-colors ${
               value === s.id
-                ? "bg-[#7B61FF] text-white border-[#7B61FF]"
-                : "border-zinc-700 text-zinc-400 hover:text-white hover:border-zinc-500"
+                ? "bg-[#7B61FF] text-[var(--ff-text)] border-[#7B61FF]"
+                : "border-[var(--ff-input-border)] text-[var(--ff-text-muted)] hover:text-[var(--ff-text)] hover:border-zinc-500"
             }`}
             title={s.hint}
           >

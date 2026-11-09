@@ -38,12 +38,12 @@ export default function AdminUsersPage() {
       <TopBar title="Users" subtitle="Admin console" />
       <div className="p-8 space-y-6">
         {loading ? (
-          <div className="text-sm text-zinc-500 font-mono">Loading…</div>
+          <div className="text-sm text-[var(--ff-text-muted)] font-mono">Loading…</div>
         ) : (
-          <div className="border border-zinc-800 bg-[#121212] rounded-sm overflow-hidden">
+          <div className="border border-[var(--ff-border)] bg-[var(--ff-surface)] rounded-sm overflow-hidden">
             <table className="w-full text-sm">
-              <thead className="border-b border-zinc-800 bg-[#0A0A0A]">
-                <tr className="font-mono text-[10px] text-zinc-500 uppercase tracking-widest">
+              <thead className="border-b border-[var(--ff-border)] bg-[var(--ff-input-bg)]">
+                <tr className="font-mono text-[10px] text-[var(--ff-text-muted)] uppercase tracking-widest">
                   <th className="text-left px-5 py-3">Name</th>
                   <th className="text-left px-5 py-3">Email</th>
                   <th className="text-left px-5 py-3 w-40">Role</th>
@@ -52,20 +52,20 @@ export default function AdminUsersPage() {
               </thead>
               <tbody>
                 {users.map((u) => (
-                  <tr key={u.id} className="border-b border-zinc-800 hover:bg-[#1A1A1A]">
+                  <tr key={u.id} className="border-b border-[var(--ff-border)] hover:bg-[var(--ff-surface-2)]">
                     <td className="px-5 py-3">{u.name}</td>
-                    <td className="px-5 py-3 font-mono text-xs text-zinc-400">{u.email}</td>
+                    <td className="px-5 py-3 font-mono text-xs text-[var(--ff-text-muted)]">{u.email}</td>
                     <td className="px-5 py-3">
                       <select
                         data-testid={`role-select-${u.id}`}
                         value={u.role}
                         onChange={(e) => changeRole(u.id, e.target.value)}
-                        className="bg-[#0A0A0A] border border-zinc-800 px-2 py-1 text-xs font-mono uppercase rounded-sm"
+                        className="bg-[var(--ff-input-bg)] border border-[var(--ff-border)] px-2 py-1 text-xs font-mono uppercase rounded-sm"
                       >
                         {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
                       </select>
                     </td>
-                    <td className="px-5 py-3 font-mono text-[11px] text-zinc-500">
+                    <td className="px-5 py-3 font-mono text-[11px] text-[var(--ff-text-muted)]">
                       {new Date(u.created_at).toLocaleDateString()}
                     </td>
                   </tr>

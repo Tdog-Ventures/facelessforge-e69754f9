@@ -48,11 +48,11 @@ export default function LastTerminalNotice({ job, canEdit, starting, onRetry }) 
           {label} · {timeAgo(job.completed_at || job.updated_at || job.created_at)}
         </div>
         {failed && job.error_message ? (
-          <div className="text-sm text-zinc-400 mt-1 leading-relaxed line-clamp-2">
+          <div className="text-sm text-[var(--ff-text-muted)] mt-1 leading-relaxed line-clamp-2">
             {job.error_message}
           </div>
         ) : (
-          <div className="text-sm text-zinc-400 mt-1">
+          <div className="text-sm text-[var(--ff-text-muted)] mt-1">
             Start a fresh render below — your project is still ready.
           </div>
         )}
@@ -63,7 +63,7 @@ export default function LastTerminalNotice({ job, canEdit, starting, onRetry }) 
           data-testid="render-terminal-retry-btn"
           onClick={onRetry}
           disabled={starting}
-          className="inline-flex items-center gap-2 border border-zinc-700 text-zinc-300 hover:text-[#00E5FF] hover:border-[#00E5FF] font-mono text-[10px] uppercase tracking-widest px-3 py-2 rounded-sm transition-colors disabled:opacity-50"
+          className="inline-flex items-center gap-2 border border-[var(--ff-input-border)] text-[var(--ff-text)] hover:text-[#00E5FF] hover:border-[#00E5FF] font-mono text-[10px] uppercase tracking-widest px-3 py-2 rounded-sm transition-colors disabled:opacity-50"
         >
           {starting ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
           Retry render

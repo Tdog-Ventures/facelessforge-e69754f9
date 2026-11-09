@@ -45,12 +45,12 @@ export default function ManualScriptForm({ projectId, initialText = "", onSaved,
   };
 
   return (
-    <div data-testid="manual-script-form" className="border border-zinc-800 bg-[#121212] rounded-sm">
-      <div className="px-5 py-3 border-b border-zinc-800 flex items-center justify-between">
-        <span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+    <div data-testid="manual-script-form" className="border border-[var(--ff-border)] bg-[var(--ff-surface)] rounded-sm">
+      <div className="px-5 py-3 border-b border-[var(--ff-border)] flex items-center justify-between">
+        <span className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">
           Write or paste script · no AI used
         </span>
-        <span data-testid="manual-script-stats" className="font-mono text-[11px] text-zinc-500">
+        <span data-testid="manual-script-stats" className="font-mono text-[11px] text-[var(--ff-text-muted)]">
           {stats.words} words · ~{formatNarration(stats.seconds)} narration
         </span>
       </div>
@@ -60,7 +60,7 @@ export default function ManualScriptForm({ projectId, initialText = "", onSaved,
         onChange={(e) => setText(e.target.value)}
         rows={14}
         placeholder="Paste or write the full voiceover script here…"
-        className="w-full bg-transparent p-5 text-sm leading-relaxed resize-y focus:outline-none text-zinc-200 placeholder:text-zinc-600 min-h-[240px]"
+        className="w-full bg-transparent p-5 text-sm leading-relaxed resize-y focus:outline-none text-[var(--ff-text)] placeholder:text-[var(--ff-input-placeholder)] min-h-[240px]"
       />
       {!validation.ok && text.trim() && (
         <p data-testid="manual-script-error" className="px-5 pb-2 font-mono text-[11px] text-amber-400">
@@ -72,7 +72,7 @@ export default function ManualScriptForm({ projectId, initialText = "", onSaved,
           {serverError}
         </p>
       )}
-      <div className="px-5 py-3 border-t border-zinc-800 flex items-center gap-2">
+      <div className="px-5 py-3 border-t border-[var(--ff-border)] flex items-center gap-2">
         <button
           data-testid="save-manual-script-btn"
           onClick={save}
@@ -86,7 +86,7 @@ export default function ManualScriptForm({ projectId, initialText = "", onSaved,
           data-testid="cancel-manual-script-btn"
           onClick={onCancel}
           disabled={saving}
-          className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-400 hover:text-white border border-zinc-800 px-3 py-2 rounded-sm transition-colors disabled:opacity-50"
+          className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] hover:text-[var(--ff-text)] border border-[var(--ff-border)] px-3 py-2 rounded-sm transition-colors disabled:opacity-50"
         >
           <X size={12} /> Cancel
         </button>

@@ -9,15 +9,15 @@ export default function SceneVoiceoverRow({
   return (
     <div
       data-testid={`vo-scene-${scene.id}`}
-      className="border border-zinc-800 bg-[#121212] rounded-sm p-4 space-y-3"
+      className="border border-[var(--ff-border)] bg-[var(--ff-surface)] rounded-sm p-4 space-y-3"
     >
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div className="flex-1 min-w-0">
           <div className="font-mono text-[10px] uppercase tracking-widest text-[#00E5FF] mb-1">
             Scene {String(scene.scene_number).padStart(2, "0")}
           </div>
-          <p className="text-sm text-zinc-300 line-clamp-2 leading-relaxed">
-            {scene.narration_text || <span className="text-zinc-500 italic">No narration text</span>}
+          <p className="text-sm text-[var(--ff-text)] line-clamp-2 leading-relaxed">
+            {scene.narration_text || <span className="text-[var(--ff-text-muted)] italic">No narration text</span>}
           </p>
         </div>
         {canEdit && (

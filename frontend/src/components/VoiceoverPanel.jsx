@@ -147,10 +147,10 @@ export default function VoiceoverPanel({
       {/* Header */}
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
-          <div className="font-mono text-[11px] uppercase tracking-widest text-zinc-500">
+          <div className="font-mono text-[11px] uppercase tracking-widest text-[var(--ff-text-muted)]">
             {meta.provider} · {meta.model}
           </div>
-          <h2 className="text-lg font-semibold text-white mt-1 flex items-center gap-2">
+          <h2 className="text-lg font-semibold text-[var(--ff-text)] mt-1 flex items-center gap-2">
             <Mic2 size={16} className="text-[#7B61FF]" /> Voiceover
           </h2>
         </div>
@@ -181,10 +181,10 @@ export default function VoiceoverPanel({
       <section className="space-y-3">
         <div className="flex items-center justify-between flex-wrap gap-3">
           <div>
-            <div className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+            <div className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">
               Full script voiceover
             </div>
-            <div className="text-sm text-zinc-300 mt-1">
+            <div className="text-sm text-[var(--ff-text)] mt-1">
               One audio for the entire video. Used as the master narration.
             </div>
           </div>
@@ -201,12 +201,12 @@ export default function VoiceoverPanel({
           )}
         </div>
         {!hasScript && (
-          <div className="border border-zinc-800 border-dashed p-6 text-center rounded-sm text-sm text-zinc-500">
+          <div className="border border-[var(--ff-border)] border-dashed p-6 text-center rounded-sm text-sm text-[var(--ff-text-muted)]">
             Generate the script first.
           </div>
         )}
         {hasScript && fullScriptVOs.length === 0 && (
-          <div className="border border-zinc-800 border-dashed p-6 text-center rounded-sm text-sm text-zinc-500">
+          <div className="border border-[var(--ff-border)] border-dashed p-6 text-center rounded-sm text-sm text-[var(--ff-text-muted)]">
             No full-script voiceover yet.
           </div>
         )}
@@ -234,19 +234,19 @@ export default function VoiceoverPanel({
       <section className="space-y-3">
         <div className="flex items-center justify-between flex-wrap gap-3">
           <div>
-            <div className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+            <div className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">
               Scene voiceovers
             </div>
-            <div className="text-sm text-zinc-300 mt-1">
+            <div className="text-sm text-[var(--ff-text)] mt-1">
               Per-scene narration — required for the future ffmpeg render queue.
             </div>
           </div>
-          <div className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+          <div className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">
             {sceneVOs.length}/{scenes.length} scenes have audio
           </div>
         </div>
         {scenes.length === 0 ? (
-          <div className="border border-zinc-800 border-dashed p-6 text-center rounded-sm text-sm text-zinc-500">
+          <div className="border border-[var(--ff-border)] border-dashed p-6 text-center rounded-sm text-sm text-[var(--ff-text-muted)]">
             Generate scenes first.
           </div>
         ) : (

@@ -19,26 +19,12 @@ import RightsRegistry from "../components/RightsRegistry";
 import ComplianceChecklist from "../components/ComplianceChecklist";
 import ApprovalPanel from "../components/ApprovalPanel";
 import ProductionReceipt from "../components/ProductionReceipt";
+import ProjectGoalsCard from "../components/ProjectGoalsCard";
+import ProjectTabBar from "../components/ProjectTabBar";
 import { api, formatApiError, API } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { formatCurrency, formatDuration } from "../lib/format";
 import { useConfirm } from "../components/ConfirmDialog";
-
-const TABS = [
-  { id: "overview", label: "Overview" },
-  { id: "script", label: "Script" },
-  { id: "scenes", label: "Scenes" },
-  { id: "metadata", label: "Metadata" },
-  { id: "thumbnails", label: "Thumbnails" },
-  { id: "voiceover", label: "Voiceover" },
-  { id: "render", label: "Render & Export" },
-  { id: "intake", label: "Intake" },
-  { id: "claims", label: "Claims" },
-  { id: "rights", label: "Rights" },
-  { id: "compliance", label: "Checklist" },
-  { id: "approval", label: "Approval" },
-  { id: "receipt", label: "Receipt" },
-];
 
 export default function ProjectDetailPage() {
   const { id } = useParams();
@@ -104,7 +90,7 @@ export default function ProjectDetailPage() {
     return (
       <AppShell>
         <TopBar title="Project" />
-        <div className="p-8 text-sm text-zinc-500 font-mono">Loading…</div>
+        <div className="p-8 text-sm text-[var(--ff-text-muted)] font-mono">Loading…</div>
       </AppShell>
     );
   }
@@ -125,7 +111,7 @@ export default function ProjectDetailPage() {
     return (
       <AppShell>
         <TopBar title="Project unavailable" />
-        <div className="p-8 space-y-4 text-sm text-zinc-300">
+        <div className="p-8 space-y-4 text-sm text-[var(--ff-text)]">
           <p>Project details could not be loaded. Your saved work has not been deleted.</p>
           <button type="button" onClick={fetchView} className="text-[#00E5FF] underline">
             Reload project
@@ -147,7 +133,7 @@ export default function ProjectDetailPage() {
             <button
               onClick={() => navigate("/app/projects")}
               data-testid="back-to-projects"
-              className="flex items-center gap-1 text-xs text-zinc-400 hover:text-white px-2 py-1"
+              className="flex items-center gap-1 text-xs text-[var(--ff-text-muted)] hover:text-[var(--ff-text)] px-2 py-1"
             >
               <ArrowLeft size={12} /> All projects
             </button>
@@ -166,20 +152,20 @@ export default function ProjectDetailPage() {
         }
       />
 
-      <div className="p-8 space-y-6">
+      <div className="p-8 space-y-6 min-w-0 max-w-full">
         {/* Header summary */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          <div className="lg:col-span-2 border border-[rgba(59,130,246,0.15)] bg-[#1c2333] p-6 rounded-sm space-y-4">
+          <div className="lg:col-span-2 border border-[rgba(59,130,246,0.15)] bg-[var(--ff-surface)] p-6 rounded-sm space-y-4">
             <div className="flex items-center gap-3">
               <StatusBadge status={project.status} />
-              <span className="font-mono text-[10px] text-zinc-500 uppercase tracking-widest">
+              <span className="font-mono text-[10px] text-[var(--ff-text-muted)] uppercase tracking-widest">
                 Target · {formatDuration(project.target_duration)}
               </span>
-              <span className="font-mono text-[10px] text-zinc-500 uppercase tracking-widest">
+              <span className="font-mono text-[10px] text-[var(--ff-text-muted)] uppercase tracking-widest">
                 Est. cost · {formatCurrency(project.estimated_cost)}
               </span>
             </div>
-            <p className="text-sm text-slate-300 leading-relaxed">{project.topic}</p>
+            <p className="text-sm text-[var(--ff-text)] leading-relaxed">{project.topic}</p>
             <div className="grid grid-cols-2 md:grid-cols-3 gap-4 pt-3 border-t border-[rgba(59,130,246,0.15)]">
               {[
                 ["Who's watching? ⓘ", project.audience, "Who will watch this? This shapes voice + examples"],
@@ -190,30 +176,30 @@ export default function ProjectDetailPage() {
                 ["Visual", project.visual_style, null],
               ].map(([k, v, tip]) => (
                 <div key={k} className="relative group">
-                  <div className="font-mono text-[10px] uppercase tracking-widest text-slate-400 mb-1 flex items-center gap-1">{k}
+                  <div className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] mb-1 flex items-center gap-1">{k}
                     {tip && <span className="inline-flex w-3 h-3 rounded-full bg-blue-500/20 border border-blue-400/40 text-blue-400 text-[8px] items-center justify-center">ⓘ</span>}
                   </div>
-                  {tip && <span className="hidden group-hover:block absolute left-0 bottom-full mb-1 bg-slate-800 text-xs text-slate-100 px-2 py-1 rounded shadow z-10 whitespace-nowrap">{tip}</span>}
-                  <div className="text-sm text-slate-200 truncate">{v}</div>
+                  {tip && <span className="hidden group-hover:block absolute left-0 bottom-full mb-1 bg-[var(--ff-surface)] border border-[var(--ff-border)] text-xs text-[var(--ff-text)] px-2 py-1 rounded shadow z-10 whitespace-nowrap">{tip}</span>}
+                  <div className="text-sm text-[var(--ff-text)] truncate">{v}</div>
                 </div>
               ))}
             </div>
           </div>
 
-          <div className="border border-[rgba(59,130,246,0.15)] bg-[#1c2333] p-6 rounded-sm space-y-4">
+          <div className="border border-[rgba(59,130,246,0.15)] bg-[var(--ff-surface)] p-6 rounded-sm space-y-4">
             <QualityScore score={project.quality_score || 0} />
             <div className="pt-4 border-t border-[rgba(59,130,246,0.15)] flex items-center gap-3">
               <a
                 data-testid="export-script-txt"
                 href={`${API}/projects/${project.id}/export/script.txt`}
-                className="flex-1 flex items-center justify-center gap-1.5 border border-[rgba(59,130,246,0.15)] text-slate-200 hover:text-[#00E5FF] hover:border-[#00E5FF] text-xs font-mono uppercase tracking-widest px-2 py-2 rounded-sm transition-colors"
+                className="flex-1 flex items-center justify-center gap-1.5 border border-[rgba(59,130,246,0.15)] text-[var(--ff-text)] hover:text-[#00E5FF] hover:border-[#00E5FF] text-xs font-mono uppercase tracking-widest px-2 py-2 rounded-sm transition-colors"
               >
                 <Download size={12} /> TXT
               </a>
               <a
                 data-testid="export-scenes-csv-top"
                 href={`${API}/projects/${project.id}/export/scenes.csv`}
-                className="flex-1 flex items-center justify-center gap-1.5 border border-[rgba(59,130,246,0.15)] text-slate-200 hover:text-[#00E5FF] hover:border-[#00E5FF] text-xs font-mono uppercase tracking-widest px-2 py-2 rounded-sm transition-colors"
+                className="flex-1 flex items-center justify-center gap-1.5 border border-[rgba(59,130,246,0.15)] text-[var(--ff-text)] hover:text-[#00E5FF] hover:border-[#00E5FF] text-xs font-mono uppercase tracking-widest px-2 py-2 rounded-sm transition-colors"
               >
                 <Download size={12} /> CSV
               </a>
@@ -228,23 +214,7 @@ export default function ProjectDetailPage() {
           </div>
         </div>
 
-        {/* Tabs */}
-        <div className="border-b border-[rgba(59,130,246,0.15)] flex items-center gap-1 overflow-x-auto">
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              data-testid={`tab-${t.id}`}
-              onClick={() => setTab(t.id)}
-              className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
-                tab === t.id
-                  ? "border-[#00E5FF] text-white"
-                  : "border-transparent text-zinc-500 hover:text-white"
-              }`}
-            >
-              {t.label}
-            </button>
-          ))}
-        </div>
+        <ProjectTabBar tab={tab} onChange={setTab} />
 
         {/* Tab content */}
         <div>
@@ -292,6 +262,7 @@ export default function ProjectDetailPage() {
                   />
                 </div>
               )}
+              <ProjectGoalsCard projectId={project.id} project={project} canEdit={canEdit} onChange={setView} />
               <SharePanel
                 projectId={project.id}
                 share={share}
@@ -369,9 +340,9 @@ export default function ProjectDetailPage() {
 
 function OverviewTile({ label, ready, sub }) {
   return (
-    <div className="border border-[rgba(59,130,246,0.15)] bg-[#1c2333] p-5 rounded-sm">
+    <div className="border border-[rgba(59,130,246,0.15)] bg-[var(--ff-surface)] p-5 rounded-sm">
       <div className="flex items-center justify-between mb-4">
-        <span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">{label}</span>
+        <span className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">{label}</span>
         <span
           className="font-mono text-[10px] uppercase tracking-widest"
           style={{ color: ready ? "#00FF66" : "#71717A" }}
@@ -379,7 +350,7 @@ function OverviewTile({ label, ready, sub }) {
           {ready ? "Ready" : "Pending"}
         </span>
       </div>
-      <div className="text-sm text-slate-200">{sub}</div>
+      <div className="text-sm text-[var(--ff-text)]">{sub}</div>
     </div>
   );
 }

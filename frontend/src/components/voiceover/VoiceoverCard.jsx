@@ -22,13 +22,13 @@ export default function VoiceoverCard({
       className={`border rounded-sm bg-[#0F0F10] p-4 space-y-3 ${
         isSelected ? "border-[#00FF66] shadow-[0_0_0_1px_#00FF66]" :
         isRejected ? "border-[#FF3366]/40 opacity-70" :
-        "border-zinc-800"
+        "border-[var(--ff-border)]"
       }`}
     >
       <div className="flex items-start justify-between gap-2">
         <div className="space-y-1 flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+            <span className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">
               {label}
             </span>
             <span
@@ -45,12 +45,12 @@ export default function VoiceoverCard({
             >
               {isSelected ? "Selected" : isRejected ? "Rejected" : asset.mock ? "Mock" : "Generated"}
             </span>
-            <span className="font-mono text-[10px] text-zinc-500">
+            <span className="font-mono text-[10px] text-[var(--ff-text-muted)]">
               {asset.voice_style} · {fmtSec(asset.duration)}
             </span>
           </div>
           {asset.text_excerpt && (
-            <p className="text-xs text-zinc-400 line-clamp-2 leading-relaxed">
+            <p className="text-xs text-[var(--ff-text-muted)] line-clamp-2 leading-relaxed">
               {asset.text_excerpt}
             </p>
           )}
@@ -93,7 +93,7 @@ export default function VoiceoverCard({
             data-testid={`vo-download-${asset.id}`}
             href={asset.preview_url}
             download
-            className="flex items-center gap-1 font-mono text-[10px] uppercase tracking-widest border border-zinc-700 text-zinc-300 hover:border-[#00E5FF] hover:text-[#00E5FF] px-2 py-1 rounded-sm transition-colors"
+            className="flex items-center gap-1 font-mono text-[10px] uppercase tracking-widest border border-[var(--ff-input-border)] text-[var(--ff-text)] hover:border-[#00E5FF] hover:text-[#00E5FF] px-2 py-1 rounded-sm transition-colors"
           >
             <Download size={11} strokeWidth={1.5} /> Download
           </a>
@@ -101,7 +101,7 @@ export default function VoiceoverCard({
             data-testid={`vo-delete-${asset.id}`}
             onClick={() => onDelete(asset)}
             disabled={isWorking}
-            className="flex items-center gap-1 font-mono text-[10px] uppercase tracking-widest text-zinc-500 hover:text-[#FF3366] hover:border-[#FF3366] border border-zinc-800 px-2 py-1 rounded-sm transition-colors disabled:opacity-50 ml-auto"
+            className="flex items-center gap-1 font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] hover:text-[#FF3366] hover:border-[#FF3366] border border-[var(--ff-border)] px-2 py-1 rounded-sm transition-colors disabled:opacity-50 ml-auto"
           >
             {isWorking ? <Loader2 size={11} className="animate-spin" /> : <Trash2 size={11} strokeWidth={1.5} />}
           </button>

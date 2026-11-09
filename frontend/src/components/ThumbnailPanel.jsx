@@ -169,16 +169,16 @@ export default function ThumbnailPanel({
 
   const Row = ({ label, value }) => (
     <div className="grid grid-cols-[110px_1fr] gap-3 text-sm">
-      <span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500 pt-0.5">{label}</span>
-      <span className="text-zinc-200 leading-relaxed">{value}</span>
+      <span className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] pt-0.5">{label}</span>
+      <span className="text-[var(--ff-text)] leading-relaxed">{value}</span>
     </div>
   );
 
   if (metaLoading) {
     return (
-      <div className="border border-zinc-800 border-dashed p-10 text-center rounded-sm">
+      <div className="border border-[var(--ff-border)] border-dashed p-10 text-center rounded-sm">
         <Loader2 size={18} className="animate-spin text-[#00E5FF] mx-auto mb-3" />
-        <p className="text-sm text-zinc-400">Loading thumbnail settings…</p>
+        <p className="text-sm text-[var(--ff-text-muted)]">Loading thumbnail settings…</p>
       </div>
     );
   }
@@ -189,7 +189,7 @@ export default function ThumbnailPanel({
         <p className="text-sm text-[#FF3366]">Could not load thumbnail settings: {metaError}</p>
         <button
           onClick={loadMeta}
-          className="inline-flex items-center gap-2 font-mono text-[10px] uppercase tracking-widest border border-zinc-700 hover:border-[#00E5FF] text-zinc-300 hover:text-[#00E5FF] px-3 py-2 rounded-sm transition-colors"
+          className="inline-flex items-center gap-2 font-mono text-[10px] uppercase tracking-widest border border-[var(--ff-input-border)] hover:border-[#00E5FF] text-[var(--ff-text)] hover:text-[#00E5FF] px-3 py-2 rounded-sm transition-colors"
         >
           Retry
         </button>
@@ -199,14 +199,14 @@ export default function ThumbnailPanel({
 
   if (briefs.length === 0) {
     return (
-      <div className="border border-zinc-800 border-dashed p-10 text-center rounded-sm">
+      <div className="border border-[var(--ff-border)] border-dashed p-10 text-center rounded-sm">
         {autoGeneratingConcepts ? (
           <div className="flex flex-col items-center gap-3">
             <Loader2 size={18} className="animate-spin text-[#00E5FF]" />
-            <p className="text-sm text-zinc-400">Generating thumbnail concepts from metadata…</p>
+            <p className="text-sm text-[var(--ff-text-muted)]">Generating thumbnail concepts from metadata…</p>
           </div>
         ) : (
-          <p className="text-sm text-zinc-400">No thumbnail briefs yet. Generate metadata first, then create thumbnail concepts.</p>
+          <p className="text-sm text-[var(--ff-text-muted)]">No thumbnail briefs yet. Generate metadata first, then create thumbnail concepts.</p>
         )}
       </div>
     );
@@ -215,17 +215,17 @@ export default function ThumbnailPanel({
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <div className="font-mono text-[11px] text-zinc-500">
+        <div className="font-mono text-[11px] text-[var(--ff-text-muted)]">
           {autoGeneratingConcepts ? "Generating thumbnail concepts…" : `${briefs.length} concepts · ${meta.provider === "pexels_stock" ? "Pexels + local compositor" : "Gemini Nano Banana"}`}
         </div>
         <div className="flex items-center gap-3">
           {canEdit && (
-            <label className="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer">
+            <label className="flex items-center gap-2 text-xs text-[var(--ff-text-muted)] cursor-pointer">
               <input
                 type="checkbox"
                 checked={autoSelectFirst}
                 onChange={(e) => setAutoSelectFirst(e.target.checked)}
-                className="h-3 w-3 accent-[#00E5FF] bg-[#0A0A0A] border-zinc-700 rounded"
+                className="h-3 w-3 accent-[#00E5FF] bg-[var(--ff-input-bg)] border-[var(--ff-input-border)] rounded"
               />
               Auto-select first concept
             </label>
@@ -245,13 +245,13 @@ export default function ThumbnailPanel({
             <div
               key={a.id}
               data-testid={`thumb-concept-${a.id}`}
-              className="border border-zinc-800 bg-[#121212] rounded-sm overflow-hidden flex flex-col"
+              className="border border-[var(--ff-border)] bg-[var(--ff-surface)] rounded-sm overflow-hidden flex flex-col"
             >
-              <div className="px-5 py-4 border-b border-zinc-800 bg-[#0A0A0A]">
-                <div className="font-mono text-[10px] uppercase tracking-widest text-zinc-500 mb-2">
+              <div className="px-5 py-4 border-b border-[var(--ff-border)] bg-[var(--ff-input-bg)]">
+                <div className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] mb-2">
                   Concept · {String(i + 1).padStart(2, "0")}
                 </div>
-                <div className="text-2xl font-bold tracking-tight text-white flex justify-center items-center text-center" style={{display:'flex',justifyContent:'center',alignItems:'center',textAlign:'center'}}>{b?.thumbnail_title_text || "Untitled concept"}</div>
+                <div className="text-2xl font-bold tracking-tight text-[var(--ff-text)] flex justify-center items-center text-center" style={{display:'flex',justifyContent:'center',alignItems:'center',textAlign:'center'}}>{b?.thumbnail_title_text || "Untitled concept"}</div>
               </div>
 
               <div className="p-5 space-y-3">
@@ -264,8 +264,8 @@ export default function ThumbnailPanel({
 
               {/* Generated variants */}
               {gens.length > 0 && (
-                <div className="border-t border-zinc-800 p-4 space-y-3">
-                  <div className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+                <div className="border-t border-[var(--ff-border)] p-4 space-y-3">
+                  <div className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">
                     {gens.length} generated image{gens.length > 1 ? "s" : ""}
                   </div>
                   <div className="grid grid-cols-2 gap-2">
@@ -282,10 +282,10 @@ export default function ThumbnailPanel({
                               ? "border-[#00FF66] shadow-[0_0_0_1px_#00FF66]"
                               : isRejected
                               ? "border-[#FF3366]/40 opacity-50"
-                              : "border-zinc-800"
+                              : "border-[var(--ff-border)]"
                           }`}
                         >
-                          <div className="aspect-video bg-[#0f141f] relative">
+                          <div className="aspect-video bg-[var(--ff-bg)] relative">
                             {g.preview_url ? (
                               <img
                                 src={g.preview_url}
@@ -299,12 +299,12 @@ export default function ThumbnailPanel({
                               />
                             ) : null}
                             {!g.preview_url && (
-                              <div className="w-full h-full flex flex-col items-center justify-center gap-2 bg-zinc-900">
+                              <div className="w-full h-full flex flex-col items-center justify-center gap-2 bg-[var(--ff-bg)]">
                                 <Loader2 size={16} className="animate-spin text-[#00E5FF]" />
-                                <span className="font-mono text-[9px] text-zinc-500">Generating 512×288…</span>
+                                <span className="font-mono text-[9px] text-[var(--ff-text-muted)]">Generating 512×288…</span>
                               </div>
                             )}
-                            <div className="hidden w-full h-full absolute inset-0 flex flex-col items-center justify-center gap-2 bg-zinc-900">
+                            <div className="hidden w-full h-full absolute inset-0 flex flex-col items-center justify-center gap-2 bg-[var(--ff-bg)]">
                               <span className="font-mono text-[10px] text-[#FF3366]">Failed</span>
                               <button onClick={() => generate(a.id, 1)} className="font-mono text-[9px] border border-[#FF3366] text-[#FF3366] px-2 py-1 rounded-sm">Retry</button>
                             </div>
@@ -351,14 +351,14 @@ export default function ThumbnailPanel({
                                 href={g.preview_url}
                                 target="_blank"
                                 rel="noreferrer"
-                                className="flex items-center gap-1 font-mono text-[9px] uppercase tracking-widest border border-zinc-600 text-zinc-200 hover:border-[#00E5FF] hover:text-[#00E5FF] px-2 py-1 rounded-sm"
+                                className="flex items-center gap-1 font-mono text-[9px] uppercase tracking-widest border border-zinc-600 text-[var(--ff-text)] hover:border-[#00E5FF] hover:text-[#00E5FF] px-2 py-1 rounded-sm"
                               >
                                 <ExternalLink size={10} strokeWidth={1.8} /> Open
                               </a>
                               <button
                                 data-testid={`thumb-copy-prompt-${g.id}`}
                                 onClick={() => copyPrompt(g.prompt)}
-                                className="flex items-center gap-1 font-mono text-[9px] uppercase tracking-widest border border-zinc-600 text-zinc-200 hover:border-[#00E5FF] hover:text-[#00E5FF] px-2 py-1 rounded-sm"
+                                className="flex items-center gap-1 font-mono text-[9px] uppercase tracking-widest border border-zinc-600 text-[var(--ff-text)] hover:border-[#00E5FF] hover:text-[#00E5FF] px-2 py-1 rounded-sm"
                               >
                                 <Copy size={10} strokeWidth={1.5} /> Prompt
                               </button>
@@ -366,7 +366,7 @@ export default function ThumbnailPanel({
                                 data-testid={`thumb-delete-${g.id}`}
                                 onClick={() => remove(g.id)}
                                 disabled={isWorking}
-                                className="flex items-center gap-1 font-mono text-[9px] uppercase tracking-widest border border-zinc-600 text-zinc-400 hover:border-[#FF3366] hover:text-[#FF3366] px-2 py-1 rounded-sm disabled:opacity-50"
+                                className="flex items-center gap-1 font-mono text-[9px] uppercase tracking-widest border border-zinc-600 text-[var(--ff-text-muted)] hover:border-[#FF3366] hover:text-[#FF3366] px-2 py-1 rounded-sm disabled:opacity-50"
                               >
                                 Delete
                               </button>
@@ -380,7 +380,7 @@ export default function ThumbnailPanel({
               )}
 
               {canEdit && (
-                <div className="border-t border-zinc-800 px-4 py-3 flex items-center gap-2">
+                <div className="border-t border-[var(--ff-border)] px-4 py-3 flex items-center gap-2">
                   <button
                     data-testid={`generate-image-btn-${a.id}`}
                     onClick={() => generate(a.id, 1)}
@@ -403,8 +403,8 @@ export default function ThumbnailPanel({
               )}
 
               {/* Brief image-prompt display */}
-              <div className="border-t border-zinc-800 px-5 py-3">
-                <div className="font-mono text-[10px] uppercase tracking-widest text-zinc-500 mb-1">Base image prompt</div>
+              <div className="border-t border-[var(--ff-border)] px-5 py-3">
+                <div className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] mb-1">Base image prompt</div>
                 <div className="font-mono text-xs text-[#7B61FF] leading-relaxed line-clamp-2">{b?.image_prompt || "No prompt available"}</div>
               </div>
             </div>

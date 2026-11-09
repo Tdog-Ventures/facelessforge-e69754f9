@@ -3,13 +3,13 @@ import { Link } from "react-router-dom";
 
 export default function LicensePage() {
   return (
-    <div className="min-h-screen bg-[#0f141f] text-slate-100">
-      <header className="flex items-center justify-between px-8 py-5 border-b border-[rgba(59,130,246,0.15)] bg-[#0f141f]/80 backdrop-blur">
+    <div className="min-h-screen bg-[var(--ff-bg)] text-[var(--ff-text)]">
+      <header className="flex items-center justify-between px-8 py-5 border-b border-[rgba(59,130,246,0.15)] bg-[var(--ff-bg)]/80 backdrop-blur">
         <Link to="/" className="flex items-center gap-3">
           <div className="w-8 h-8 flex items-center justify-center bg-blue-600 text-white font-black font-mono text-lg rounded-md">F</div>
           <span className="font-semibold tracking-tight">FacelessForge</span>
         </Link>
-        <Link to="/app" className="text-sm text-slate-400 hover:text-white">Open App</Link>
+        <Link to="/app" className="text-sm text-[var(--ff-text-muted)] hover:text-[var(--ff-text)]">Open App</Link>
       </header>
       <main className="max-w-3xl mx-auto px-8 py-12 space-y-8">
         <div className="font-mono text-[11px] tracking-[0.2em] text-blue-400 uppercase">License & Attribution · 2026-09-09</div>
@@ -49,7 +49,7 @@ export default function LicensePage() {
 
         <section className="space-y-3">
           <h2 className="text-lg font-semibold">4. Data retention & app license</h2>
-          <ul className="list-disc list-inside text-sm text-slate-300 space-y-1">
+          <ul className="list-disc list-inside text-sm text-[var(--ff-text)] space-y-1">
             <li>Your prompts/scripts/renders are yours. App code, `hero-glitch.mp4`, `fallback-thumb.png` are © ETHINX/FacelessForge.</li>
             <li>Renders local `_work_*` cleaned after mux; final MP4 kept in R2 until delete or `RENDER_RETENTION_INTERVAL_SECONDS=21600` (6h) sweep.</li>
             <li>See <Link to="/privacy" className="text-blue-400 hover:underline">/privacy</Link> for 30d mongo/30d env/7d redis backup retention at `/var/backups/facelessforge` + `03:00` cron `facelessforge-backup.sh`.</li>
@@ -60,7 +60,7 @@ export default function LicensePage() {
         <div className="pt-6 border-t border-[rgba(59,130,246,0.15)] flex gap-4 text-xs font-mono">
           <Link to="/privacy" className="text-blue-400 hover:underline">Privacy</Link>
           <Link to="/terms" className="text-blue-400 hover:underline">Terms</Link>
-          <Link to="/" className="text-slate-500 hover:text-white">← Home</Link>
+          <Link to="/" className="text-[var(--ff-text-muted)] hover:text-[var(--ff-text)]">← Home</Link>
         </div>
       </main>
     </div>

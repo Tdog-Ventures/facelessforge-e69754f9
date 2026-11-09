@@ -193,13 +193,23 @@ async def _llm_json(system: str, user: str, cache_key: str = "") -> Optional[dic
         pass
     last_error: str = ""
 
-    # 1. Local Ollama (PRIMARY) — 2 attempts, 600s timeout per attempt
-    ollama_model = os.environ.get("OLLAMA_MODEL", "llama3:latest").strip() or "llama3:latest"
-    ollama_timeout = float(os.environ.get("OLLAMA_TIMEOUT_SECONDS", "600") or 600)
+    # 1. Local Ollama only when a model is configured. A blank OLLAMA_MODEL
+    # must not spend two 600s attempts on llama3 before the cloud fallbacks,
+    # and a bad timeout value must not block the cloud providers either.
+    ollama_model = os.environ.get("OLLAMA_MODEL", "").strip()
+    ollama_read = 60.0
+    ollama_timeout = httpx.Timeout(connect=5.0, read=ollama_read, write=30.0, pool=5.0)
     ollama_url = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate").strip() or "http://localhost:11434/api/generate"
-    # Support both /api/generate and /api/chat style URLs
     use_chat = ollama_url.rstrip("/").endswith("/chat")
-    for attempt in range(2):
+    if not ollama_model:
+        logger.info("Ollama skipped for %s; OLLAMA_MODEL is not set", cache_key)
+    else:
+        try:
+            ollama_read = min(90.0, float(os.environ.get("OLLAMA_TIMEOUT_SECONDS", "60") or 60))
+        except (TypeError, ValueError):
+            ollama_read = 60.0
+        ollama_timeout = httpx.Timeout(connect=5.0, read=ollama_read, write=30.0, pool=5.0)
+    for attempt in range(2 if ollama_model else 0):
         try:
             logger.info("Ollama (%s) request for %s attempt %d", ollama_model, cache_key, attempt + 1)
             async with httpx.AsyncClient(timeout=ollama_timeout) as client:
@@ -250,7 +260,7 @@ async def _llm_json(system: str, user: str, cache_key: str = "") -> Optional[dic
                         logger.warning("Ollama non-200 %s %s - %s", resp.status_code, resp.reason_phrase, resp.text[:500])
                         last_error = f"Ollama HTTP {resp.status_code}"
         except httpx.TimeoutException as e:
-            last_error = f"Ollama timeout ({ollama_timeout}s)"
+            last_error = f"Ollama timeout (connect 5s, read {ollama_read}s)"
             logger.warning("Ollama (%s) timeout for %s attempt %d: %s", ollama_model, cache_key, attempt + 1, e)
         except Exception as e:
             last_error = f"Ollama {type(e).__name__}: {e}"
@@ -717,20 +727,25 @@ def _split_script_exact(full_script: str, scene_count: int) -> list[str]:
     return chunks
 
 
-async def generate_scene_plan(project: dict, script: dict) -> list[dict]:
-    target_dur = int(project.get("target_duration", 300))
-    timing = TimingContract.from_project(project)
-    narration_dur = timing.narration_seconds
-    # The model decides semantics only. Code owns all frame timestamps.
-    scene_duration = 30
-    scene_count = max(1, math.ceil(narration_dur / scene_duration))
-    full_script = script.get("full_script", "")
-    if not isinstance(full_script, str):
-        full_script = ""
-    exact_chunks = _split_script_exact(full_script, scene_count)
-
-    user = f"""Break this script into {scene_count} semantic scenes for a {narration_dur}s narration inside a {target_dur}s faceless YouTube video.
+def _scene_visual_prompt(
+    exact_chunks: list[str],
+    *,
+    narration_dur: float,
+    target_dur: int,
+    scene_duration: int,
+    topic: str,
+    niche: str,
+) -> str:
+    """Ask for visuals per scene. Each scene's own narration is the source, not a prefix of the script."""
+    scene_count = len(exact_chunks)
+    blocks = []
+    for index, chunk in enumerate(exact_chunks, start=1):
+        visible = chunk if len(chunk) <= 1500 else chunk[:1500].rsplit(" ", 1)[0]
+        blocks.append(f"Scene {index} narration:\n{visible}")
+    narrations = "\n\n".join(blocks)
+    return f"""Break this script into {scene_count} semantic scenes for a {narration_dur}s narration inside a {target_dur}s faceless YouTube video.
 Do not calculate timestamps. The application assigns an exact frame budget after generation.
+Plan visual_direction and search_terms from that scene's narration only.
 Return strict JSON with this exact shape:
 {{"scenes": [
   {{
@@ -748,11 +763,35 @@ Return strict JSON with this exact shape:
 The visual_direction and search_terms MUST be specific to the topic, not generic business footage.
 You MUST generate exactly {scene_count} scenes - no more, no less.
 
-Do not include BEAT markers, section headers, or structural labels (such as "BEAT 1", "INTRO:", "HOOK:", "SCENE 1:", etc.) in narration_text or caption_text. Text must read as continuous voiceover.
+Do not include BEAT markers, section headers, or structural labels in narration_text or caption_text.
 
-Script: {full_script[:3000]}
-Topic: {project.get('topic', project.get('title', ''))}
-Niche: {project.get('niche', 'business')}"""
+Topic: {topic}
+Niche: {niche}
+
+{narrations}
+"""
+
+
+async def generate_scene_plan(project: dict, script: dict) -> list[dict]:
+    target_dur = int(project.get("target_duration", 300))
+    timing = TimingContract.from_project(project)
+    narration_dur = timing.narration_seconds
+    # The model decides semantics only. Code owns all frame timestamps.
+    scene_duration = 30
+    scene_count = max(1, math.ceil(narration_dur / scene_duration))
+    full_script = script.get("full_script", "")
+    if not isinstance(full_script, str):
+        full_script = ""
+    exact_chunks = _split_script_exact(full_script, scene_count)
+
+    user = _scene_visual_prompt(
+        exact_chunks,
+        narration_dur=narration_dur,
+        target_dur=target_dur,
+        scene_duration=scene_duration,
+        topic=project.get("topic", project.get("title", "")),
+        niche=project.get("niche", "business"),
+    )
 
     result = await _llm_json(SCENE_SYSTEM, user, f"scenes-{project.get('id', uuid.uuid4())}")
     if result and isinstance(result.get("scenes"), list):
@@ -952,10 +991,23 @@ def _coerce_thumbnail_concepts(concepts: list) -> list[dict]:
     return out
 
 
-async def generate_thumbnail_concepts(project: dict, script: dict) -> list[dict]:
+def _thumbnail_title(script: dict, metadata: dict = None) -> str:
+    """The video title, not the spoken hook. A hook can disagree with the title."""
+    if isinstance(metadata, dict) and str(metadata.get("selected_title") or "").strip():
+        return str(metadata.get("selected_title")).strip()
+    if isinstance(script, dict) and str(script.get("selected_title") or "").strip():
+        return str(script.get("selected_title")).strip()
+    return ""
+
+
+async def generate_thumbnail_concepts(project: dict, script: dict, metadata: dict = None) -> list[dict]:
     topic = project.get("topic", project.get("title", "business story"))
     niche = project.get("niche", "business")
 
+    selected_title = _thumbnail_title(script, metadata)
+    excerpt = ""
+    if isinstance(script, dict):
+        excerpt = " ".join(str(script.get("full_script") or "").split())[:800]
     user = f"""Generate 3 YouTube thumbnail concepts as JSON:
 {{"concepts": [
   {{
@@ -966,12 +1018,17 @@ async def generate_thumbnail_concepts(project: dict, script: dict) -> list[dict]
     "subject_focal_point": "the single dominant subject",
     "colour_direction": "primary and accent colors",
     "click_trigger": "why a viewer would click",
-    "image_prompt": "detailed image-generation prompt, no text baked in, 16:9"
+    "image_prompt": "detailed image-generation prompt, 16:9, no text, no letters, no captions"
   }}
 ]}}
 
+The thumbnail_title_text is metadata for the concept card. Do not bake words, letters, or captions into the image.
+image_prompt must describe a picture with no text.
+
 Topic: {topic}
-Niche: {niche}"""
+Niche: {niche}
+Selected title: {selected_title or topic}
+Script excerpt: {excerpt or topic}"""
 
     result = await _llm_json(THUMB_SYSTEM, user, f"thumb-{project.get('id', uuid.uuid4())}")
     if result and isinstance(result.get("concepts"), list):
@@ -993,8 +1050,8 @@ Niche: {niche}"""
             "click_trigger": "Contradiction — implies common belief is wrong",
             "image_prompt": (
                 f"YouTube thumbnail, 16:9, ultra-sharp, high contrast, dark textured background, "
-                f"large bold yellow headline text, green accent graphic related to {short_topic}, "
-                "cinematic lighting, no baked text"
+                f"green accent graphic related to {short_topic}, "
+                "cinematic lighting, no text, no letters, no captions"
             ),
         },
         {
@@ -1007,7 +1064,7 @@ Niche: {niche}"""
             "click_trigger": "Transformation and revelation",
             "image_prompt": (
                 f"YouTube thumbnail, 16:9, dramatic split-screen composition, dark red and black, "
-                f"contrasting visuals representing {short_topic}, cinematic lighting, no baked text"
+                f"contrasting visuals representing {short_topic}, cinematic lighting, no text, no letters, no captions"
             ),
         },
         {
@@ -1020,15 +1077,15 @@ Niche: {niche}"""
             "click_trigger": "Hidden story promise",
             "image_prompt": (
                 "YouTube thumbnail, 16:9, documentary style, dark teal background, gold accents, "
-                "mysterious central subject, film grain, cinematic lighting, no baked text"
+                "mysterious central subject, film grain, cinematic lighting, no text, no letters, no captions"
             ),
         },
     ]
 
 # Alias for backwards compat - routes.py expects generate_thumbnails
-async def generate_thumbnails(project: dict, script: dict = None):
+async def generate_thumbnails(project: dict, script: dict = None, metadata: dict = None):
     if script is None:
         script = project.get("full_script", {}) if isinstance(project, dict) else {}
         if isinstance(script, str):
             script = {"full_script": script}
-    return await generate_thumbnail_concepts(project, script)
+    return await generate_thumbnail_concepts(project, script, metadata)

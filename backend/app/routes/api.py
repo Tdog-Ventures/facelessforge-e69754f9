@@ -48,6 +48,7 @@ from ..asset_dedupe import filter_distinct_titles
 from ..asset_relevance import relevant_candidates
 from ..scene_terms import compact_stock_query
 from .. import asset_commit, project_lease
+from ..content_revision import revisions_match
 
 
 router = APIRouter(prefix="/api")
@@ -712,28 +713,30 @@ async def generate_script_endpoint(project_id: str, user=Depends(get_current_use
     db = get_db()
     project = await db.projects.find_one({"id": project_id}, {"_id": 0})
     _ensure_project_access(project, user, write=True)
+    expected_revision = int(project.get("content_revision") or 0)
     data = await gen.generate_script(project)
     existing_script = await db.scripts.find_one({"project_id": project_id}, {"_id": 0})
     old_text = " ".join(str((existing_script or {}).get("full_script") or "").split())
     new_text = " ".join(str((data or {}).get("full_script") or "").split())
     invalidated: dict = {}
     doc = {
-        "id": str(uuid.uuid4()),
+        "id": (existing_script or {}).get("id") or str(uuid.uuid4()),
         "project_id": project_id,
         **data,
         "source": "ai_generated",
-        "created_at": _now(),
+        "created_at": (existing_script or {}).get("created_at") or _now(),
         "updated_at": _now(),
     }
-    # Write the replacement before deleting drafts. If the write fails, the
-    # previous scenes and voiceover stay with the previous script.
-    await db.scripts.replace_one({"project_id": project_id}, doc, upsert=True)
     if existing_script and old_text != new_text:
-        try:
-            invalidated = await _invalidate_script_derivatives(db, project, project_id)
-        except Exception:
-            await db.scripts.replace_one({"project_id": project_id}, dict(existing_script), upsert=True)
-            raise
+        invalidated = await _publish_script_change(
+            db, project, project_id, document=doc, expected_revision=expected_revision,
+        )
+    else:
+        if existing_script and "content_revision" in existing_script:
+            doc["content_revision"] = int(existing_script.get("content_revision") or 0)
+        else:
+            doc["content_revision"] = expected_revision
+        await _replace_script_if_current(db, project_id, doc, expected_revision=expected_revision)
     await _log_cost(db, project_id, "script", tokens=max(500, (data.get("word_count", 0) or 0) * 2), cost=0.08)
     await db.projects.update_one({"id": project_id}, {"$set": {"estimated_cost": float(project.get("estimated_cost", 0)) + 0.08, "updated_at": _now()}})
     view = await _attach_project_view(db, await db.projects.find_one({"id": project_id}, {"_id": 0}))
@@ -750,6 +753,9 @@ async def generate_scenes_endpoint(project_id: str, request: Request, user=Depen
     script = await db.scripts.find_one({"project_id": project_id}, {"_id": 0})
     if not script:
         raise HTTPException(status_code=400, detail="Generate a script before scenes")
+    if not revisions_match(project, script):
+        raise HTTPException(status_code=409, detail="Script and derived scenes are not one revision. Retry after the script change finishes.")
+    expected_revision = int(script.get("content_revision") if "content_revision" in script else project.get("content_revision") or 0)
     # preserveSceneCount is accepted and ignored. Scene count follows the
     # selected narration budget; telling the client the old count was kept was a lie.
     try:
@@ -770,11 +776,10 @@ async def generate_scenes_endpoint(project_id: str, request: Request, user=Depen
     for sc in scenes:
         sc["id"] = str(uuid.uuid4())
         sc["project_id"] = project_id
+        sc["content_revision"] = expected_revision
         sc["created_at"] = _now()
         sc["updated_at"] = _now()
-    await db.scenes.delete_many({"project_id": project_id})
-    if scenes:
-        await db.scenes.insert_many([dict(sc) for sc in scenes])
+    await _commit_scene_plan(db, project_id, scenes, expected_revision)
     await _log_cost(db, project_id, "scenes", tokens=len(scenes) * 200, cost=0.06)
     await db.projects.update_one({"id": project_id}, {"$set": {"estimated_cost": float(project.get("estimated_cost", 0)) + 0.06, "updated_at": _now()}})
     return await _attach_project_view(db, await db.projects.find_one({"id": project_id}, {"_id": 0}))
@@ -913,7 +918,7 @@ async def generate_metadata_endpoint(project_id: str, user=Depends(get_current_u
 
     # Auto-create thumbnail briefs
     try:
-        concepts = await gen.generate_thumbnail_concepts(project, script)
+        concepts = await gen.generate_thumbnail_concepts(project, script, data)
         await db.assets.delete_many({"project_id": project_id, "asset_type": "thumbnail_concept"})
         for concept in concepts:
             await db.assets.insert_one({
@@ -937,7 +942,8 @@ async def generate_thumbnails_endpoint(project_id: str, user=Depends(get_current
     project = await db.projects.find_one({"id": project_id}, {"_id": 0})
     _ensure_project_access(project, user, write=True)
     script = await db.scripts.find_one({"project_id": project_id}, {"_id": 0}) or {}
-    concepts = await gen.generate_thumbnail_concepts(project, script)
+    metadata = await db.metadata_packages.find_one({"project_id": project_id}, {"_id": 0})
+    concepts = await gen.generate_thumbnail_concepts(project, script, metadata)
     # Upsert as assets (type=thumbnail_concept)
     await db.assets.delete_many({"project_id": project_id, "asset_type": "thumbnail_concept"})
     for i, c in enumerate(concepts, start=1):
@@ -1069,80 +1075,284 @@ async def update_script(project_id: str, body: ScriptUpdate, user=Depends(get_cu
             patch.setdefault("selected_hook", "")
             patch.setdefault("cta_block", "")
             patch.setdefault("retention_beats", [])
-    await db.scripts.update_one(
-        {"project_id": project_id},
-        {"$set": patch, "$setOnInsert": {"id": str(uuid.uuid4()), "project_id": project_id, "created_at": _now()}},
-        upsert=True,
-    )
+    if "full_script" not in patch:
+        previous_script = await db.scripts.find_one({"project_id": project_id}, {"_id": 0})
+    expected_revision = int(project.get("content_revision") or 0)
     if script_changed:
-        try:
-            invalidated = await _invalidate_script_derivatives(db, project, project_id)
-        except Exception:
-            if previous_script:
-                await db.scripts.replace_one({"project_id": project_id}, dict(previous_script), upsert=True)
-            raise
+        invalidated = await _publish_script_change(
+            db, project, project_id, patch=patch, expected_revision=expected_revision,
+        )
+    elif previous_script is not None and not revisions_match(project, previous_script):
+        await _finish_open_revision(db, project, project_id)
+        await db.scripts.update_one(
+            {"project_id": project_id},
+            {"$set": patch},
+        )
+    else:
+        await db.scripts.update_one(
+            {"project_id": project_id},
+            {"$set": patch, "$setOnInsert": {"id": str(uuid.uuid4()), "project_id": project_id, "created_at": _now()}},
+            upsert=True,
+        )
     view = await _attach_project_view(db, project)
     return _script_invalidation_view(view, invalidated)
 
 
-async def _invalidate_script_derivatives(db, project: dict, project_id: str) -> dict:
-    """Drop drafts that quote an older script. Completed render jobs stay.
+async def _content_leases(db, project_id: str):
+    """Hold render and asset leases for the whole script publish.
 
-    Holds the asset lease so an in-flight stock attachment cannot be deleted
-    after it has been charged. Client uploads are unassigned instead of deleted
-    so they can be attached to the new scenes. Generated thumbnails are removed
-    because their picture was composed for the old script.
+    Render submission and stock attachment take these same leases, so they
+    cannot read a new script beside old scenes.
     """
-    from .. import project_lease
-    from .. import render as render_service
-
-    active_render = await db.render_jobs.find_one(
-        {"project_id": project_id, "status": {"$in": list(render_service.ACTIVE_RENDER_STATUS_VALUES)}},
-        {"_id": 0, "id": 1},
+    render_lease = await project_lease.acquire(
+        db, project_id, project_lease.RENDER_LEASE, ttl_seconds=project_lease.RENDER_LEASE_TTL_SECONDS,
     )
-    if active_render:
-        raise HTTPException(status_code=409, detail="A render is in progress; the script change was not kept.")
-    lease = await project_lease.acquire(
+    if render_lease is None:
+        raise HTTPException(status_code=409, detail="A render is being submitted; retry the script change.")
+    asset_lease = await project_lease.acquire(
         db, project_id, project_lease.ASSET_LEASE, ttl_seconds=project_lease.ASSET_LEASE_TTL_SECONDS,
     )
-    if lease is None:
+    if asset_lease is None:
+        await project_lease.release(db, render_lease)
         raise HTTPException(
             status_code=409,
             detail="Assets are being attached; retry the script change before replacing dependent drafts.",
         )
+    return render_lease, asset_lease
+
+
+async def _clear_script_derivatives(db, project: dict, project_id: str) -> dict:
+    """Unassign client uploads and delete generated drafts. Caller holds the leases."""
+    client_types = sorted(CLIENT_VISUAL_TYPES | {"brand_logo"})
+    await db.assets.update_many(
+        {"project_id": project_id, "asset_type": {"$in": client_types}},
+        {"$set": {"scene_id": None, "updated_at": _now()}},
+    )
+    scenes_res = await db.scenes.delete_many({"project_id": project_id})
+    meta_res = await db.metadata_packages.delete_many({"project_id": project_id})
+    assets_res = await db.assets.delete_many({
+        "project_id": project_id,
+        "asset_type": {"$in": [
+            "stock_video", "stock_image", "thumbnail_concept",
+            "voiceover_audio", "generated_thumbnail",
+        ]},
+    })
+    return {
+        "scenes": getattr(scenes_res, "deleted_count", 0),
+        "metadata": getattr(meta_res, "deleted_count", 0),
+        "assets": getattr(assets_res, "deleted_count", 0),
+    }
+
+
+_STALE_SCRIPT = "The script changed while this was being prepared. The newer script was kept."
+
+
+def _seen_revision(doc: Optional[dict]) -> int:
+    return int((doc or {}).get("content_revision") or 0)
+
+
+def _script_revision(script: Optional[dict], fallback: int) -> int:
+    if script and "content_revision" in script:
+        return int(script.get("content_revision") or 0)
+    return fallback
+
+
+def _lease_guard(render_lease, asset_lease) -> dict:
+    return {**render_lease.guard(), **asset_lease.guard()}
+
+
+async def _replace_script_if_current(db, project_id: str, document: dict, *, expected_revision: int) -> None:
+    """Write a script that does not change narration, without dropping its revision.
+
+    Refuses when the published revision moved. A newer edit is left in place.
+    """
+    render_lease, asset_lease = await _content_leases(db, project_id)
     try:
-        client_types = sorted(CLIENT_VISUAL_TYPES | {"brand_logo"})
-        await db.assets.update_many(
-            {"project_id": project_id, "asset_type": {"$in": client_types}},
-            {"$set": {"scene_id": None, "updated_at": _now()}},
-        )
-        scenes_res = await db.scenes.delete_many({"project_id": project_id})
-        meta_res = await db.metadata_packages.delete_many({"project_id": project_id})
-        assets_res = await db.assets.delete_many({
-            "project_id": project_id,
-            "asset_type": {"$in": [
-                "stock_video", "stock_image", "thumbnail_concept",
-                "voiceover_audio", "generated_thumbnail",
-            ]},
-        })
-        await db.projects.update_one(
-            {"id": project_id},
-            {"$set": {
-                "selected_voiceover_asset_id": None,
-                "selected_thumbnail_asset_id": None,
-                "updated_at": _now(),
-            }, "$unset": {"voice_fit": ""}},
-        )
-        project["selected_voiceover_asset_id"] = None
-        project["selected_thumbnail_asset_id"] = None
-        project.pop("voice_fit", None)
-        return {
-            "scenes": getattr(scenes_res, "deleted_count", 0),
-            "metadata": getattr(meta_res, "deleted_count", 0),
-            "assets": getattr(assets_res, "deleted_count", 0),
-        }
+        async def mutate(fenced):
+            fresh = await fenced.projects.find_one({"id": project_id}, {"_id": 0})
+            script = await fenced.scripts.find_one({"project_id": project_id}, {"_id": 0})
+            if fresh is None or _seen_revision(fresh) != int(expected_revision):
+                raise HTTPException(status_code=409, detail=_STALE_SCRIPT)
+            if script and "content_revision" in script and _script_revision(script, expected_revision) != int(expected_revision):
+                raise HTTPException(status_code=409, detail=_STALE_SCRIPT)
+            stored = dict(document)
+            stored["content_revision"] = _script_revision(script, expected_revision)
+            await fenced.scripts.replace_one({"project_id": project_id}, stored, upsert=True)
+
+        await asset_commit.run(db, asset_lease, mutate)
     finally:
-        await project_lease.release(db, lease)
+        await project_lease.release(db, asset_lease)
+        await project_lease.release(db, render_lease)
+
+
+async def _commit_scene_plan(db, project_id: str, scenes: list, expected_revision: int) -> None:
+    """Store a scene plan only while it still belongs to the script it was built from."""
+    render_lease, asset_lease = await _content_leases(db, project_id)
+    try:
+        async def mutate(fenced):
+            fresh = await fenced.projects.find_one({"id": project_id}, {"_id": 0})
+            script = await fenced.scripts.find_one({"project_id": project_id}, {"_id": 0})
+            if fresh is None or _seen_revision(fresh) != int(expected_revision) or not revisions_match(fresh, script):
+                raise HTTPException(
+                    status_code=409,
+                    detail="The script changed while scenes were being planned. The newer script was kept.",
+                )
+            if _script_revision(script, expected_revision) != int(expected_revision):
+                raise HTTPException(
+                    status_code=409,
+                    detail="The script changed while scenes were being planned. The newer script was kept.",
+                )
+            await fenced.scenes.delete_many({"project_id": project_id})
+            if scenes:
+                await fenced.scenes.insert_many([dict(scene) for scene in scenes])
+            owned = await fenced.projects.update_one(
+                {"id": project_id, **_lease_guard(render_lease, asset_lease)},
+                {"$set": {"scene_plan_revision": int(expected_revision), "updated_at": _now()}},
+            )
+            if getattr(owned, "matched_count", 0) != 1:
+                raise HTTPException(status_code=409, detail="Scene planning lost its lease. Generate scenes again.")
+
+        await asset_commit.run(db, asset_lease, mutate)
+    finally:
+        await project_lease.release(db, asset_lease)
+        await project_lease.release(db, render_lease)
+
+
+async def _finish_open_revision(db, project: dict, project_id: str) -> None:
+    """Close a publish that stored the script and then stopped.
+
+    The script document already on disk stays. If the only problem is a missing
+    revision stamp, that stamp is restored and drafts are kept. A real interrupted
+    publish clears derived drafts, then the project revision catches up.
+    """
+    render_lease, asset_lease = await _content_leases(db, project_id)
+    try:
+        async def mutate(fenced):
+            fresh = await fenced.projects.find_one({"id": project_id}, {"_id": 0}) or {}
+            script = await fenced.scripts.find_one({"project_id": project_id}, {"_id": 0})
+            if revisions_match(fresh, script):
+                return
+            project_rev = _seen_revision(fresh)
+            derivatives = fresh.get("derivatives_revision")
+            derivatives_match = derivatives is None or int(derivatives) == project_rev
+            if script and "content_revision" not in script and fresh.get("content_consistent") is not False and derivatives_match:
+                await fenced.scripts.update_one(
+                    {"project_id": project_id},
+                    {"$set": {"content_revision": project_rev}},
+                )
+                project["content_revision"] = project_rev
+                project["content_consistent"] = True
+                return
+            if script and "content_revision" in script:
+                revision = int(script.get("content_revision") or 0)
+            else:
+                revision = project_rev
+                if script is not None:
+                    await fenced.scripts.update_one(
+                        {"project_id": project_id},
+                        {"$set": {"content_revision": revision}},
+                    )
+            await _clear_script_derivatives(fenced, project, project_id)
+            owned = await fenced.projects.update_one(
+                {"id": project_id, **_lease_guard(render_lease, asset_lease)},
+                {"$set": {
+                    "content_revision": revision,
+                    "derivatives_revision": revision,
+                    "content_consistent": True,
+                    "selected_voiceover_asset_id": None,
+                    "selected_thumbnail_asset_id": None,
+                    "updated_at": _now(),
+                }, "$unset": {"voice_fit": ""}},
+            )
+            if getattr(owned, "matched_count", 0) != 1:
+                raise HTTPException(status_code=409, detail="Script recovery lost its lease. Save the script again.")
+            project["content_revision"] = revision
+            project["derivatives_revision"] = revision
+            project["content_consistent"] = True
+            project["selected_voiceover_asset_id"] = None
+            project["selected_thumbnail_asset_id"] = None
+            project.pop("voice_fit", None)
+
+        await asset_commit.run(db, asset_lease, mutate)
+    finally:
+        await project_lease.release(db, asset_lease)
+        await project_lease.release(db, render_lease)
+
+
+async def _publish_script_change(
+    db, project: dict, project_id: str, *, document: dict = None, patch: dict = None, expected_revision: int,
+) -> dict:
+    """Store a new script and drop old drafts before either is visible together.
+
+    The caller passes the revision it read before any slow work. Under the
+    asset-commit barrier that revision is compared again. A newer script is
+    kept and this result is refused. Lease expiry cannot let another publisher
+    in until the barrier is released, and every project write also requires
+    the lease tokens captured for this attempt.
+    """
+    from .. import render as render_service
+
+    render_lease, asset_lease = await _content_leases(db, project_id)
+    try:
+        active_render = await db.render_jobs.find_one(
+            {"project_id": project_id, "status": {"$in": list(render_service.ACTIVE_RENDER_STATUS_VALUES)}},
+            {"_id": 0, "id": 1},
+        )
+        if active_render:
+            raise HTTPException(status_code=409, detail="A render is in progress; the script change was not kept.")
+
+        async def mutate(fenced):
+            fresh = await fenced.projects.find_one({"id": project_id}, {"_id": 0})
+            script = await fenced.scripts.find_one({"project_id": project_id}, {"_id": 0})
+            if fresh is None or _seen_revision(fresh) != int(expected_revision):
+                raise HTTPException(status_code=409, detail=_STALE_SCRIPT)
+            if script and "content_revision" in script and _script_revision(script, expected_revision) != int(expected_revision):
+                raise HTTPException(status_code=409, detail=_STALE_SCRIPT)
+            new_rev = int(expected_revision) + 1
+            if document is not None:
+                stored = dict(document)
+                stored["content_revision"] = new_rev
+                await fenced.scripts.replace_one({"project_id": project_id}, stored, upsert=True)
+            else:
+                stored_patch = dict(patch or {})
+                stored_patch["content_revision"] = new_rev
+                await fenced.scripts.update_one(
+                    {"project_id": project_id},
+                    {"$set": stored_patch, "$setOnInsert": {"id": str(uuid.uuid4()), "project_id": project_id, "created_at": _now()}},
+                    upsert=True,
+                )
+            owned = await fenced.projects.update_one(
+                {"id": project_id, **_lease_guard(render_lease, asset_lease)},
+                {"$set": {"content_consistent": False, "updated_at": _now()}},
+            )
+            if getattr(owned, "matched_count", 0) != 1:
+                raise HTTPException(status_code=409, detail="Script publish lost its lease. Save the script again to finish.")
+            invalidated = await _clear_script_derivatives(fenced, project, project_id)
+            published = await fenced.projects.update_one(
+                {"id": project_id, **_lease_guard(render_lease, asset_lease)},
+                {"$set": {
+                    "content_revision": new_rev,
+                    "derivatives_revision": new_rev,
+                    "content_consistent": True,
+                    "selected_voiceover_asset_id": None,
+                    "selected_thumbnail_asset_id": None,
+                    "updated_at": _now(),
+                }, "$unset": {"voice_fit": ""}},
+            )
+            if getattr(published, "matched_count", 0) != 1:
+                raise HTTPException(status_code=409, detail="Script publish lost its lease. Save the script again to finish.")
+            project["content_revision"] = new_rev
+            project["derivatives_revision"] = new_rev
+            project["content_consistent"] = True
+            project["selected_voiceover_asset_id"] = None
+            project["selected_thumbnail_asset_id"] = None
+            project.pop("voice_fit", None)
+            return invalidated
+
+        return await asset_commit.run(db, asset_lease, mutate)
+    finally:
+        await project_lease.release(db, asset_lease)
+        await project_lease.release(db, render_lease)
 
 
 def _script_invalidation_view(view: dict, invalidated: dict) -> dict:
@@ -2220,6 +2430,9 @@ async def auto_attach_assets(project_id: str, body: AutoAttachRequest, user=Depe
     db = get_db()
     project = await db.projects.find_one({"id": project_id}, {"_id": 0})
     _ensure_project_access(project, user, write=True)
+    script = await db.scripts.find_one({"project_id": project_id}, {"_id": 0})
+    if not revisions_match(project, script):
+        raise HTTPException(status_code=409, detail="Script and derived scenes are not one revision. Retry after the script change finishes.")
     if user["role"] == "viewer":
         raise HTTPException(status_code=403, detail="Viewer cannot attach assets")
     if body.replace_existing and not body.idempotency_key:
@@ -2239,6 +2452,10 @@ async def auto_attach_assets(project_id: str, body: AutoAttachRequest, user=Depe
     if lease is None:
         raise HTTPException(status_code=409, detail="Another asset update is running for this project; retry shortly.")
     try:
+        project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+        script = await db.scripts.find_one({"project_id": project_id}, {"_id": 0})
+        if not revisions_match(project, script):
+            raise HTTPException(status_code=409, detail="Script and derived scenes are not one revision. Retry after the script change finishes.")
         return await _auto_attach_under_lease(db, lease, project_id, project, body, user, op_id)
     except asset_commit.LeaseLost as exc:
         raise HTTPException(status_code=409, detail="Asset ownership changed; retry with the same idempotency key.") from exc
@@ -2601,6 +2818,7 @@ async def generate_full_voiceover(
     db = get_db()
     project = await db.projects.find_one({"id": project_id}, {"_id": 0})
     _ensure_project_access(project, user, write=True)
+    expected_revision = int(project.get("content_revision") or 0)
     if user["role"] == "viewer":
         raise HTTPException(status_code=403, detail="Viewer cannot generate voiceovers")
     script = await db.scripts.find_one({"project_id": project_id}, {"_id": 0})
@@ -2698,11 +2916,13 @@ async def generate_full_voiceover(
             "created_at": _now(),
             "updated_at": _now(),
         }
-        await db.scripts.replace_one({"project_id": project_id}, dict(new_script_doc), upsert=True)
+        published = await _publish_script_change(
+            db, project, project_id, document=new_script_doc, expected_revision=expected_revision,
+        )
+        expected_revision = int(project.get("content_revision") or 0)
         current_script_id = new_script_doc["id"]
         script_version = f"{current_script_id}:{new_script_doc['updated_at']}"
-        # The corrected script no longer matches scene narration or per-scene audio.
-        await _invalidate_script_derivatives(db, project, project_id)
+        _ = published
 
     payload["text_excerpt"] = text[:240]
     payload["created_at"] = _now()
@@ -3602,6 +3822,12 @@ async def admin_diagnostics(_admin=Depends(require_roles("admin"))):
             "projects": project_count,
         },
     }
+
+
+@router.get("/admin/retention/preview")
+async def admin_retention_preview(_admin=Depends(require_roles("admin"))):
+    """Count what a retention sweep would remove. Does not delete or update anything."""
+    return await retention_service.preview_cleanup()
 
 
 @router.post("/admin/retention/run")

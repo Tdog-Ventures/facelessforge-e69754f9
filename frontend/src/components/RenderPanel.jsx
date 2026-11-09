@@ -238,13 +238,13 @@ export default function RenderPanel({
     if (loadError) {
       return (
         <div className="p-8 space-y-3" data-testid="render-load-error">
-          <p className="text-sm text-zinc-200">Could not load render state.</p>
-          <p className="font-mono text-xs text-zinc-500">{loadError}</p>
+          <p className="text-sm text-[var(--ff-text)]">Could not load render state.</p>
+          <p className="font-mono text-xs text-[var(--ff-text-muted)]">{loadError}</p>
           <button
             type="button"
             data-testid="render-retry"
             onClick={refreshAll}
-            className="font-mono text-[10px] uppercase tracking-widest border border-zinc-700 px-3 py-2 text-zinc-200 hover:border-[#00E5FF] hover:text-[#00E5FF]"
+            className="font-mono text-[10px] uppercase tracking-widest border border-[var(--ff-input-border)] px-3 py-2 text-[var(--ff-text)] hover:border-[#00E5FF] hover:text-[#00E5FF]"
           >
             Retry
           </button>
@@ -252,7 +252,7 @@ export default function RenderPanel({
       );
     }
     return (
-      <div className="p-8 text-sm text-zinc-500 font-mono">Loading render state…</div>
+      <div className="p-8 text-sm text-[var(--ff-text-muted)] font-mono">Loading render state…</div>
     );
   }
 
@@ -275,10 +275,10 @@ export default function RenderPanel({
             Selected duration controls the final video
           </div>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
-            <div><span className="block text-zinc-500 text-xs">Final</span>{Number(timing.target_seconds).toFixed(1)}s</div>
-            <div><span className="block text-zinc-500 text-xs">Intro</span>{Number(timing.intro_seconds).toFixed(1)}s</div>
-            <div><span className="block text-zinc-500 text-xs">Narration + scenes</span>{Number(timing.narration_seconds).toFixed(1)}s</div>
-            <div><span className="block text-zinc-500 text-xs">Voiceover</span>{timing.voiceover_seconds ? `${Number(timing.voiceover_seconds).toFixed(1)}s` : "Not generated"}</div>
+            <div><span className="block text-[var(--ff-text-muted)] text-xs">Final</span>{Number(timing.target_seconds).toFixed(1)}s</div>
+            <div><span className="block text-[var(--ff-text-muted)] text-xs">Intro</span>{Number(timing.intro_seconds).toFixed(1)}s</div>
+            <div><span className="block text-[var(--ff-text-muted)] text-xs">Narration + scenes</span>{Number(timing.narration_seconds).toFixed(1)}s</div>
+            <div><span className="block text-[var(--ff-text-muted)] text-xs">Voiceover</span>{timing.voiceover_seconds ? `${Number(timing.voiceover_seconds).toFixed(1)}s` : "Not generated"}</div>
           </div>
           {(!timing.scenes_match || timing.voiceover_action === "rebuild") && (
             <p className="font-mono text-[10px] text-amber-300 mt-3">
@@ -287,14 +287,14 @@ export default function RenderPanel({
             </p>
           )}
           {timing.voiceover_action === "tempo_fit" && (
-            <p className="font-mono text-[10px] text-zinc-400 mt-3">
+            <p className="font-mono text-[10px] text-[var(--ff-text-muted)] mt-3">
               Voiceover is within 5% and will be tempo-fitted to the narration budget.
             </p>
           )}
         </div>
       )}
       {(loadError || preflightStale) && (
-        <div className="border border-[#FF3366]/40 bg-[#FF3366]/10 text-zinc-200 text-sm px-4 py-3 rounded-sm" data-testid="render-stale-warning">
+        <div className="border border-[#FF3366]/40 bg-[#FF3366]/10 text-[var(--ff-text)] text-sm px-4 py-3 rounded-sm" data-testid="render-stale-warning">
           Render readiness is out of date. {loadError || "Refresh before starting a render."}
           <button type="button" onClick={refreshAll} className="ml-3 underline">Retry</button>
         </div>
@@ -309,7 +309,7 @@ export default function RenderPanel({
 
       {canEdit && preflight.autofit_suggestion && (
         <div className="border border-[#00E5FF]/30 bg-[#00E5FF]/5 rounded-sm px-4 py-3 flex items-center gap-3 flex-wrap">
-          <p className="flex-1 text-sm text-zinc-300 min-w-[220px]">
+          <p className="flex-1 text-sm text-[var(--ff-text)] min-w-[220px]">
             Narration runs {preflight.autofit_suggestion.voiceover_seconds?.toFixed(1)}s — apply a{" "}
             {preflight.autofit_suggestion.from}s → {preflight.autofit_suggestion.to}s duration fit?
           </p>
@@ -338,11 +338,11 @@ export default function RenderPanel({
       )}
 
       {canEdit && (
-        <div className="border border-zinc-800 bg-[#121212] rounded-sm p-4 space-y-4">
+        <div className="border border-[var(--ff-border)] bg-[var(--ff-surface)] rounded-sm p-4 space-y-4">
           <div>
-            <div className="font-mono text-[10px] uppercase tracking-widest text-zinc-500 mb-3">Narrator voice — change until render</div>
+            <div className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] mb-3">Narrator voice — change until render</div>
             <VoiceStylePicker value={voiceStyle} onChange={setVoiceStyle} />
-            <p className="font-mono text-[10px] text-zinc-600 mt-2">Voice selector stays enabled right up to the Render button, not locked after Part generation.</p>
+            <p className="font-mono text-[10px] text-[var(--ff-text-dim)] mt-2">Voice selector stays enabled right up to the Render button, not locked after Part generation.</p>
           </div>
           <MusicPanel
             projectId={projectId}
@@ -351,23 +351,23 @@ export default function RenderPanel({
             canEdit={canEdit}
             onProjectChange={async (view) => { await refreshAll(); onChange(view); }}
           />
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-4 border-t border-zinc-800">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-4 border-t border-[var(--ff-border)]">
             <div>
-              <div className="font-mono text-[10px] uppercase tracking-widest text-zinc-500 mb-2">Aspect ratio</div>
-              <select value={aspect} onChange={e=>setAspect(e.target.value)} className="w-full bg-[#0A0A0A] border border-zinc-800 px-3 py-2 text-sm rounded-sm focus:border-[#00E5FF]">
+              <div className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] mb-2">Aspect ratio</div>
+              <select value={aspect} onChange={e=>setAspect(e.target.value)} className="w-full bg-[var(--ff-input-bg)] border border-[var(--ff-border)] px-3 py-2 text-sm rounded-sm focus:border-[#00E5FF]">
                 <option value="9:16">9:16 Tall - TikTok / Reels / Shorts</option>
                 <option value="16:9">16:9 Wide - YouTube</option>
                 <option value="1:1">1:1 Square - Feed</option>
               </select>
-              <p className="font-mono text-[10px] text-zinc-600 mt-1">Choose at render — no need to regenerate.</p>
+              <p className="font-mono text-[10px] text-[var(--ff-text-dim)] mt-1">Choose at render — no need to regenerate.</p>
             </div>
             <div>
-              <div className="font-mono text-[10px] uppercase tracking-widest text-zinc-500 mb-2">Captions</div>
-              <label className="flex items-center gap-2 text-sm text-zinc-300">
-                <input type="checkbox" checked={burnSubtitles} onChange={(e) => setBurnSubtitles(e.target.checked)} className="h-4 w-4 accent-[#00E5FF] bg-[#0A0A0A] border-zinc-700 rounded" />
+              <div className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] mb-2">Captions</div>
+              <label className="flex items-center gap-2 text-sm text-[var(--ff-text)]">
+                <input type="checkbox" checked={burnSubtitles} onChange={(e) => setBurnSubtitles(e.target.checked)} className="h-4 w-4 accent-[#00E5FF] bg-[var(--ff-input-bg)] border-[var(--ff-input-border)] rounded" />
                 Burn captions into video
               </label>
-              <p className="font-mono text-[10px] text-zinc-600 mt-1">Off = clean video. SRT still saved for CapCut. Platforms auto-caption anyway.</p>
+              <p className="font-mono text-[10px] text-[var(--ff-text-dim)] mt-1">Off = clean video. SRT still saved for CapCut. Platforms auto-caption anyway.</p>
             </div>
           </div>
         </div>
@@ -418,7 +418,7 @@ export default function RenderPanel({
         <a
           data-testid="export-package-zip"
           href={`${API}/projects/${projectId}/export/package.zip`}
-          className="flex items-center gap-2 border border-zinc-800 text-white text-sm px-5 py-2.5 rounded-sm hover:border-[#00E5FF] hover:text-[#00E5FF] transition-colors"
+          className="flex items-center gap-2 border border-[var(--ff-border)] text-[var(--ff-text)] text-sm px-5 py-2.5 rounded-sm hover:border-[#00E5FF] hover:text-[#00E5FF] transition-colors"
         >
           <Film size={14} /> Export package (ZIP)
         </a>

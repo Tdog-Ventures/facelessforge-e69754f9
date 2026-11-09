@@ -75,7 +75,7 @@ export default function AssetLibraryPage() {
     return (
       <AppShell>
         <TopBar title="Asset Library" />
-        <div className="p-8 text-sm text-zinc-500 font-mono">Loading…</div>
+        <div className="p-8 text-sm text-[var(--ff-text-muted)] font-mono">Loading…</div>
       </AppShell>
     );
   }
@@ -98,14 +98,14 @@ export default function AssetLibraryPage() {
     <AppShell>
       <TopBar title="Asset Library" subtitle={`${allAssets.length} items`} />
       <div className="p-8 space-y-6">
-        <div className="flex border border-zinc-800 rounded-sm overflow-hidden w-fit">
+        <div className="flex border border-[var(--ff-border)] rounded-sm overflow-hidden w-fit">
           {FILTERS.map((f) => (
             <button
               key={f.id}
               data-testid={`asset-filter-${f.id}`}
               onClick={() => setFilter(f.id)}
               className={`px-4 py-2 font-mono text-[10px] uppercase tracking-widest transition-colors ${
-                filter === f.id ? "bg-[#00E5FF] text-black" : "text-zinc-400 hover:text-white hover:bg-[#1A1A1A]"
+                filter === f.id ? "bg-[#00E5FF] text-black" : "text-[var(--ff-text-muted)] hover:text-[var(--ff-text)] hover:bg-[var(--ff-surface-2)]"
               }`}
             >
               {f.label}
@@ -114,9 +114,9 @@ export default function AssetLibraryPage() {
         </div>
 
         {visible.length === 0 ? (
-          <div className="border border-zinc-800 border-dashed p-10 text-center rounded-sm">
-            <Boxes size={24} strokeWidth={1.2} className="mx-auto mb-3 text-zinc-500" />
-            <p className="text-sm text-zinc-400">
+          <div className="border border-[var(--ff-border)] border-dashed p-10 text-center rounded-sm">
+            <Boxes size={24} strokeWidth={1.2} className="mx-auto mb-3 text-[var(--ff-text-muted)]" />
+            <p className="text-sm text-[var(--ff-text-muted)]">
               No {filter === "all" ? "assets" : filter} yet. Generate thumbnail concepts or use "Find Assets" on a scene.
             </p>
           </div>
@@ -131,10 +131,10 @@ export default function AssetLibraryPage() {
                 <div
                   key={a.id}
                   data-testid={`asset-card-${a.id}`}
-                  className="border border-zinc-800 bg-[#121212] rounded-sm overflow-hidden flex flex-col"
+                  className="border border-[var(--ff-border)] bg-[var(--ff-surface)] rounded-sm overflow-hidden flex flex-col"
                 >
                   {isStock && a.preview_url ? (
-                    <div className="relative aspect-video bg-[#1A1A1A] overflow-hidden">
+                    <div className="relative aspect-video bg-[var(--ff-surface-2)] overflow-hidden">
                       <img
                         src={a.preview_url}
                         alt={a.name || ""}
@@ -153,13 +153,13 @@ export default function AssetLibraryPage() {
                         {meta.label}
                       </span>
                       {a.duration ? (
-                        <span className="absolute top-2 right-2 font-mono text-[9px] text-white bg-black/70 px-1.5 py-0.5 rounded-sm">
+                        <span className="absolute top-2 right-2 font-mono text-[9px] text-[var(--ff-text)] bg-black/70 px-1.5 py-0.5 rounded-sm">
                           {a.duration}s
                         </span>
                       ) : null}
                     </div>
                   ) : isThumbnailImage && a.preview_url ? (
-                    <div className="relative aspect-video bg-[#1A1A1A] overflow-hidden">
+                    <div className="relative aspect-video bg-[var(--ff-surface-2)] overflow-hidden">
                       <img
                         src={a.preview_url}
                         alt={a.name || ""}
@@ -178,7 +178,7 @@ export default function AssetLibraryPage() {
                       </span>
                     </div>
                   ) : isVoiceover ? (
-                    <div className="relative bg-[#1A1A1A] p-4 space-y-2">
+                    <div className="relative bg-[var(--ff-surface-2)] p-4 space-y-2">
                       <span
                         className="inline-block font-mono text-[9px] uppercase tracking-widest px-1.5 py-0.5 rounded-sm border"
                         style={{
@@ -192,7 +192,7 @@ export default function AssetLibraryPage() {
                       <audio controls src={a.preview_url} className="w-full h-9" preload="metadata" />
                     </div>
                   ) : (
-                    <div className="aspect-video bg-[#1A1A1A] flex items-center justify-center">
+                    <div className="aspect-video bg-[var(--ff-surface-2)] flex items-center justify-center">
                       <span
                         className="font-mono text-[10px] uppercase tracking-widest px-2 py-1 rounded-sm border"
                         style={{ color: meta.color, borderColor: meta.color + "4D" }}
@@ -204,37 +204,37 @@ export default function AssetLibraryPage() {
 
                   <div className="p-4 space-y-2 flex-1">
                     <div className="flex items-start justify-between gap-2">
-                      <h4 className="text-sm font-semibold text-white truncate flex-1">{a.name}</h4>
+                      <h4 className="text-sm font-semibold text-[var(--ff-text)] truncate flex-1">{a.name}</h4>
                       <span className="font-mono text-[10px] uppercase tracking-widest text-[#00FF66]">
                         {a.status}
                       </span>
                     </div>
-                    <div className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+                    <div className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">
                       {a.projectName}
                       {a.sceneNumber && (
                         <> · <span className="text-[#00E5FF]">Scene {String(a.sceneNumber).padStart(2, "0")}</span></>
                       )}
                     </div>
                     {a.attribution_name && (
-                      <div className="font-mono text-[10px] text-zinc-500">
+                      <div className="font-mono text-[10px] text-[var(--ff-text-muted)]">
                         by <span className="text-[#7B61FF]">{a.attribution_name}</span>
                         {a.width && a.height ? (
-                          <span className="text-zinc-600"> · {a.width}×{a.height}</span>
+                          <span className="text-[var(--ff-text-dim)]"> · {a.width}×{a.height}</span>
                         ) : null}
                       </div>
                     )}
                     {a.brief?.thumbnail_title_text && (
-                      <div className="pt-2 border-t border-zinc-800 text-xs text-zinc-300">
+                      <div className="pt-2 border-t border-[var(--ff-border)] text-xs text-[var(--ff-text)]">
                         "{a.brief.thumbnail_title_text}"
                       </div>
                     )}
                   </div>
 
-                  <div className="px-4 py-2 border-t border-zinc-800 flex items-center gap-2">
+                  <div className="px-4 py-2 border-t border-[var(--ff-border)] flex items-center gap-2">
                     <Link
                       to={`/app/projects/${a.projectId}`}
                       data-testid={`asset-open-project-${a.id}`}
-                      className="flex-1 text-center font-mono text-[10px] uppercase tracking-widest text-zinc-400 hover:text-[#00E5FF] px-2 py-1.5 rounded-sm transition-colors"
+                      className="flex-1 text-center font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] hover:text-[#00E5FF] px-2 py-1.5 rounded-sm transition-colors"
                     >
                       Open project
                     </Link>
@@ -244,7 +244,7 @@ export default function AssetLibraryPage() {
                         target="_blank"
                         rel="noreferrer"
                         data-testid={`asset-source-${a.id}`}
-                        className="font-mono text-[10px] uppercase tracking-widest text-zinc-400 hover:text-[#00E5FF] border border-zinc-800 hover:border-[#00E5FF] px-2 py-1.5 rounded-sm transition-colors flex items-center gap-1"
+                        className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] hover:text-[#00E5FF] border border-[var(--ff-border)] hover:border-[#00E5FF] px-2 py-1.5 rounded-sm transition-colors flex items-center gap-1"
                       >
                         <ExternalLink size={11} strokeWidth={1.5} /> Source
                       </a>
@@ -254,7 +254,7 @@ export default function AssetLibraryPage() {
                         data-testid={`asset-remove-${a.id}`}
                         onClick={() => remove(a.projectId, a)}
                         disabled={removing === a.id}
-                        className="font-mono text-[10px] uppercase tracking-widest text-zinc-400 hover:text-[#FF3366] border border-zinc-800 hover:border-[#FF3366] px-2 py-1.5 rounded-sm transition-colors flex items-center gap-1 disabled:opacity-50"
+                        className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)] hover:text-[#FF3366] border border-[var(--ff-border)] hover:border-[#FF3366] px-2 py-1.5 rounded-sm transition-colors flex items-center gap-1 disabled:opacity-50"
                       >
                         {removing === a.id ? <Loader2 size={11} className="animate-spin" /> : <Trash2 size={11} strokeWidth={1.5} />}
                       </button>

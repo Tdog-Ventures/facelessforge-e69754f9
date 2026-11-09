@@ -326,7 +326,8 @@ async def _ensure_assets_and_render(project: dict) -> dict:
     # Thumbnail: generate concepts + images, auto-select
     try:
         script = await db.scripts.find_one({"project_id": pid}, {"_id": 0})
-        concepts = await gen_generate_thumbnail_concepts(project, script or {})
+        metadata = await db.metadata_packages.find_one({"project_id": pid}, {"_id": 0})
+        concepts = await gen_generate_thumbnail_concepts(project, script or {}, metadata)
         for c in concepts[:2]:
             await db.assets.insert_one({"id": str(uuid.uuid4()), "project_id": pid, "asset_type": "thumbnail_concept", "brief": c, "status": "ready", "created_at": _now(), "updated_at": _now()})
         # Try generate image with timeout
@@ -412,10 +413,10 @@ async def _ensure_assets_and_render(project: dict) -> dict:
         if (_now() - start).total_seconds() > timeout:
             raise TimeoutError(f"render exceeded {timeout}s project={pid} status={st}")
 
-async def gen_generate_thumbnail_concepts(project: dict, script: dict):
+async def gen_generate_thumbnail_concepts(project: dict, script: dict, metadata: dict = None):
     from .. import generation as gen
     try:
-        return await gen.generate_thumbnail_concepts(project, script)
+        return await gen.generate_thumbnail_concepts(project, script, metadata)
     except Exception:
         return [{"thumbnail_title_text": project.get("topic", "")[:40], "visual_composition": "cinematic", "emotion_angle": "curiosity", "background_idea": "gradient", "subject_focal_point": "center", "colour_direction": "teal", "click_trigger": "How?", "image_prompt": project.get("topic", "")[:120]}]
 

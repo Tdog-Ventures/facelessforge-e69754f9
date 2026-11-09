@@ -23,13 +23,13 @@ export default function RegisterPage() {
   };
 
   return (
-    <div className="min-h-screen ff-grid bg-[#0A0A0A] text-white flex items-center justify-center px-6">
+    <div className="min-h-screen ff-grid bg-[var(--ff-input-bg)] text-[var(--ff-text)] flex items-center justify-center px-6">
       <div className="w-full max-w-md">
         <div className="mb-8 text-center">
           <h1 className="text-3xl md:text-4xl font-bold tracking-tight mb-3">
             Create your studio
           </h1>
-          <p className="text-sm text-zinc-400">
+          <p className="text-sm text-[var(--ff-text-muted)]">
             You'll be set up as a Creator. Admins can promote you later.
           </p>
         </div>
@@ -37,27 +37,27 @@ export default function RegisterPage() {
         <form
           onSubmit={submit}
           data-testid="register-form"
-          className={`border border-zinc-800 bg-[#121212] p-7 rounded-sm space-y-5 ${error ? "ff-shake" : ""}`}
+          className={`border border-[var(--ff-border)] bg-[var(--ff-surface)] p-7 rounded-sm space-y-5 ${error ? "ff-shake" : ""}`}
         >
           <div className="space-y-2">
-            <label className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Name</label>
+            <label className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">Name</label>
             <input data-testid="register-name" required value={form.name} onChange={update("name")}
-              className="w-full bg-[#0A0A0A] border border-zinc-800 px-3 py-2.5 text-sm rounded-sm focus:border-[#00E5FF]" />
+              className="w-full bg-[var(--ff-input-bg)] border border-[var(--ff-border)] px-3 py-2.5 text-sm rounded-sm focus:border-[#00E5FF]" />
           </div>
           <div className="space-y-2">
-            <label className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Email</label>
+            <label className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">Email</label>
             <input data-testid="register-email" type="email" required value={form.email} onChange={update("email")}
-              className="w-full bg-[#0A0A0A] border border-zinc-800 px-3 py-2.5 text-sm rounded-sm focus:border-[#00E5FF]" />
+              className="w-full bg-[var(--ff-input-bg)] border border-[var(--ff-border)] px-3 py-2.5 text-sm rounded-sm focus:border-[#00E5FF]" />
           </div>
           <div className="space-y-2">
-            <label className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Password</label>
+            <label className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">Password</label>
             <input data-testid="register-password" type="password" minLength={6} required value={form.password} onChange={update("password")}
-              className="w-full bg-[#0A0A0A] border border-zinc-800 px-3 py-2.5 text-sm rounded-sm focus:border-[#00E5FF]" />
+              className="w-full bg-[var(--ff-input-bg)] border border-[var(--ff-border)] px-3 py-2.5 text-sm rounded-sm focus:border-[#00E5FF]" />
           </div>
           <div className="space-y-2">
-            <label className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Role</label>
+            <label className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">Role</label>
             <select data-testid="register-role" value={form.role} onChange={update("role")}
-              className="w-full bg-[#0A0A0A] border border-zinc-800 px-3 py-2.5 text-sm rounded-sm focus:border-[#00E5FF]">
+              className="w-full bg-[var(--ff-input-bg)] border border-[var(--ff-border)] px-3 py-2.5 text-sm rounded-sm focus:border-[#00E5FF]">
               <option value="creator">Creator</option>
               <option value="editor">Editor</option>
               <option value="viewer">Viewer</option>
@@ -76,8 +76,8 @@ export default function RegisterPage() {
             {loading ? "Creating" : "Create account"}
           </button>
 
-          <div className="pt-2 border-t border-zinc-800 text-center">
-            <span className="text-xs text-zinc-500">Already have one? </span>
+          <div className="pt-2 border-t border-[var(--ff-border)] text-center">
+            <span className="text-xs text-[var(--ff-text-muted)]">Already have one? </span>
             <Link to="/login" className="text-xs text-[#00E5FF] hover:text-[#33EFFF]" data-testid="goto-login">
               Sign in
             </Link>

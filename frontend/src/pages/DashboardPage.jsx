@@ -138,7 +138,6 @@ export default function DashboardPage() {
         subtitle={analytics?.is_admin_view ? "Control Room · ADMIN VIEW" : "Control Room"}
         right={
           <div className="flex items-center gap-2">
-            {analytics?.is_admin_view && <span className="font-mono text-[10px] tracking-widest bg-amber-500 text-black px-2 py-1 rounded">ADMIN VIEW</span>}
             <Link
               to="/app/projects/new"
               data-testid="dashboard-create-project"

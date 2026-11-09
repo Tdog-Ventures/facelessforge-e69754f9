@@ -16,12 +16,12 @@ export default function IntakePacket({ projectId }) {
     } catch (e) { toast.error(e.response?.data?.detail || e.message); }
   };
   return (
-    <div className="border border-zinc-800 bg-[#121212] p-4 rounded-sm space-y-3">
-      <div className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Intake Packet — one format, one input packet</div>
-      <input value={form.logo} onChange={e=>setForm({...form, logo:e.target.value})} placeholder="Logo URL" className="w-full bg-[#0A0A0A] border border-zinc-800 px-3 py-2 text-xs rounded-sm" />
-      <input value={form.colours} onChange={e=>setForm({...form, colours:e.target.value})} placeholder="Colours comma separated" className="w-full bg-[#0A0A0A] border border-zinc-800 px-3 py-2 text-xs rounded-sm" />
-      <textarea value={form.service_descriptions} onChange={e=>setForm({...form, service_descriptions:e.target.value})} placeholder="Service descriptions" className="w-full bg-[#0A0A0A] border border-zinc-800 px-3 py-2 text-xs rounded-sm" rows={3} />
-      <input value={form.candidate_images} onChange={e=>setForm({...form, candidate_images:e.target.value})} placeholder="Candidate image URL + ownership declaration" className="w-full bg-[#0A0A0A] border border-zinc-800 px-3 py-2 text-xs rounded-sm" />
+    <div className="border border-[var(--ff-border)] bg-[var(--ff-surface)] p-4 rounded-sm space-y-3">
+      <div className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">Intake Packet — one format, one input packet</div>
+      <input value={form.logo} onChange={e=>setForm({...form, logo:e.target.value})} placeholder="Logo URL" className="w-full bg-[var(--ff-input-bg)] border border-[var(--ff-border)] px-3 py-2 text-xs rounded-sm" />
+      <input value={form.colours} onChange={e=>setForm({...form, colours:e.target.value})} placeholder="Colours comma separated" className="w-full bg-[var(--ff-input-bg)] border border-[var(--ff-border)] px-3 py-2 text-xs rounded-sm" />
+      <textarea value={form.service_descriptions} onChange={e=>setForm({...form, service_descriptions:e.target.value})} placeholder="Service descriptions" className="w-full bg-[var(--ff-input-bg)] border border-[var(--ff-border)] px-3 py-2 text-xs rounded-sm" rows={3} />
+      <input value={form.candidate_images} onChange={e=>setForm({...form, candidate_images:e.target.value})} placeholder="Candidate image URL + ownership declaration" className="w-full bg-[var(--ff-input-bg)] border border-[var(--ff-border)] px-3 py-2 text-xs rounded-sm" />
       <button onClick={submit} className="w-full bg-blue-600 text-white text-xs font-mono uppercase tracking-widest px-3 py-2 rounded-sm">Save intake packet</button>
       <div className="text-[10px] text-amber-400">Page displaying image != licence — ownership_declaration required.</div>
     </div>

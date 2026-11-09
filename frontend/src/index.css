@@ -188,8 +188,8 @@
 /* Quality progress bar */
 .ff-progress {
     height: 6px;
-    background: #1A1A1A;
-    border: 1px solid #27272A;
+    background: var(--ff-track);
+    border: 1px solid var(--ff-border);
     overflow: hidden;
 }
 .ff-progress > span {

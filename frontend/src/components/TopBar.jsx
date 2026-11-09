@@ -37,7 +37,7 @@ export default function TopBar({ title, subtitle, right }) {
         <div className="flex items-center gap-3">
           <h1 className="text-lg font-semibold tracking-tight">{title}</h1>
           {subtitle && (
-            <span className="font-mono text-[10px] text-zinc-500 uppercase tracking-widest">
+            <span className="font-mono text-[10px] text-[var(--ff-text-muted)] uppercase tracking-widest">
               / {subtitle}
             </span>
           )}
@@ -78,11 +78,11 @@ export default function TopBar({ title, subtitle, right }) {
             <Moon size={18} strokeWidth={1.5} aria-hidden="true" />
           </button>
         </div>
-        <div className="hidden md:flex items-center gap-2 font-mono text-[11px] text-zinc-500">
+        <div className="hidden md:flex items-center gap-2 font-mono text-[11px] text-[var(--ff-text-muted)]">
           <Activity size={12} strokeWidth={1.5} style={{ color: online ? "var(--ff-success)" : "var(--ff-error)" }} />
           <span>{online ? "SYSTEM · ONLINE" : "SYSTEM · DEGRADED"}</span>
         </div>
-        <div className="hidden md:flex items-center gap-2 font-mono text-[11px] text-zinc-500">
+        <div className="hidden md:flex items-center gap-2 font-mono text-[11px] text-[var(--ff-text-muted)]">
           <Clock size={12} strokeWidth={1.5} />
           <span>{now.toUTCString().split(" ").slice(4, 5)[0]} UTC</span>
         </div>
