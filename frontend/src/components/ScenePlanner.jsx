@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { toast } from "sonner";
-import { Sparkles, Loader2, Download, Search, X as XIcon, Wand2, CreditCard, Zap, Info, Save, Film } from "lucide-react";
+import { Sparkles, Loader2, Download, Search, X as XIcon, Wand2, CreditCard, Zap, Film } from "lucide-react";
 import { api, formatApiError, API, UNBOUNDED_TIMEOUT } from "../lib/api";
 import { formatDuration, sceneBudgetLabel } from "../lib/format";
 import StockAssetModal from "./StockAssetModal";
@@ -9,124 +9,6 @@ import BillingBar from "./BillingBar";
 import { useNavigate } from "react-router-dom";
 import { createDodoCheckout, DODO_PRODUCT_IDS } from "../lib/dodo";
 import { beginAssetAttachment, finishAssetAttachment, pendingAssetAttachment } from "../lib/assetAttachmentOperation";
-
-function InfoTip({ text }) {
-  const [show, setShow] = useState(false);
-  return (
-    <span
-      className="relative inline-flex"
-      onMouseEnter={() => setShow(true)}
-      onMouseLeave={() => setShow(false)}
-    >
-      <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-blue-500/20 border border-blue-400/40 text-blue-400 text-[10px] font-bold cursor-help">ⓘ</span>
-      {show && (
-        <span className="absolute left-1/2 -translate-x-1/2 bottom-6 bg-slate-800 text-xs text-slate-100 px-3 py-2 rounded-md shadow-lg whitespace-nowrap z-50 border border-slate-700">
-          {text}
-        </span>
-      )}
-    </span>
-  );
-}
-
-function HumanParamsSidebar({ projectId, project, onChange, canEdit }) {
-  const [audience, setAudience] = useState(project?.audience || "");
-  const [goal, setGoal] = useState(project?.monetisation_intent || "Grow channel to 50k subs");
-  const [cta, setCta] = useState(project?.cta_goal || "Subscribe");
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    setAudience(project?.audience || "");
-    setGoal(project?.monetisation_intent || "Grow channel to 50k subs");
-    setCta(project?.cta_goal || "Subscribe");
-  }, [project?.audience, project?.monetisation_intent, project?.cta_goal]);
-
-  const save = async () => {
-    setSaving(true);
-    try {
-      const { data } = await api.patch(`/projects/${projectId}`, {
-        audience,
-        monetisation_intent: goal,
-        cta_goal: cta,
-      });
-      toast.success("Saved");
-      onChange(data);
-    } catch (e) {
-      toast.error("Save failed", { description: formatApiError(e.response?.data?.detail) || e.message });
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div className="bg-[#1c2333] border border-[rgba(59,130,246,0.15)] rounded-lg p-5 space-y-5" style={{ boxShadow: "0 0 20px rgba(59,130,246,0.05)" }}>
-      <h3 className="font-mono text-[11px] uppercase tracking-widest text-slate-400">Project Goals</h3>
-
-      <div className="space-y-1.5">
-        <label className="flex items-center gap-2 text-sm font-medium text-slate-200">
-          Who's watching? <InfoTip text="Who will watch this? This shapes voice + examples" />
-        </label>
-        <input
-          data-testid="field-audience-human"
-          value={audience}
-          onChange={(e) => setAudience(e.target.value)}
-          placeholder="e.g. Gen Z tech hobbyists, busy pros"
-          disabled={!canEdit}
-          className="w-full bg-[#0f141f] border border-slate-700 rounded-md px-3 py-2 text-sm text-slate-200 placeholder:text-slate-500 focus:border-blue-500 disabled:opacity-60"
-        />
-      </div>
-
-      <div className="space-y-1.5">
-        <label className="flex items-center gap-2 text-sm font-medium text-slate-200">
-          What's the goal? <InfoTip text="What do you want this video to do?" />
-        </label>
-        <select
-          data-testid="field-goal-human"
-          value={goal}
-          onChange={(e) => setGoal(e.target.value)}
-          disabled={!canEdit}
-          className="w-full bg-[#0f141f] border border-slate-700 rounded-md px-3 py-2 text-sm text-slate-200 focus:border-blue-500 disabled:opacity-60"
-        >
-          <option>Grow channel to 50k subs</option>
-          <option>Sell my product</option>
-          <option>Build authority</option>
-          <option>Drive affiliate sales</option>
-          <option>Educate audience</option>
-          <option>Generate leads</option>
-        </select>
-      </div>
-
-      <div className="space-y-1.5">
-        <label className="flex items-center gap-2 text-sm font-medium text-slate-200">
-          What should they do? <InfoTip text="Main action you want viewer to take" />
-        </label>
-        <select
-          data-testid="field-cta-human"
-          value={cta}
-          onChange={(e) => setCta(e.target.value)}
-          disabled={!canEdit}
-          className="w-full bg-[#0f141f] border border-slate-700 rounded-md px-3 py-2 text-sm text-slate-200 focus:border-blue-500 disabled:opacity-60"
-        >
-          <option>Visit website</option>
-          <option>Subscribe</option>
-          <option>Buy product</option>
-          <option>Join newsletter</option>
-          <option>Book a call</option>
-        </select>
-      </div>
-
-      {canEdit && (
-        <button
-          data-testid="save-human-params"
-          onClick={save}
-          disabled={saving}
-          className="w-full flex items-center justify-center gap-2 bg-blue-600 text-white text-sm font-semibold py-2 rounded-md hover:bg-blue-500 disabled:opacity-50"
-        >
-          {saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />} Save
-        </button>
-      )}
-    </div>
-  );
-}
 
 export default function ScenePlanner({ projectId, scenes, canEdit, onChange, hasScript, attachedAssets = [], project }) {
   const [generating, setGenerating] = useState(false);
@@ -376,8 +258,7 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
 
   if (!scenes || scenes.length === 0) {
     return (
-      <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-6">
-        <HumanParamsSidebar projectId={projectId} project={innerProject} onChange={onChange} canEdit={canEdit} />
+      <div>
         <div className="border border-[rgba(59,130,246,0.15)] border-dashed p-10 text-center rounded-lg bg-[#1c2333]">
           <p className="text-sm text-slate-400 mb-4">
             {hasScript ? "No scene plan yet. Generate one from the script." : "Generate a script first, then break it into scenes."}
@@ -401,9 +282,7 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
   }
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-6">
-      <div className="space-y-4 self-start sticky top-20">
-        <HumanParamsSidebar projectId={projectId} project={innerProject} onChange={onChange} canEdit={canEdit} />
+    <div className="space-y-4 min-w-0">
         {canEdit && project?.production_mode !== "commercial_ad" && (
           <button
             data-testid="full-render-btn"
@@ -414,9 +293,6 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
             {fullRenderLoading ? <Loader2 size={14} className="animate-spin" /> : <Film size={16} />} FULL RENDER - START TO FINISH
           </button>
         )}
-      </div>
-
-      <div className="space-y-4 min-w-0">
         <BillingBar />
         <div className="flex items-center justify-between">
           <div className="font-mono text-[11px] text-slate-500" title="Expected scene count is ceil((target − intro) / 30). Intro is 2.5s for editorial videos.">
@@ -647,7 +523,6 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
             </div>
           </div>
         )}
-      </div>
     </div>
   );
 }

@@ -19,26 +19,12 @@ import RightsRegistry from "../components/RightsRegistry";
 import ComplianceChecklist from "../components/ComplianceChecklist";
 import ApprovalPanel from "../components/ApprovalPanel";
 import ProductionReceipt from "../components/ProductionReceipt";
+import ProjectGoalsCard from "../components/ProjectGoalsCard";
+import ProjectTabBar from "../components/ProjectTabBar";
 import { api, formatApiError, API } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { formatCurrency, formatDuration } from "../lib/format";
 import { useConfirm } from "../components/ConfirmDialog";
-
-const TABS = [
-  { id: "overview", label: "Overview" },
-  { id: "script", label: "Script" },
-  { id: "scenes", label: "Scenes" },
-  { id: "metadata", label: "Metadata" },
-  { id: "thumbnails", label: "Thumbnails" },
-  { id: "voiceover", label: "Voiceover" },
-  { id: "render", label: "Render & Export" },
-  { id: "intake", label: "Intake" },
-  { id: "claims", label: "Claims" },
-  { id: "rights", label: "Rights" },
-  { id: "compliance", label: "Checklist" },
-  { id: "approval", label: "Approval" },
-  { id: "receipt", label: "Receipt" },
-];
 
 export default function ProjectDetailPage() {
   const { id } = useParams();
@@ -166,7 +152,7 @@ export default function ProjectDetailPage() {
         }
       />
 
-      <div className="p-8 space-y-6">
+      <div className="p-8 space-y-6 min-w-0 max-w-full">
         {/* Header summary */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           <div className="lg:col-span-2 border border-[rgba(59,130,246,0.15)] bg-[#1c2333] p-6 rounded-sm space-y-4">
@@ -228,23 +214,7 @@ export default function ProjectDetailPage() {
           </div>
         </div>
 
-        {/* Tabs */}
-        <div className="border-b border-[rgba(59,130,246,0.15)] flex items-center gap-1 overflow-x-auto">
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              data-testid={`tab-${t.id}`}
-              onClick={() => setTab(t.id)}
-              className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
-                tab === t.id
-                  ? "border-[#00E5FF] text-white"
-                  : "border-transparent text-zinc-500 hover:text-white"
-              }`}
-            >
-              {t.label}
-            </button>
-          ))}
-        </div>
+        <ProjectTabBar tab={tab} onChange={setTab} />
 
         {/* Tab content */}
         <div>
@@ -292,6 +262,7 @@ export default function ProjectDetailPage() {
                   />
                 </div>
               )}
+              <ProjectGoalsCard projectId={project.id} project={project} canEdit={canEdit} onChange={setView} />
               <SharePanel
                 projectId={project.id}
                 share={share}

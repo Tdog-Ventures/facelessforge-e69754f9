@@ -35,6 +35,92 @@ def _retention_days() -> int:
         return 7
 
 
+def _dir_size(path: Path) -> int:
+    total = 0
+    if not path.exists():
+        return 0
+    for item in path.rglob("*"):
+        if item.is_file():
+            try:
+                total += item.stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+async def preview_cleanup() -> dict:
+    """Count what a sweep would remove. Does not delete or update anything."""
+    db = get_db()
+    cutoff_ts = time.time() - _retention_days() * 86400
+    report = {
+        "dry_run": True,
+        "retention_days": _retention_days(),
+        "workdir_max_age_seconds": 3600,
+        "stale_job_max_age_seconds": 3600,
+        "renders_removed": 0,
+        "render_workdirs_removed": 0,
+        "orphan_project_dirs_removed": 0,
+        "stale_jobs_marked_failed": 0,
+        "remote_objects_removed": 0,
+        "bytes_freed": 0,
+    }
+    store = get_storage()
+    project_ids = {p["id"] async for p in db.projects.find({}, {"_id": 0, "id": 1})}
+
+    if RENDERS.exists():
+        for proj_dir in RENDERS.iterdir():
+            if not proj_dir.is_dir():
+                continue
+            if proj_dir.name not in project_ids:
+                report["orphan_project_dirs_removed"] += 1
+                report["bytes_freed"] += _dir_size(proj_dir)
+                continue
+            for workdir in proj_dir.glob("_work_*"):
+                try:
+                    if time.time() - workdir.stat().st_mtime > 3600:
+                        report["render_workdirs_removed"] += 1
+                        report["bytes_freed"] += _dir_size(workdir)
+                except OSError as exc:
+                    logger.warning("workdir preview failed for %s: %s", workdir, exc)
+            for mp4 in proj_dir.glob("*.mp4"):
+                try:
+                    if mp4.stat().st_mtime < cutoff_ts:
+                        report["renders_removed"] += 1
+                        report["bytes_freed"] += mp4.stat().st_size
+                except OSError as exc:
+                    logger.warning("mp4 preview failed for %s: %s", mp4, exc)
+
+    if store.mode == "object":
+        cutoff_dt = datetime.fromtimestamp(cutoff_ts, tz=timezone.utc)
+        async for _job in db.render_jobs.find(
+            {"status": {"$in": ["completed", "COMPLETED"]},
+             "storage_mode": "object",
+             "storage_key": {"$ne": None},
+             "completed_at": {"$lt": cutoff_dt}},
+            {"_id": 0, "id": 1},
+        ):
+            report["remote_objects_removed"] += 1
+
+    for root in (THUMBS, AUDIO):
+        if not root.exists():
+            continue
+        for proj_dir in root.iterdir():
+            if proj_dir.is_dir() and proj_dir.name not in project_ids:
+                report["orphan_project_dirs_removed"] += 1
+                report["bytes_freed"] += _dir_size(proj_dir)
+
+    one_hour_ago = datetime.fromtimestamp(time.time() - 3600, tz=timezone.utc)
+    async for _job in db.render_jobs.find(
+        {
+            "status": {"$in": ["queued", "QUEUED", "validating", "VALIDATING", "preparing_assets", "PREPARING_ASSETS", "rendering", "RENDERING", "verifying", "VERIFYING"]},
+            "created_at": {"$lt": one_hour_ago},
+        },
+        {"_id": 0, "id": 1},
+    ):
+        report["stale_jobs_marked_failed"] += 1
+    return report
+
+
 async def run_cleanup_once() -> dict:
     """Returns a small report of what was removed."""
     db = get_db()

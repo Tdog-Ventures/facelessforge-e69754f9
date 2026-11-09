@@ -3824,6 +3824,12 @@ async def admin_diagnostics(_admin=Depends(require_roles("admin"))):
     }
 
 
+@router.get("/admin/retention/preview")
+async def admin_retention_preview(_admin=Depends(require_roles("admin"))):
+    """Count what a retention sweep would remove. Does not delete or update anything."""
+    return await retention_service.preview_cleanup()
+
+
 @router.post("/admin/retention/run")
 async def admin_retention_run(_admin=Depends(require_roles("admin"))):
     """Manually trigger the retention sweep. Returns the cleanup report."""

@@ -6,6 +6,7 @@ import {
 import AppShell from "../components/AppShell";
 import TopBar from "../components/TopBar";
 import { api, formatApiError } from "../lib/api";
+import { confirmRetentionSweep } from "../lib/retentionSweep";
 import { useConfirm } from "../components/ConfirmDialog";
 
 function fmtBytes(n) {
@@ -56,15 +57,10 @@ export default function AdminDiagnosticsPage() {
   useEffect(() => { fetchOne(); }, []);
 
   const runRetention = async () => {
-    const ok = await confirm({
-      title: "Run retention sweep now?",
-      description: "Removes render MP4s older than the retention window, stale work dirs, and orphan project files. Safe — only deletes generated artifacts.",
-      confirmLabel: "Run cleanup",
-    });
-    if (!ok) return;
     setRunning(true);
     try {
-      const { data: report } = await api.post("/admin/retention/run");
+      const report = await confirmRetentionSweep(api, confirm);
+      if (!report) return;
       toast.success("Retention sweep complete", {
         description: `Freed ${fmtBytes(report.bytes_freed)} · ${report.renders_removed} renders, ${report.render_workdirs_removed} work dirs, ${report.orphan_project_dirs_removed} orphan dirs`,
       });

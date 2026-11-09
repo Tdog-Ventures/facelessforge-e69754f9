@@ -3,5 +3,14 @@
   [class*="aspect-video"], .video-preview { width: 100% !important; aspect-ratio: 16 / 9; height: auto !important; }
   button, a.btn, [role="button"] { min-height: 44px; min-width: 44px; }
   table { display: block; overflow-x: auto; white-space: nowrap; }
+  /* Keep the page from panning sideways. The project tab row scrolls inside itself. */
   body { overflow-x: hidden; }
+}
+
+.ff-tab-scroll {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
 }
