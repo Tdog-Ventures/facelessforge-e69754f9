@@ -42,7 +42,6 @@ import json
 import logging
 import math
 import os
-import random
 import re
 import shutil
 import uuid
@@ -54,7 +53,7 @@ import httpx
 from PIL import Image, ImageDraw, ImageFont
 
 from .db import get_db
-from .storage import get_storage
+from .storage import STATIC_ROOT, get_storage
 from .subtitles import write_srt, write_srt_from_cues, write_srt_from_words
 from .transcribe import transcribe_words
 from .visual_query import truncate_words
@@ -68,6 +67,7 @@ from . import stock as stock_service
 from .grounding import CLIENT_VISUAL_TYPES, validate_commercial_grounding
 from .scoring import commercial_scorecard
 from . import project_lease
+from .content_revision import ContentRevisionError, require_consistent_content
 try:
     from .verify import verify_render as _verify_render_constitution
     VERIFY_AVAILABLE = True
@@ -350,6 +350,15 @@ def get_dims(aspect_ratio: str):
         return 1080, 1080
     return 1080, 1920  # 9:16 default
 
+def burn_subtitles_enabled(job_doc: dict, project: dict) -> bool:
+    """Job choice, then project choice, then the env default."""
+    if job_doc.get("burn_subtitles") is not None:
+        return bool(job_doc.get("burn_subtitles"))
+    if project.get("burn_subtitles") is not None:
+        return bool(project.get("burn_subtitles"))
+    return os.getenv("RENDER_BURN_SUBTITLES", "false").lower() in ("1", "true", "yes")
+
+
 def subtitle_style_for(w,h):
     if w>h:  # 16:9 wide
         return "FontName=Arial,FontSize=24,Bold=1,Alignment=2,MarginL=400,MarginR=400,MarginV=180,WrapStyle=1"
@@ -417,15 +426,21 @@ def validate_prerequisites(project: dict, script: dict | None,
     if not commercial:
         _add("thumbnail", "Selected thumbnail", bool(sel_thumb), "Pick a thumbnail in the Thumbnails tab.")
 
+    def _real_voice(asset: dict) -> bool:
+        if not asset or asset.get("asset_type") != "voiceover_audio" or asset.get("status") == "rejected":
+            return False
+        if asset.get("mock") or str(asset.get("source") or "").lower() in {"mock", "mock_tts"}:
+            return False
+        return True
+
     full_voice = next((a for a in assets
-                       if a.get("asset_type") == "voiceover_audio"
+                       if _real_voice(a)
                        and not a.get("scene_id")
                        and a.get("id") == project.get("selected_voiceover_asset_id")), None)
-    scene_voices = [a for a in assets if a.get("asset_type") == "voiceover_audio"
-                    and a.get("scene_id") and a.get("status") != "rejected"]
+    scene_voices = [a for a in assets if _real_voice(a) and a.get("scene_id")]
     has_voice = bool(full_voice) or len(scene_voices) > 0
     _add("voiceover", "Voiceover ready (full or per-scene)", has_voice,
-         "Generate a full-script voiceover, or scene voiceovers.")
+         "Generate a real voiceover. Mock audio cannot be rendered.")
 
     music_enabled = bool(project.get("music_enabled"))
     sel_music = next((a for a in assets
@@ -732,6 +747,15 @@ def _intro_title_text(raw_title: str) -> str:
     return truncate_words(first_sentence.rstrip(" .!?"), 120).upper()
 
 
+def intro_overlay_title(project: dict, script: Optional[dict], metadata: Optional[dict]) -> str:
+    """Burn the selected title. Topic keywords never substitute a canned line."""
+    raw = ((metadata or {}).get("selected_title")
+           or (project or {}).get("topic")
+           or (project or {}).get("name")
+           or "FacelessForge")
+    return _intro_title_text(str(raw))
+
+
 def _pil_caption_frame(out_path: Path, *, title: str, subtitle: str = "",
                        footer: str = "", palette: tuple[str, str] = ("#0A0A0A", "#00E5FF"),
                        size: tuple[int, int] = (WIDTH, HEIGHT)) -> Path:
@@ -830,14 +854,45 @@ def _order_scene_candidates(candidates: list[dict]) -> list[dict]:
     )
 
 
+_AUDIO_SUFFIXES = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aac"}
+
+
+def _path_is_under_storage(path: Path) -> bool:
+    """True when the resolved file stays inside the asset storage root."""
+    try:
+        resolved = path.resolve()
+        root = STATIC_ROOT.resolve()
+    except OSError:
+        return False
+    return resolved == root or root in resolved.parents
+
+
 def _local_path_for_asset(asset: dict) -> Optional[Path]:
-    """If the asset already has a local file_path that exists, return it."""
+    """Return a local file only when it exists inside the storage root."""
     fp = asset.get("file_path")
-    if fp:
-        p = Path(fp)
-        if p.exists() and p.is_file():
-            return p
-    return None
+    if not fp:
+        return None
+    path = Path(fp)
+    if not _path_is_under_storage(path) or not path.is_file():
+        return None
+    return path
+
+
+def _audio_suffix_for(asset: dict) -> str:
+    key = str(asset.get("storage_key") or asset.get("file_path") or asset.get("preview_url") or "")
+    suffix = Path(key.split("?", 1)[0]).suffix.lower()
+    if suffix in _AUDIO_SUFFIXES:
+        return suffix
+    content_type = str(asset.get("content_type") or "").lower()
+    if "mpeg" in content_type or "mp3" in content_type:
+        return ".mp3"
+    if "mp4" in content_type or "m4a" in content_type or "aac" in content_type:
+        return ".m4a"
+    if "ogg" in content_type:
+        return ".ogg"
+    if "flac" in content_type:
+        return ".flac"
+    return ".wav"
 
 
 async def _ensure_audio_local(asset: dict, work_dir: Path, name: str) -> Optional[Path]:
@@ -849,8 +904,7 @@ async def _ensure_audio_local(asset: dict, work_dir: Path, name: str) -> Optiona
     url = asset.get("preview_url") or asset.get("download_url")
     if not url:
         return None
-    key = asset.get("storage_key") or url
-    suffix = ".mp3" if key.lower().endswith(".mp3") else ".wav"
+    suffix = _audio_suffix_for(asset)
     out = work_dir / f"{name}{suffix}"
     ok = await _download_to(url, out, max_bytes=80 * 1024 * 1024, allow_audio=True)
     return out if ok else None
@@ -1400,7 +1454,10 @@ async def _resolve_audio(project: dict, scenes: list[dict], assets: list[dict],
                 "render stopped instead of writing a silent video. "
                 + (err or "")[-300:]
             )
-    return None
+    raise RuntimeError(
+        "Required narration is missing or only mock audio; "
+        "render stopped instead of writing a silent video."
+    )
 
 
 # ============================ ffmpeg ============================
@@ -1612,7 +1669,7 @@ def _ffmpeg_ken_burns_image(src: Path, duration: float, out: Path, direction: st
         Motion score: 29.5 (Ken Burns zoompan verified, not static 0.0)
     """
     if direction == "random":
-        direction = random.choice(list(KEN_BURNS_DIRECTIONS))
+        direction = "zoom_in"
     vf = _ken_burns_filter(direction, w, h)
     # motion 29.5 Ken Burns verified — log for journalctl proof
     logger.debug("_ffmpeg_ken_burns_image motion 29.5 direction=%s duration=%.2f", direction, duration)
@@ -1650,7 +1707,7 @@ def apply_ken_burns_effect(image_path: Path | str, duration: float, direction: s
     full command via _ffmpeg_ken_burns_image.
     """
     if direction == "random":
-        direction = random.choice(list(KEN_BURNS_DIRECTIONS))
+        direction = "zoom_in"
     vf = _ken_burns_filter(direction)
     logger.info("KEN_BURNS direction=%s duration=%.2f image=%s vf=%s", direction, duration, Path(image_path).name, vf[:80])
     # Return the filter string per spec; pipeline helper wraps it.
@@ -1975,6 +2032,12 @@ async def _queue_render_locked(
     expected_inputs: dict | None,
 ) -> dict:
     project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    script_coll = getattr(db, "scripts", None)
+    script = await script_coll.find_one({"project_id": project_id}, {"_id": 0}) if script_coll is not None else None
+    try:
+        require_consistent_content(project, script)
+    except ContentRevisionError as exc:
+        raise RuntimeError(str(exc)) from exc
     if expected_inputs is not None and not project_lease.render_inputs_match(project, expected_inputs):
         raise RenderSubmissionBusy(
             "Project settings changed while the render was being prepared; re-check the project and retry."
@@ -2317,14 +2380,15 @@ async def _run_render(job_id: str, project_id: str):
         # Compute dimensions for this render (not global)
         W, H = get_dims(aspect)
         subtitle_style = subtitle_style_for(W, H)
-        # Burn subtitles only if explicitly requested (not during production by default)
-        # Still write SRT for download/CapCut even when not burned
-        burn_enabled = bool(job_doc.get("burn_subtitles") or project.get("burn_subtitles"))
-        # Also allow env override for backward compat, but default is False
-        if os.getenv("RENDER_BURN_SUBTITLES", "false").lower() in ("1", "true", "yes"):
-            burn_enabled = True
+        # The render request wins. The env default applies only when neither
+        # the job nor the project recorded a choice.
+        burn_enabled = burn_subtitles_enabled(job_doc, project)
         logger.info("RENDER dims %sx%s aspect=%s burn=%s job=%s", W, H, aspect, burn_enabled, job_id)
         script = await db.scripts.find_one({"project_id": project_id}, {"_id": 0})
+        try:
+            require_consistent_content(project, script)
+        except ContentRevisionError as exc:
+            raise RuntimeError(str(exc)) from exc
         scenes = await db.scenes.find({"project_id": project_id}, {"_id": 0}).sort("scene_number", 1).to_list(500)
         metadata = await db.metadata_packages.find_one({"project_id": project_id}, {"_id": 0})
         assets = await db.assets.find({"project_id": project_id}, {"_id": 0}).to_list(500)
@@ -2421,18 +2485,7 @@ async def _run_render(job_id: str, project_id: str):
         intro_out = work_dir / "clip_000_intro.mp4"
         # Audience-facing title from metadata — never the internal project
         # name (e.g. "TEST VIRAL INGREDIENTS - e2e 04:30 UTC" must not burn in)
-        # FIX Hook+Beats template weekly_special_15s + roman_longform: 0s full screen 2s hook
-        HOOK_TEXT = "THE ROMAN MORNING RITUAL THAT BEATS ANY MODERN PRODUCTIVITY SUITE"
-        raw_title = ((metadata or {}).get("selected_title")
-                     or project.get("topic") or project.get("name") or "FacelessForge")
-        # If project matches roman template or beats present, force hook at 0s
-        topic_low = (project.get("topic") or project.get("name") or "").lower()
-        script_low = ((script or {}).get("full_script") or "").lower()
-        use_roman_hook = any(k in topic_low for k in ["roman","morning ritual","productivity"]) or "roman" in script_low or "salutatio" in script_low
-        intro_title = HOOK_TEXT if use_roman_hook else _intro_title_text(str(raw_title))
-        # For roman template, also ensure retention beats include roman hook beats
-        if use_roman_hook:
-            logger.info("HOOK_TEMPLATE roman_longform active -> intro_title=%r", intro_title)
+        intro_title = intro_overlay_title(project, script, metadata)
         if intro_duration:
             if hook_path:
                 ok, err = await _run_ffmpeg(_ffmpeg_intro_from_video(hook_path, intro_duration, intro_out, intro_title, work_dir, w=W, h=H))
@@ -2500,7 +2553,7 @@ async def _run_render(job_id: str, project_id: str):
                     # Example ffmpeg: -vf "scale=iw*2:ih*2,zoompan=d=1:s=1280x720:z='min(pzoom+0.0015,1.5)'..."
                     # We use WIDTHxHEIGHT for 1920x1080 output, 30fps, keep aspect.
                     # Randomize direction: zoom_in, zoom_out, pan_left, pan_right
-                    direction = random.choice(list(KEN_BURNS_DIRECTIONS)) if True else "zoom_in"
+                    direction = KEN_BURNS_DIRECTIONS[(i + j) % len(KEN_BURNS_DIRECTIONS)]
                     # Also support explicit check as per task wiring pseudocode:
                     # if is_image: clip = apply_ken_burns_effect(downloaded_path, scene_duration)
                     # Here we call the builder:
@@ -2659,8 +2712,10 @@ async def _run_render(job_id: str, project_id: str):
                 ]
                 ok, err = await _run_ffmpeg(cmd)
                 if not ok:
-                    logger.warning("subtitle burn-in failed (%s) — using clean video", err[-300:])
-                    burned_out = silent_out
+                    raise RuntimeError(
+                        f"subtitle burn-in failed: {err[-300:]}. "
+                        "The render stopped instead of delivering a clean video."
+                    )
             # LOCKED: no trim/pad/concat or timeline edits after SRT creation — burn is final video filter.
 
         # Mux audio (voiceover + optional music bed + loudnorm)

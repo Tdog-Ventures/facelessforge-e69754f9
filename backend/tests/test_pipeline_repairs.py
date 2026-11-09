@@ -7,7 +7,8 @@ and a failed voiceover concat must not become a silent successful render.
 import pytest
 
 from app.billing_dodo import scale_credits_for_checkout
-from app.generation import chapters_from_scenes, normalize_chapters
+from app.content_revision import revisions_match
+from app.generation import _scene_visual_prompt, chapters_from_scenes, generate_thumbnail_concepts, normalize_chapters
 from app.routes import api as api_routes
 from app.timing import contiguous_timeline_from_durations
 from app import render
@@ -158,6 +159,115 @@ def test_chapters_from_time_label_match_the_metadata_ui():
     assert built[1]["title"].startswith("Poach the egg")
 
 
+def test_intro_title_uses_the_selected_title_not_a_canned_line():
+    from app.render import intro_overlay_title
+    title = intro_overlay_title(
+        {"topic": "A productivity system for cooks", "name": "Egg video"},
+        {"full_script": "This roman morning ritual is not the subject."},
+        {"selected_title": "Every Way to Cook an Egg"},
+    )
+    assert title == "EVERY WAY TO COOK AN EGG"
+    assert "ROMAN MORNING" not in title
+
+
+def test_scene_prompt_includes_each_scene_not_a_script_prefix():
+    late = "The last scene explains poaching in vinegar and swirling the white."
+    prompt = _scene_visual_prompt(
+        ["Boil the water.", late],
+        narration_dur=60,
+        target_dur=62,
+        scene_duration=30,
+        topic="Eggs",
+        niche="cooking",
+    )
+    assert "Scene 2 narration" in prompt
+    assert late in prompt
+    assert "full_script[:3000]" not in prompt
+
+
+def test_ollama_is_skipped_when_no_model_is_configured(monkeypatch):
+    from app import generation as gen
+
+    monkeypatch.delenv("OLLAMA_MODEL", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("KIMI_API_KEY", raising=False)
+    monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    class Boom:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("no provider should be contacted")
+
+    monkeypatch.setattr(gen.httpx, "AsyncClient", Boom)
+    assert __import__("asyncio").run(gen._llm_json("system", "user", "cache")) is None
+
+
+def test_thumbnail_fallback_does_not_ask_for_baked_text(monkeypatch):
+    from app import generation as gen
+    seen = {}
+
+    async def capture(_system, user, _key=""):
+        seen["user"] = user
+        return None
+
+    monkeypatch.setattr(gen, "_llm_json", capture)
+    concepts = __import__("asyncio").run(generate_thumbnail_concepts(
+        {"topic": "Eggs", "niche": "cooking"},
+        {"selected_hook": "Ranked", "full_script": "Poach the egg in vinegar."},
+    ))
+    blob = " ".join(item["image_prompt"] for item in concepts)
+    assert "headline text" not in blob.lower()
+    assert "no text" in blob.lower()
+    assert "Poach the egg in vinegar." in seen["user"]
+    assert "Ranked" in seen["user"]
+    assert "no text, no letters, no captions" in seen["user"]
+
+
+def test_burn_request_beats_the_environment(monkeypatch):
+    from app.render import burn_subtitles_enabled
+    monkeypatch.setenv("RENDER_BURN_SUBTITLES", "true")
+    assert burn_subtitles_enabled({"burn_subtitles": False}, {"burn_subtitles": True}) is False
+    assert burn_subtitles_enabled({}, {"burn_subtitles": True}) is True
+    assert burn_subtitles_enabled({}, {}) is True
+
+
+def test_ken_burns_direction_is_stable():
+    from app.render import KEN_BURNS_DIRECTIONS
+    first = KEN_BURNS_DIRECTIONS[(0 + 1) % len(KEN_BURNS_DIRECTIONS)]
+    again = KEN_BURNS_DIRECTIONS[(0 + 1) % len(KEN_BURNS_DIRECTIONS)]
+    assert first == again
+    assert first in KEN_BURNS_DIRECTIONS
+
+
+def test_audio_outside_the_storage_root_is_ignored(tmp_path, monkeypatch):
+    from app import render
+    outside = tmp_path / "secret.mp3"
+    outside.write_bytes(b"nope")
+    monkeypatch.setattr(render, "STATIC_ROOT", tmp_path / "storage")
+    (tmp_path / "storage").mkdir()
+    inside = tmp_path / "storage" / "ok.m4a"
+    inside.write_bytes(b"yes")
+    assert render._local_path_for_asset({"file_path": str(outside)}) is None
+    assert render._local_path_for_asset({"file_path": str(inside)}) == inside
+    assert render._audio_suffix_for({"storage_key": "audio/project/take.m4a"}) == ".m4a"
+
+
+def test_mock_voiceover_does_not_satisfy_preflight():
+    from app.render import validate_prerequisites
+    project = {"id": "p", "target_duration": 30, "selected_voiceover_asset_id": "v"}
+    script = {"full_script": "word " * 40}
+    scenes = [{"id": "s", "narration_text": "word", "duration": 27.5, "end_time": 27.5}]
+    metadata = {"selected_title": "Title"}
+    assets = [{"id": "v", "asset_type": "voiceover_audio", "mock": True, "source": "mock", "duration": 27.5}]
+    check = validate_prerequisites(project, script, scenes, metadata, assets)
+    assert any(item["key"] == "voiceover" and not item["ok"] for item in check["checklist"])
+
+
+def test_legacy_project_without_revisions_is_consistent():
+    assert revisions_match({"id": "p"}, {"full_script": "hello"})
+    assert not revisions_match({"content_consistent": False, "content_revision": 1, "derivatives_revision": 1}, {"content_revision": 1})
+
+
 def test_pending_checkout_credits_are_not_scaled_twice():
     assert scale_credits_for_checkout(pending={"credits": "200"}, quantity=2, unit_credits=100) == 200
     assert scale_credits_for_checkout(pending={}, quantity=2, unit_credits=100) == 200
@@ -234,6 +344,10 @@ async def test_generate_script_clears_stale_scenes(monkeypatch):
     assert db.assets.docs == []
     assert view["script_invalidated"]["scenes"] == 1
     assert "regenerate" in view["script_notice"].lower()
+    published = db.projects.docs[0]
+    assert published["content_consistent"] is True
+    assert published["content_revision"] == published["derivatives_revision"]
+    assert db.scripts.docs[0]["content_revision"] == published["content_revision"]
 
 
 @pytest.mark.asyncio
