@@ -34,3 +34,17 @@ def require_consistent_content(project: Optional[dict], script: Optional[dict]) 
             "Script and derived scenes are not one revision. "
             "Retry after the script change finishes."
         )
+
+
+def scenes_match_revision(project: Optional[dict], scenes: Optional[list]) -> bool:
+    """Scenes stamped by a planner must belong to the published script revision.
+
+    Older scenes have no stamp. Those stay valid until a script change deletes them.
+    """
+    if not project:
+        return False
+    revision = int(project.get("content_revision") or 0)
+    for scene in scenes or []:
+        if "content_revision" in scene and int(scene.get("content_revision") or 0) != revision:
+            return False
+    return True

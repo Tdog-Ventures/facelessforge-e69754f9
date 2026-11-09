@@ -7,7 +7,7 @@ and a failed voiceover concat must not become a silent successful render.
 import pytest
 
 from app.billing_dodo import scale_credits_for_checkout
-from app.content_revision import revisions_match
+from app.content_revision import revisions_match, scenes_match_revision
 from app.generation import _scene_visual_prompt, chapters_from_scenes, generate_thumbnail_concepts, normalize_chapters
 from app.routes import api as api_routes
 from app.timing import contiguous_timeline_from_durations
@@ -92,6 +92,11 @@ class FakeCollection:
         if upsert:
             self.docs.append(dict(document))
         return FakeResult(0)
+
+    async def insert_many(self, documents):
+        for document in documents:
+            self.docs.append(dict(document))
+        return FakeResult(len(list(documents)))
 
 
 class _Cursor:
@@ -188,18 +193,24 @@ def test_scene_prompt_includes_each_scene_not_a_script_prefix():
 def test_ollama_is_skipped_when_no_model_is_configured(monkeypatch):
     from app import generation as gen
 
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *args, **kwargs: None)
     monkeypatch.delenv("OLLAMA_MODEL", raising=False)
+    monkeypatch.setenv("OLLAMA_TIMEOUT_SECONDS", "not-a-number")
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     monkeypatch.delenv("KIMI_API_KEY", raising=False)
     monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
+    attempted = []
+
     class Boom:
         def __init__(self, *args, **kwargs):
+            attempted.append(True)
             raise AssertionError("no provider should be contacted")
 
     monkeypatch.setattr(gen.httpx, "AsyncClient", Boom)
     assert __import__("asyncio").run(gen._llm_json("system", "user", "cache")) is None
+    assert attempted == []
 
 
 def test_thumbnail_fallback_does_not_ask_for_baked_text(monkeypatch):
@@ -214,12 +225,14 @@ def test_thumbnail_fallback_does_not_ask_for_baked_text(monkeypatch):
     concepts = __import__("asyncio").run(generate_thumbnail_concepts(
         {"topic": "Eggs", "niche": "cooking"},
         {"selected_hook": "Ranked", "full_script": "Poach the egg in vinegar."},
+        {"selected_title": "Every Way to Cook an Egg"},
     ))
     blob = " ".join(item["image_prompt"] for item in concepts)
     assert "headline text" not in blob.lower()
     assert "no text" in blob.lower()
     assert "Poach the egg in vinegar." in seen["user"]
-    assert "Ranked" in seen["user"]
+    assert "Selected title: Every Way to Cook an Egg" in seen["user"]
+    assert "Selected title: Ranked" not in seen["user"]
     assert "no text, no letters, no captions" in seen["user"]
 
 
@@ -227,16 +240,22 @@ def test_burn_request_beats_the_environment(monkeypatch):
     from app.render import burn_subtitles_enabled
     monkeypatch.setenv("RENDER_BURN_SUBTITLES", "true")
     assert burn_subtitles_enabled({"burn_subtitles": False}, {"burn_subtitles": True}) is False
+    assert burn_subtitles_enabled({"burn_subtitles": None}, {"burn_subtitles": True}) is True
     assert burn_subtitles_enabled({}, {"burn_subtitles": True}) is True
     assert burn_subtitles_enabled({}, {}) is True
+    assert render.recorded_burn_subtitles(None) is None
+    assert render.recorded_burn_subtitles(False) is False
 
 
-def test_ken_burns_direction_is_stable():
+def test_ken_burns_direction_is_stable(monkeypatch):
     from app.render import KEN_BURNS_DIRECTIONS
     first = KEN_BURNS_DIRECTIONS[(0 + 1) % len(KEN_BURNS_DIRECTIONS)]
     again = KEN_BURNS_DIRECTIONS[(0 + 1) % len(KEN_BURNS_DIRECTIONS)]
     assert first == again
     assert first in KEN_BURNS_DIRECTIONS
+    monkeypatch.setattr(render.random, "choice", lambda options: options[-1])
+    command = render._ffmpeg_ken_burns_image("/tmp/still.jpg", 3, "/tmp/out.mp4", direction="random")
+    assert "pan_right" in " ".join(command) or "10-10*on" in " ".join(command)
 
 
 def test_audio_outside_the_storage_root_is_ignored(tmp_path, monkeypatch):
@@ -503,3 +522,115 @@ async def test_auto_attach_records_rights_with_both_licence_spellings(monkeypatc
     assert recorded["license"] == "pexels"
     assert recorded["licence"] == "pexels"
     assert recorded["asset_id"] == "a1"
+
+
+@pytest.mark.asyncio
+async def test_stale_script_publish_keeps_the_newer_edit():
+    project = {
+        "id": "p1", "user_id": "u1", "content_revision": 2, "derivatives_revision": 2, "content_consistent": True,
+    }
+    manual = {"id": "script-1", "project_id": "p1", "full_script": "the manual edit " * 8, "content_revision": 2}
+    db = FakeDB(project, scripts=[manual], scenes=[{"id": "s1", "project_id": "p1", "content_revision": 2}])
+    stale = {"id": "script-1", "project_id": "p1", "full_script": "old generated narration " * 8}
+    with pytest.raises(Exception) as exc:
+        await api_routes._publish_script_change(
+            db, project, "p1", document=stale, expected_revision=1,
+        )
+    assert exc.value.status_code == 409
+    assert db.scripts.docs[0]["full_script"] == manual["full_script"]
+    assert db.scenes.docs
+
+
+@pytest.mark.asyncio
+async def test_unchanged_regeneration_keeps_the_revision(monkeypatch):
+    project = {
+        "id": "p1", "user_id": "u1", "target_duration": 90, "estimated_cost": 0,
+        "content_revision": 3, "derivatives_revision": 3, "content_consistent": True,
+    }
+    text = "same narration " * 20
+    old = {"id": "script-1", "project_id": "p1", "full_script": text, "content_revision": 3}
+    db = FakeDB(project, scripts=[old], scenes=[{"id": "s1", "project_id": "p1"}])
+    monkeypatch.setattr(api_routes, "get_db", lambda: db)
+    monkeypatch.setattr(api_routes, "check_credits", None)
+    async def same_script(_project):
+        return {"full_script": text, "word_count": 40}
+
+    async def no_log(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(api_routes.gen, "generate_script", same_script)
+    monkeypatch.setattr(api_routes, "_log_cost", no_log)
+
+    async def stub(_db, _project):
+        return {"project": dict(_project)}
+
+    monkeypatch.setattr(api_routes, "_attach_project_view", stub)
+    await api_routes.generate_script_endpoint("p1", user={"id": "u1", "role": "creator"})
+    assert db.scripts.docs[0]["content_revision"] == 3
+    assert db.scenes.docs
+    assert revisions_match(db.projects.docs[0], db.scripts.docs[0])
+
+
+@pytest.mark.asyncio
+async def test_scene_plan_is_rejected_after_the_script_changes():
+    project = {
+        "id": "p1", "content_revision": 4, "derivatives_revision": 4, "content_consistent": True,
+    }
+    script = {"project_id": "p1", "full_script": "new", "content_revision": 4}
+    db = FakeDB(project, scripts=[script], scenes=[])
+    with pytest.raises(Exception) as exc:
+        await api_routes._commit_scene_plan(
+            db, "p1",
+            [{"id": "old", "project_id": "p1", "narration_text": "old", "content_revision": 3}],
+            3,
+        )
+    assert exc.value.status_code == 409
+    assert db.scenes.docs == []
+    assert not scenes_match_revision(project, [{"content_revision": 3}])
+    assert scenes_match_revision(project, [{"content_revision": 4}])
+
+
+@pytest.mark.asyncio
+async def test_metadata_edit_survives_revision_recovery():
+    project = {
+        "id": "p1", "user_id": "u1", "content_revision": 2, "derivatives_revision": 2, "content_consistent": True,
+    }
+    script = {"id": "script-1", "project_id": "p1", "full_script": "words " * 30, "selected_hook": ""}
+    db = FakeDB(project, scripts=[script], scenes=[{"id": "s1", "project_id": "p1"}])
+    monkeypatch_db = db
+
+    class Body:
+        source = None
+
+        def model_dump(self, exclude_unset=False):
+            return {"selected_hook": "Keep this hook"}
+
+    # The route reads get_db. Patch it for this call.
+    from unittest.mock import patch
+    with patch.object(api_routes, "get_db", lambda: monkeypatch_db):
+        await api_routes.update_script("p1", Body(), user={"id": "u1", "role": "creator"})
+    assert db.scripts.docs[0]["selected_hook"] == "Keep this hook"
+    assert db.scripts.docs[0]["content_revision"] == 2
+    assert db.scenes.docs
+
+
+@pytest.mark.asyncio
+async def test_rejected_full_voiceover_does_not_replace_scene_audio(tmp_path, monkeypatch):
+    seen = []
+
+    async def present(asset, _work, name):
+        seen.append(asset["id"])
+        return tmp_path / f"{name}.wav"
+
+    monkeypatch.setattr(render, "_ensure_audio_local", present)
+    path = await render._resolve_audio(
+        {"id": "p", "selected_voiceover_asset_id": "full"},
+        [{"id": "s1", "scene_number": 1, "duration": 30}],
+        [
+            {"id": "full", "asset_type": "voiceover_audio", "status": "rejected", "source": "elevenlabs"},
+            {"id": "scene", "asset_type": "voiceover_audio", "scene_id": "s1", "status": "selected", "source": "elevenlabs", "duration": 30},
+        ],
+        tmp_path,
+    )
+    assert seen == ["scene"]
+    assert path == tmp_path / "voiceover_scene_000.wav"

@@ -42,6 +42,7 @@ import json
 import logging
 import math
 import os
+import random
 import re
 import shutil
 import uuid
@@ -67,7 +68,7 @@ from . import stock as stock_service
 from .grounding import CLIENT_VISUAL_TYPES, validate_commercial_grounding
 from .scoring import commercial_scorecard
 from . import project_lease
-from .content_revision import ContentRevisionError, require_consistent_content
+from .content_revision import ContentRevisionError, require_consistent_content, scenes_match_revision
 try:
     from .verify import verify_render as _verify_render_constitution
     VERIFY_AVAILABLE = True
@@ -351,12 +352,21 @@ def get_dims(aspect_ratio: str):
     return 1080, 1920  # 9:16 default
 
 def burn_subtitles_enabled(job_doc: dict, project: dict) -> bool:
-    """Job choice, then project choice, then the env default."""
+    """Job choice, then project choice, then the env default.
+
+    A missing or null job value means the request did not choose. An explicit
+    false is off, even when the project or the environment would burn captions.
+    """
     if job_doc.get("burn_subtitles") is not None:
         return bool(job_doc.get("burn_subtitles"))
     if project.get("burn_subtitles") is not None:
         return bool(project.get("burn_subtitles"))
     return os.getenv("RENDER_BURN_SUBTITLES", "false").lower() in ("1", "true", "yes")
+
+
+def recorded_burn_subtitles(requested: Optional[bool]) -> Optional[bool]:
+    """Keep omission distinct from an explicit false."""
+    return requested
 
 
 def subtitle_style_for(w,h):
@@ -376,6 +386,15 @@ _LOCKS: dict[str, asyncio.Lock] = {}
 # Hetzner 16GB: 3 parallel renders (queue limit) — rest queued, thread-capped BullMQ + Redis style
 MAX_CONCURRENT_RENDERS = int(os.environ.get("MAX_CONCURRENT_RENDERS", "3"))
 _RENDER_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_RENDERS)
+
+
+def is_renderable_voice(asset: dict) -> bool:
+    """Real narration. Mock and rejected takes cannot satisfy preflight or the mix."""
+    if not asset or asset.get("asset_type") != "voiceover_audio" or asset.get("status") == "rejected":
+        return False
+    if asset.get("mock") or str(asset.get("source") or "").lower() in {"mock", "mock_tts"}:
+        return False
+    return True
 
 
 def _now() -> datetime:
@@ -427,11 +446,7 @@ def validate_prerequisites(project: dict, script: dict | None,
         _add("thumbnail", "Selected thumbnail", bool(sel_thumb), "Pick a thumbnail in the Thumbnails tab.")
 
     def _real_voice(asset: dict) -> bool:
-        if not asset or asset.get("asset_type") != "voiceover_audio" or asset.get("status") == "rejected":
-            return False
-        if asset.get("mock") or str(asset.get("source") or "").lower() in {"mock", "mock_tts"}:
-            return False
-        return True
+        return is_renderable_voice(asset)
 
     full_voice = next((a for a in assets
                        if _real_voice(a)
@@ -1367,13 +1382,10 @@ async def _resolve_audio(project: dict, scenes: list[dict], assets: list[dict],
     A selected real voiceover that cannot be loaded or concatenated raises.
     Writing a silent master in that case used to look like a successful export.
     """
-    def _is_real(a: dict) -> bool:
-        return bool(a) and not a.get("mock") and a.get("source") != "mock_tts"
-
-    full = next((a for a in assets if a.get("asset_type") == "voiceover_audio"
+    full = next((a for a in assets if is_renderable_voice(a)
                  and not a.get("scene_id")
                  and a.get("id") == project.get("selected_voiceover_asset_id")), None)
-    if _is_real(full):
+    if full:
         local = await _ensure_audio_local(full, work_dir, "voiceover_full")
         if not local:
             # Do not substitute per-scene files. They are a different narration.
@@ -1385,9 +1397,7 @@ async def _resolve_audio(project: dict, scenes: list[dict], assets: list[dict],
 
     scene_voices_by_id: dict[str, dict] = {}
     for s in scenes:
-        ss = [a for a in assets if a.get("asset_type") == "voiceover_audio"
-              and a.get("scene_id") == s.get("id") and a.get("status") != "rejected"
-              and _is_real(a)]
+        ss = [a for a in assets if is_renderable_voice(a) and a.get("scene_id") == s.get("id")]
         if not ss:
             continue
         sel = next((x for x in ss if x.get("status") == "selected"), None) or max(
@@ -1669,7 +1679,7 @@ def _ffmpeg_ken_burns_image(src: Path, duration: float, out: Path, direction: st
         Motion score: 29.5 (Ken Burns zoompan verified, not static 0.0)
     """
     if direction == "random":
-        direction = "zoom_in"
+        direction = random.choice(list(KEN_BURNS_DIRECTIONS))
     vf = _ken_burns_filter(direction, w, h)
     # motion 29.5 Ken Burns verified — log for journalctl proof
     logger.debug("_ffmpeg_ken_burns_image motion 29.5 direction=%s duration=%.2f", direction, duration)
@@ -1707,7 +1717,7 @@ def apply_ken_burns_effect(image_path: Path | str, duration: float, direction: s
     full command via _ffmpeg_ken_burns_image.
     """
     if direction == "random":
-        direction = "zoom_in"
+        direction = random.choice(list(KEN_BURNS_DIRECTIONS))
     vf = _ken_burns_filter(direction)
     logger.info("KEN_BURNS direction=%s duration=%.2f image=%s vf=%s", direction, duration, Path(image_path).name, vf[:80])
     # Return the filter string per spec; pipeline helper wraps it.
@@ -1990,7 +2000,7 @@ async def queue_render(
     project_id: str,
     *,
     requested_by: str,
-    burn_subtitles: bool = False,
+    burn_subtitles: Optional[bool] = None,
     aspect_ratio: str | None = None,
     expected_inputs: dict | None = None,
 ) -> dict:
@@ -2027,7 +2037,7 @@ async def _queue_render_locked(
     project_id: str,
     *,
     requested_by: str,
-    burn_subtitles: bool,
+    burn_subtitles: Optional[bool],
     aspect_ratio: str | None,
     expected_inputs: dict | None,
 ) -> dict:
@@ -2142,7 +2152,7 @@ async def _queue_render_locked(
         "completed_at": None,
         "created_at": now,
         "updated_at": now,
-        "burn_subtitles": bool(burn_subtitles),
+        "burn_subtitles": recorded_burn_subtitles(burn_subtitles),
         "aspect_ratio": aspect_ratio or "9:16",
         "credit_charge": charge,
         "render_mode": render_mode,
@@ -2390,6 +2400,8 @@ async def _run_render(job_id: str, project_id: str):
         except ContentRevisionError as exc:
             raise RuntimeError(str(exc)) from exc
         scenes = await db.scenes.find({"project_id": project_id}, {"_id": 0}).sort("scene_number", 1).to_list(500)
+        if not scenes_match_revision(project, scenes):
+            raise RuntimeError("Scenes were planned for a different script. Generate scenes again.")
         metadata = await db.metadata_packages.find_one({"project_id": project_id}, {"_id": 0})
         assets = await db.assets.find({"project_id": project_id}, {"_id": 0}).to_list(500)
 

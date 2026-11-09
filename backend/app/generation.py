@@ -194,14 +194,21 @@ async def _llm_json(system: str, user: str, cache_key: str = "") -> Optional[dic
     last_error: str = ""
 
     # 1. Local Ollama only when a model is configured. A blank OLLAMA_MODEL
-    # must not spend two 600s attempts on llama3 before the cloud fallbacks.
+    # must not spend two 600s attempts on llama3 before the cloud fallbacks,
+    # and a bad timeout value must not block the cloud providers either.
     ollama_model = os.environ.get("OLLAMA_MODEL", "").strip()
-    ollama_read = min(90.0, float(os.environ.get("OLLAMA_TIMEOUT_SECONDS", "60") or 60))
+    ollama_read = 60.0
     ollama_timeout = httpx.Timeout(connect=5.0, read=ollama_read, write=30.0, pool=5.0)
     ollama_url = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate").strip() or "http://localhost:11434/api/generate"
     use_chat = ollama_url.rstrip("/").endswith("/chat")
     if not ollama_model:
         logger.info("Ollama skipped for %s; OLLAMA_MODEL is not set", cache_key)
+    else:
+        try:
+            ollama_read = min(90.0, float(os.environ.get("OLLAMA_TIMEOUT_SECONDS", "60") or 60))
+        except (TypeError, ValueError):
+            ollama_read = 60.0
+        ollama_timeout = httpx.Timeout(connect=5.0, read=ollama_read, write=30.0, pool=5.0)
     for attempt in range(2 if ollama_model else 0):
         try:
             logger.info("Ollama (%s) request for %s attempt %d", ollama_model, cache_key, attempt + 1)
@@ -984,14 +991,22 @@ def _coerce_thumbnail_concepts(concepts: list) -> list[dict]:
     return out
 
 
-async def generate_thumbnail_concepts(project: dict, script: dict) -> list[dict]:
+def _thumbnail_title(script: dict, metadata: dict = None) -> str:
+    """The video title, not the spoken hook. A hook can disagree with the title."""
+    if isinstance(metadata, dict) and str(metadata.get("selected_title") or "").strip():
+        return str(metadata.get("selected_title")).strip()
+    if isinstance(script, dict) and str(script.get("selected_title") or "").strip():
+        return str(script.get("selected_title")).strip()
+    return ""
+
+
+async def generate_thumbnail_concepts(project: dict, script: dict, metadata: dict = None) -> list[dict]:
     topic = project.get("topic", project.get("title", "business story"))
     niche = project.get("niche", "business")
 
-    selected_title = ""
+    selected_title = _thumbnail_title(script, metadata)
     excerpt = ""
     if isinstance(script, dict):
-        selected_title = str(script.get("selected_hook") or script.get("selected_title") or "")
         excerpt = " ".join(str(script.get("full_script") or "").split())[:800]
     user = f"""Generate 3 YouTube thumbnail concepts as JSON:
 {{"concepts": [
@@ -1068,9 +1083,9 @@ Script excerpt: {excerpt or topic}"""
     ]
 
 # Alias for backwards compat - routes.py expects generate_thumbnails
-async def generate_thumbnails(project: dict, script: dict = None):
+async def generate_thumbnails(project: dict, script: dict = None, metadata: dict = None):
     if script is None:
         script = project.get("full_script", {}) if isinstance(project, dict) else {}
         if isinstance(script, str):
             script = {"full_script": script}
-    return await generate_thumbnail_concepts(project, script)
+    return await generate_thumbnail_concepts(project, script, metadata)
