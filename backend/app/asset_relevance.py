@@ -65,3 +65,19 @@ def relevant_candidates(candidates: list[dict], scene: dict, query: str) -> tupl
     for candidate in candidates:
         (allowed if candidate_is_relevant(candidate, scene, query) else rejected).append(candidate)
     return allowed, rejected
+
+
+def fallback_is_usable(candidate: dict, query: str) -> bool:
+    """A broader search may keep a clip when its own title matches that query.
+
+    The strict scene-subject check still runs first. This only accepts a clip
+    the specific query could not fill, and only when the provider title or
+    URL slug shares a word with the broader query that found it.
+    """
+    source = str(candidate.get("source") or "").strip().lower()
+    if source == "mock" or bool(candidate.get("mock")):
+        return False
+    if not candidate.get("download_url") or not candidate.get("external_id"):
+        return False
+    evidence = _tokens(verified_metadata(candidate))
+    return bool(evidence and evidence & _tokens(query))
