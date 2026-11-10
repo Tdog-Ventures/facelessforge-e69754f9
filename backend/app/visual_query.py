@@ -287,23 +287,32 @@ async def generate_broll_keywords(
             '"mail sorting room", "streaming apps on tv"]'
         )
 
-        # 1. Local Ollama (PRIMARY)
-        ollama_model = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b-instruct").strip() or "qwen2.5:7b-instruct"
+        # 1. Local Ollama only when configured. An empty OLLAMA_MODEL must not
+        # spend a long timeout on a default model the host may not be running.
+        ollama_model = os.environ.get("OLLAMA_MODEL", "").strip()
         ollama_url = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate").strip() or "http://localhost:11434/api/generate"
-        try:
-            async with httpx.AsyncClient(timeout=60.0) as c:
-                resp = await c.post(
-                    ollama_url,
-                    json={"model": ollama_model, "prompt": prompt, "stream": False, "format": "json"},
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    text = data.get("response") or data.get("message", {}).get("content", "")
-                    kws = _parse_broll_json(text)
-                    if kws:
-                        logger.info("generate_broll_keywords ollama=%s -> %s", ollama_model, kws)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("generate_broll_keywords ollama failed: %s", e)
+        if not ollama_model:
+            logger.info("generate_broll_keywords skipped Ollama; OLLAMA_MODEL is not set")
+        else:
+            logger.info("generate_broll_keywords Ollama model=%s url=%s connect_timeout=2s", ollama_model, ollama_url)
+            try:
+                timeout = httpx.Timeout(connect=2.0, read=20.0, write=10.0, pool=2.0)
+                async with httpx.AsyncClient(timeout=timeout) as c:
+                    resp = await c.post(
+                        ollama_url,
+                        json={"model": ollama_model, "prompt": prompt, "stream": False, "format": "json"},
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        text = data.get("response") or data.get("message", {}).get("content", "")
+                        kws = _parse_broll_json(text)
+                        if kws:
+                            logger.info("generate_broll_keywords ollama=%s url=%s -> %s", ollama_model, ollama_url, kws)
+            except Exception as e:  # noqa: BLE001
+                hint = ""
+                if "127.0.0.1" in ollama_url or "localhost" in ollama_url.lower():
+                    hint = " Docker bridge containers cannot use the host's 127.0.0.1; set OLLAMA_URL=http://host.docker.internal:11434/api/generate and --add-host=host.docker.internal:host-gateway."
+                logger.warning("generate_broll_keywords ollama failed url=%s: %s%s", ollama_url, e, hint)
 
         # 2. Cloud backups
         if not kws:
