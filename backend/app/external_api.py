@@ -26,6 +26,7 @@ from fastapi import APIRouter, Body, Header, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 
 from . import generation as gen
+from . import publish_gate
 from . import render as render_service
 from . import thumbnail_images as thumb_images
 from . import tts as tts_service
@@ -504,8 +505,11 @@ async def _prepare_external_render(
                 st = j.get("status")
                 if st == "completed":
                     try:
+                        # Artifact completion is not permission to publish. QA may
+                        # deliberately retain a completed but blocked render.
+                        publish_gate.assert_publishable(j)
                         # call youtube upload helper directly (bypasses auth, uses project owner)
-                        from .routes.youtube import _get_youtube_credentials, _resolve_video_path
+                        from .routes.youtube import _get_youtube_credentials
 
                         # ensure refresh token present else mock upload still records
                         logger.info("auto_upload: render %s completed, triggering YouTube upload for project %s", jid, pid)
@@ -520,7 +524,10 @@ async def _prepare_external_render(
                         if "Faceless Forge" not in _title:
                             _title = f"{_title} | Faceless Forge"
                         # direct mock-aware upload path
-                        _video_path = _resolve_video_path(pid)
+                        # Bind publication to the exact approved job, never an
+                        # arbitrary older project file found by directory scan.
+                        _video_path = publish_gate.resolve_approved_artifact(
+                            job=j, project_id=pid, static_renders=render_service.STATIC_RENDERS)
                         _creds = _get_youtube_credentials()
                         if not _creds:
                             try:

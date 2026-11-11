@@ -86,7 +86,45 @@ def _read_token(request: Request) -> Optional[str]:
     return None
 
 
+def _check_cookie_origin(request: Request) -> None:
+    """Unsafe cookie requests need same-origin or explicitly trusted frontend evidence.
+
+    Bearer-only clients and safe reads do not depend on ambient browser cookies.
+    Non-browser cookie clients must send Origin or Referer on mutations too.
+    """
+    if request.method.upper() in {"GET", "HEAD", "OPTIONS"}:
+        return
+    if not (request.cookies.get("access_token") or request.cookies.get("refresh_token")):
+        return
+    from urllib.parse import urlsplit
+
+    def origin(value):
+        try:
+            url = urlsplit(value)
+            if url.scheme not in {"http", "https"} or not url.netloc or url.username or url.password:
+                return None
+            port = url.port or (443 if url.scheme == "https" else 80)
+            return (url.scheme, url.hostname, port)
+        except ValueError:
+            return None
+
+    trusted = {
+        origin(str(request.base_url)),
+        origin("https://facelessforge.ethinx.solutions"),
+        origin("https://ethinx.solutions"),
+        origin("https://www.ethinx.solutions"),
+        origin(os.environ.get("FRONTEND_URL", "")),
+    } - {None}
+    supplied = request.headers.get("origin")
+    if supplied is None:
+        supplied = request.headers.get("referer", "")
+    # Cross-site unsafe requests without verifiable provenance fail closed.
+    if origin(supplied) not in trusted:
+        raise HTTPException(status_code=403, detail="Untrusted origin for cookie-authenticated request")
+
+
 async def get_current_user(request: Request):
+    _check_cookie_origin(request)
     from .db import get_db
     token = _read_token(request)
     if not token:
