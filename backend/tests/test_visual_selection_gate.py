@@ -12,6 +12,10 @@ def test_cricket_video_does_not_pick_lava_lamp_or_office():
          "title": "Cricket stadium spectators cheering", "source_url": "https://pixabay.com/videos/cricket-stadium-2"},
     ]
     allowed, dropped = relevant_candidates(found, scene, "cricket stadium crowd")
+    assert allowed == []
+    assert [c["external_id"] for c in dropped] == ["1", "2"]
+    found[1]["visual_relevance"] = {"accepted": True, "score": 90, "reason": "cricket stadium spectators"}
+    allowed, dropped = relevant_candidates(found, scene, "cricket stadium crowd")
     assert [c["external_id"] for c in allowed] == ["2"]
     assert [c["external_id"] for c in dropped] == ["1"]
 

@@ -53,6 +53,7 @@ def test_gemini_is_the_default_chooser_and_hides_provider_bodies(monkeypatch):
     async def fake(model, system, payload, key):
         calls.append((model, key, payload))
         assert "stock_video" in system
+        assert "visible subject" in system
         if key == "explode":
             raise RuntimeError("private-provider-body")
         return choices(beats)
@@ -180,11 +181,59 @@ def test_directed_stock_prefers_existing_attachments(tmp_path):
     assert captured == [(attached, False)]
 
 
-def test_images_cannot_silently_replace_directed_footage(tmp_path):
-    async def stock(*args, **kwargs): return Path("still.jpg"), "image", None
-    with pytest.raises(DirectorError):
-        asyncio.run(resolve_directed_scene(scenes()[0], [{"kind": "stock_video", "query": "a query"}],
-                    {}, tmp_path, 0, 640, 360, set(), stock))
+def test_images_cannot_silently_replace_directed_footage(tmp_path, monkeypatch):
+    import subprocess
+    from app.render import _resolve_scene_visual
+
+    searches = {"n": 0}
+
+    async def fail_search(*args, **kwargs):
+        searches["n"] += 1
+        raise AssertionError("search_stock")
+
+    monkeypatch.setattr("app.render.stock_service.search_stock", fail_search)
+    monkeypatch.setattr("app.render.stock_service.search_stock_videos", fail_search)
+
+    async def resolve(scene, assets, project, work, idx, **kwargs):
+        assert kwargs.get("allow_fallback") is False
+        if idx == 0:
+            return await _resolve_scene_visual(
+                scene, [], project, work, idx, used_ext_ids=set(), allow_fallback=False,
+            )
+        return Path("still.jpg"), "image", "not-footage"
+
+    shots = [
+        {"kind": "stock_video", "query": "boiling kettle releasing steam", "frames": 45,
+         "narration": "The kitchen kettle steams on the counter."},
+        {"kind": "stock_video", "query": "rain on a window", "frames": 45,
+         "narration": "Rain taps the kitchen window above cups."},
+    ]
+    result = asyncio.run(resolve_directed_scene(
+        scenes()[0], shots, {}, tmp_path, 0, 640, 360, set(), resolve))
+    assert searches["n"] == 0
+    assert [kind for _path, kind in result] == ["video", "video"]
+    assert all(path.name.startswith("directed_000_") for path, _kind in result)
+    assert Path("still.jpg") not in [path for path, _kind in result]
+    graphic = result[0][0]
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=nb_frames,duration", "-of", "json", str(graphic)],
+        capture_output=True, text=True, check=True,
+    )
+    payload = json.loads(probe.stdout)
+    stream = payload["streams"][0]
+    duration = float(stream["duration"])
+    assert abs(duration - 1.5) < 0.15
+    frames = []
+    for stamp, name in ((0.0, "a.png"), (1.1, "b.png")):
+        dest = tmp_path / name
+        subprocess.run(
+            ["ffmpeg", "-y", "-v", "error", "-ss", str(stamp), "-i", str(graphic),
+             "-frames:v", "1", str(dest)],
+            check=True,
+        )
+        frames.append(dest.read_bytes())
+    assert frames[0] != frames[1]
 
 
 def test_client_asset_projects_are_protected(tmp_path):

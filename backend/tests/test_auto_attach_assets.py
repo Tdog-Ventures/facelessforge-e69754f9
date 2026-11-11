@@ -96,6 +96,11 @@ def _patch_stock(monkeypatch, db, titles, *, by_query=None, ext_prefix="ext"):
     # Legacy tests isolate storage, billing and lease behaviour with mixed stock titles.
     # The real relevance predicate has independent regression tests.
     monkeypatch.setattr(api_routes, "relevant_candidates", lambda candidates, _scene, _query: (candidates, []))
+
+    async def _keep_unprobed(candidates, _scene, _query, *, needed, renew=None):
+        return list(candidates), []
+
+    monkeypatch.setattr(api_routes, "select_footage_candidates", _keep_unprobed)
     monkeypatch.setattr(api_routes.stock_service, "is_mock_mode", lambda: True)
     monkeypatch.setattr(api_routes, "get_db", lambda: db)
 
@@ -171,6 +176,12 @@ def test_auto_attach_retries_alternative_queries_when_primary_has_one_asset(monk
     monkeypatch.setattr(api_routes.stock_service, "search_stock_aggregated", search, raising=False)
     monkeypatch.setattr(api_routes.stock_service, "is_mock_mode", lambda: True)
     monkeypatch.setattr(api_routes, "get_db", lambda: db)
+    monkeypatch.setattr(api_routes, "relevant_candidates", lambda candidates, _scene, _query: (candidates, []))
+
+    async def _keep_unprobed(candidates, _scene, _query, *, needed, renew=None):
+        return list(candidates), []
+
+    monkeypatch.setattr(api_routes, "select_footage_candidates", _keep_unprobed)
     db.scenes.docs[0]["search_terms"] = [
         "video editing timeline", "editing studio workspace", "creative production desk",
     ]

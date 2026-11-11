@@ -2913,6 +2913,7 @@ async def _run_render(job_id: str, project_id: str):
         # evaluator is fail-closed when it has not been configured; it can
         # report findings but has no authority to mutate this repository.
         from .video_qa import QAPolicy, configured_vision_evaluator, run_video_qa
+        qa_block_error = None
         if os.getenv("FFORGE_SKIP_QA") == "1" or os.getenv("VIDEO_QA_ENABLED") == "false":
             qa_result = {"release_eligible": True, "status": "PASS", "qa_passes": 0, "escalation_reason": None}
         else:
@@ -2925,8 +2926,9 @@ async def _run_render(job_id: str, project_id: str):
                 visual_evaluator=configured_vision_evaluator(),
                 policy=QAPolicy(require_audio=True),
             )
+            await _set_job(job_id, video_qa=qa_result)
             if not qa_result.get("release_eligible"):
-                raise RuntimeError(
+                qa_block_error = RuntimeError(
                     "Video QA release gate blocked artifact: "
                     f"{qa_result.get('escalation_reason') or qa_result.get('status')}"
                 )
@@ -3020,6 +3022,9 @@ async def _run_render(job_id: str, project_id: str):
                 raise RuntimeError(f"Verification crashed: {ve}") from ve
         else:
             logger.warning("[VERIFY] verify.py not available — skipping constitution check (DEV ONLY)")
+
+        if qa_block_error is not None:
+            raise qa_block_error
 
         try:
             shutil.rmtree(work_dir, ignore_errors=True)

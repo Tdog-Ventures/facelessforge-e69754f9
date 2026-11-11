@@ -165,6 +165,54 @@ def _vertex_response_config(types: Any) -> Any:
     )
 
 
+
+def _gemini_api_key_evaluator() -> VisionEvaluator | None:
+    """Frame QA through the Gemini API key. Production stays on Vertex unless this is selected."""
+    key = (os.getenv("GOOGLE_GENAI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
+    if not key:
+        return None
+    model = (
+        os.getenv("VIDEO_QA_GEMINI_MODEL")
+        or os.getenv("DIRECTOR_GEMINI_MODEL")
+        or "gemini-3.8-flash"
+    ).strip() or "gemini-3.8-flash"
+
+    def evaluate_gemini(video_id: str, frames: list[dict[str, Any]]) -> Any:
+        from google import genai
+        from google.genai import types
+
+        prompt = (
+            "Inspect these sampled video frames for visual-quality problems. "
+            "Return only JSON matching the response schema. "
+            f"Use video_id {video_id!r}, schema_version {SCHEMA_VERSION!r}, and frames_analyzed {len(frames)}. "
+            "Set status to PASS and issues to [] only when the frames form a coherent watchable video. "
+            "A PASS result must not contain issues. A FAIL result needs at least one complete issue. "
+            "score is an integer from 0 to 100."
+        )
+        parts: list[Any] = [prompt]
+        for frame in frames:
+            image_path = frame.get("path")
+            if not image_path:
+                raise VisualContractError("frame metadata lacks an evaluator image path")
+            parts.append(f"{frame['frame_ref']} at {frame['timestamp']}s")
+            parts.append(types.Part.from_bytes(data=Path(image_path).read_bytes(), mime_type="image/png"))
+        client = genai.Client(api_key=key)
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=parts,
+                config=_vertex_response_config(types),
+            )
+        except Exception as exc:
+            raise VisualContractError(f"Gemini visual evaluation failed: {type(exc).__name__}") from exc
+        text = (getattr(response, "text", None) or "").strip()
+        if not text:
+            raise VisualContractError("Gemini returned no textual visual-QA response")
+        return text
+
+    return evaluate_gemini
+
+
 def configured_vision_evaluator() -> VisionEvaluator | None:
     """Return the production Vertex AI vision evaluator, if configured.
 
@@ -173,6 +221,8 @@ def configured_vision_evaluator() -> VisionEvaluator | None:
     time; an unavailable credential is intentionally a release-blocking error.
     """
     provider = os.getenv("VIDEO_QA_PROVIDER", "vertex_ai").strip().lower()
+    if provider in {"gemini", "google_genai", "genai"}:
+        return _gemini_api_key_evaluator()
     if provider not in {"vertex", "vertex_ai"}:
         return None
 
@@ -444,7 +494,7 @@ def _run_one_pass(
             return {"status": "PASS", "reason": "deterministic_only", "frames_analyzed": len(frames)}, None
         visual = validate_visual_result(evaluator(video_id, frames), video_id=video_id, frame_count=len(frames))
         artifacts.write_json("visual_findings.json", visual.model_dump(mode="json"))
-        return {"status": visual.status, "reason": "visual_qa", "frames_analyzed": len(frames)}, visual
+        return {"status": visual.status, "reason": "visual_qa", "frames_analyzed": len(frames), "score": visual.score}, visual
     except VideoQAError as exc:
         artifacts.write_json("visual_findings.json", {"status": "FAIL", "error": str(exc)})
         return {"status": "FAIL", "reason": "qa_stage_error", "error": str(exc)}, None

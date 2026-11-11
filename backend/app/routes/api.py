@@ -46,7 +46,7 @@ from .. import generation as gen
 from .. import stock as stock_service
 from .. import thumbnail_images as thumb_images
 from ..asset_dedupe import filter_distinct_titles
-from ..asset_relevance import relevant_candidates
+from ..asset_relevance import relevant_candidates, select_footage_candidates
 from ..scene_terms import compact_stock_query
 from .. import asset_commit, project_lease
 from ..content_revision import revisions_match
@@ -2149,9 +2149,11 @@ async def _attach_scene_stock(db, *, lease, project, scene, replace_existing, us
                     )
                 else:
                     found = await stock_service.search_stock(term, "both", per_page)
-                candidates.extend((found or {}).get("results") or [])
-                # Leave headroom for duplicates already used in the scene/project.
-                if len(_dedup_by_preview(candidates)) >= remaining * 2:
+                for item in (found or {}).get("results") or []:
+                    if isinstance(item, dict):
+                        candidates.append({**item, "matched_query": term})
+                # Leave headroom for a frame check without paging the provider forever.
+                if len(_dedup_by_preview(candidates)) >= max(remaining * 2, 6):
                     break
             except Exception as exc:  # noqa: BLE001
                 search_error = exc
@@ -2162,8 +2164,17 @@ async def _attach_scene_stock(db, *, lease, project, scene, replace_existing, us
             ):
                 break
         if candidates:
-            result = {"results": candidates}
             search_error = None
+
+            async def _renew_attach_lease() -> bool:
+                return await project_lease.renew(
+                    db, lease, ttl_seconds=project_lease.ASSET_LEASE_TTL_SECONDS,
+                )
+
+            accepted, rejected = await select_footage_candidates(
+                candidates, scene, query, needed=remaining, renew=_renew_attach_lease,
+            )
+            result = {"results": accepted, "rejected": rejected}
 
 
     async def commit(fenced_db):
@@ -2277,6 +2288,13 @@ async def _attach_scene_stock_committing(
         _detail("failed", reason=str(search_error)[:120])
         return outcome
 
+    for rejected in (stock_result or {}).get("rejected") or []:
+        if isinstance(rejected, dict):
+            _detail(
+                "skipped",
+                reason=str(rejected.get("reject_reason") or "rejected")[:80],
+                title=rejected.get("title") or rejected.get("name"),
+            )
     results = (stock_result.get("results") or []) if stock_result else []
     filtered = []
     for r in results:
@@ -2319,7 +2337,10 @@ async def _attach_scene_stock_committing(
             "attribution_url": asset.get("attribution_url"),
             "width": asset.get("width"),
             "height": asset.get("height"),
-            "duration": 3,
+            "duration": asset.get("probed_duration") if isinstance(asset.get("probed_duration"), (int, float)) and not isinstance(asset.get("probed_duration"), bool) else 3,
+            "file_size": asset.get("file_size"),
+            "relevance_score": asset.get("relevance_score"),
+            "relevance_reason": asset.get("relevance_reason"),
             "tags": asset.get("tags") or [],
             "query": query,
             "status": "attached",

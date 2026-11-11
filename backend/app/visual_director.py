@@ -4,12 +4,15 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import math
 import os
 import re
 from typing import Callable
 
 import httpx
+
+logger = logging.getLogger("facelessforge.visual_director")
 
 VERSION = 1
 KINDS = {"stock_video", "text", "steps", "comparison", "timeline"}
@@ -19,7 +22,7 @@ _SYSTEM = (
     "Return JSON {shots:[{id,kind,query?,labels?}]}, one entry per input ID. "
     "Choose stock_video for concrete filmable actions; text for emphasis; steps for a process; "
     "comparison for two contrasted ideas; timeline for explicitly narrated chronology. "
-    "For stock_video supply a concrete 2-12 word footage search query. "
+    "For stock_video supply a concrete 2-12 word footage search query that names the visible subject and the action, not a generic location. "
     "For graphics supply 1-4 short literal contiguous excerpts from that beat's narration; "
     "comparison requires exactly 2, steps/timeline require 2-4. Never invent facts or numbers. "
     "Prefer footage where useful and graphics where they explain. Do not request maps, "
@@ -240,36 +243,54 @@ def checked_shots(plan: dict, scenes: list[dict], script: str) -> dict[str, list
     return grouped
 
 
+def _narration_graphic(shot: dict) -> dict:
+    """Use the plan's labels, or one literal narration excerpt. Never a new stock id."""
+    kind = shot.get("kind")
+    if kind in {"text", "steps", "comparison", "timeline"} and shot.get("labels"):
+        return shot
+    narration = " ".join(str(shot.get("narration") or "").split())
+    if len(narration) > 80:
+        clipped = narration[:80]
+        narration = clipped.rsplit(" ", 1)[0].strip() if " " in clipped else clipped
+    if not narration or not shot.get("frames"):
+        raise DirectorError("Directed footage is missing and cannot become a graphic")
+    return {**shot, "kind": "text", "labels": [narration], "frames": shot["frames"]}
+
+
 async def resolve_directed_scene(scene, shots, project, work_dir, index,
                                  width, height, used_ext_ids, resolve_stock,
                                  attached_assets=None):
-    """Resolve the exact shot order. Attached assets stay on the existing resolver."""
+    """Resolve the exact shot order. A stock miss becomes a graphic, not a new search."""
     from pathlib import Path
     from .directed_graphics import render_graphic
     if project.get("production_mode") == "commercial_ad":
         raise DirectorError("AI stock direction cannot replace required client assets")
-    from .grounding import CLIENT_VISUAL_TYPES
     visuals = []
     assets = list(attached_assets or [])
-    # A saved visual is the footage for this scene. Searching would replace it.
-    saved_visual = any(
-        a.get("scene_id") == scene.get("id")
-        and a.get("asset_type") in ("stock_image", "stock_video", *CLIENT_VISUAL_TYPES)
-        for a in assets
-    )
     for number, shot in enumerate(shots):
         if shot["kind"] == "stock_video":
             query = shot["query"]
-            search_scene = {**scene, "visual_direction": query, "search_terms": [query],
-                            "narration_text": query, "caption_text": query}
-            path, kind, external_id = await resolve_stock(
-                search_scene, assets, project, work_dir, index * 1000 + number,
-                used_ext_ids=used_ext_ids, allow_fallback=not saved_visual)
-            if kind != "video":
-                raise DirectorError("Directed footage is missing; choose a new visual plan")
-            if external_id:
-                used_ext_ids.add(str(external_id))
-            visuals.append((path, kind))
+            # Keep the shot narration. The resolver only needs the footage query.
+            search_scene = {**scene, "visual_direction": query, "search_terms": [query]}
+            path = kind = external_id = None
+            try:
+                # Saved or not, a directed miss must not call search_stock.
+                path, kind, external_id = await resolve_stock(
+                    search_scene, assets, project, work_dir, index * 1000 + number,
+                    used_ext_ids=used_ext_ids, allow_fallback=False)
+            except Exception:
+                path = kind = external_id = None
+            if kind == "video" and path:
+                if external_id:
+                    used_ext_ids.add(str(external_id))
+                logger.info("DIRECTED_STOCK scene_index=%s shot=%s ext_id=%s", index, number, external_id)
+                visuals.append((path, kind))
+                continue
+            graphic = _narration_graphic({**shot, "narration": shot.get("narration") or scene.get("narration_text")})
+            out = Path(work_dir) / f"directed_{index:03d}_{number:03d}.mp4"
+            await asyncio.to_thread(render_graphic, graphic, out, width, height)
+            logger.info("DIRECTED_GRAPHIC scene_index=%s shot=%s", index, number)
+            visuals.append((out, "video"))
         else:
             path = Path(work_dir) / f"directed_{index:03d}_{number:03d}.mp4"
             await asyncio.to_thread(render_graphic, shot, path, width, height)
