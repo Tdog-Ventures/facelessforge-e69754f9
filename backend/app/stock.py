@@ -696,8 +696,8 @@ async def search_stock_with_source(query: str, source: str, media_type: MediaTyp
     Falls back to mock if provider key missing or rate-limited.
     """
     query = (query or "").strip()
-    if query and len(query.split()) > 4:
-        query = " ".join(query.split()[:4])
+    if query and len(query.split()) > 12:
+        query = " ".join(query.split()[:12])
     source = (source or "pexels").strip().lower()
     if not query:
         return {"source": source if source in ("pexels","pixabay","unsplash") else "mock", "results": [], "mock": True, "query": ""}
@@ -762,8 +762,8 @@ async def search_stock_aggregated(
     - If all keys missing or USE_MOCK_PEXELS true -> mock mode with warning.
     """
     query = (query or "").strip()
-    if query and len(query.split()) > 4:
-        query = " ".join(query.split()[:4])
+    if query and len(query.split()) > 12:
+        query = " ".join(query.split()[:12])
     if not query:
         is_mock = _should_use_mock_aggregated()
         src = "mock" if is_mock else "mixed"
@@ -960,8 +960,8 @@ async def search_stock(
     query = (query or "").strip()
     if visual_tone and visual_tone.strip():
         query = f"{query} {visual_tone.strip()}".strip()
-    if query and len(query.split()) > 4:
-        query = " ".join(query.split()[:4])
+    if query and len(query.split()) > 12:
+        query = " ".join(query.split()[:12])
     if not query:
         return {"source": "mock" if _use_mock() else "pexels", "results": [], "mock": _use_mock(), "query": ""}
 

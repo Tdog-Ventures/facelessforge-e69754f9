@@ -269,6 +269,9 @@ class AutoAttachRequest(BaseModel):
     idempotency_key: Optional[str] = Field(
         default=None, min_length=8, max_length=80, pattern=r"^[A-Za-z0-9._:-]+$",
     )
+    # Scene id -> concrete footage queries from a saved visual-director plan.
+    # Empty leaves the existing scene terms untouched.
+    scene_queries: Optional[dict[str, list[str]]] = None
 
 
 class GenerateThumbnailImagesRequest(BaseModel):

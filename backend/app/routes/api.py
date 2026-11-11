@@ -2101,8 +2101,8 @@ async def _debit_scene(db, *, store: dict, user_id: str, asset_ids: list, reason
     return charged
 
 
-def _auto_stock_query(project: dict, scene: dict) -> str:
-    return _build_scene_stock_query(scene, project)
+def _auto_stock_query(project: dict, scene: dict, override: str | None = None) -> str:
+    return _build_scene_stock_query(scene, project, override=override)
 
 
 async def _asset_write(db, lease, collection, method, *args, **kwargs):
@@ -2112,7 +2112,7 @@ async def _asset_write(db, lease, collection, method, *args, **kwargs):
 
 
 async def _attach_scene_stock(db, *, lease, project, scene, replace_existing, user, store,
-                              visual_titles, media_type, op_id=None):
+                              visual_titles, media_type, op_id=None, query_override: str | None = None):
     """Slow lookup is revocable; the entire mutation/compensation phase is pinned."""
     originals = await db.assets.find(
         _stock_scene_query(project["id"], str(scene.get("id") or scene.get("_id"))), {"_id": 0},
@@ -2127,7 +2127,7 @@ async def _attach_scene_stock(db, *, lease, project, scene, replace_existing, us
     if needs_search:
         remaining = needed if replace_existing else max(1, needed - len(originals))
         per_page = min(max(remaining * 2, remaining + 5), 40)
-        query = _auto_stock_query(project, scene)
+        query = _auto_stock_query(project, scene, override=query_override)
         # Stock providers can return only one result for an over-specific query.
         # Search alternative scene terms before accepting a partial selection.
         # The commit phase still deduplicates, fences writers and retains old assets.
@@ -2144,7 +2144,7 @@ async def _attach_scene_stock(db, *, lease, project, scene, replace_existing, us
             try:
                 if hasattr(stock_service, "search_stock_aggregated"):
                     found = await stock_service.search_stock_aggregated(
-                        query=term, media_type="both", per_page=per_page,
+                        query=term, media_type=media_type or "both", per_page=per_page,
                         orientation="portrait" if project.get("aspect_ratio") == "9:16" else None,
                     )
                 else:
@@ -2170,7 +2170,7 @@ async def _attach_scene_stock(db, *, lease, project, scene, replace_existing, us
         return await _attach_scene_stock_committing(
             fenced_db, project=project, scene=scene, replace_existing=replace_existing, user=user,
             store=store, visual_titles=visual_titles, media_type=media_type, op_id=op_id,
-            stock_result=result, search_error=search_error,
+            stock_result=result, search_error=search_error, query_override=query_override,
         )
     return await asset_commit.run(db, lease, commit)
 
@@ -2178,6 +2178,7 @@ async def _attach_scene_stock(db, *, lease, project, scene, replace_existing, us
 async def _attach_scene_stock_committing(
     db, *, project: dict, scene: dict, replace_existing: bool, user: dict, store: dict,
     visual_titles: list, media_type: str, stock_result, search_error, op_id: Optional[str] = None,
+    query_override: str | None = None,
 ) -> dict:
     """Select and commit stock assets for one scene. Never raises for scene-level failures.
 
@@ -2261,7 +2262,7 @@ async def _attach_scene_stock_committing(
         # still exists, and that would be indistinguishable from a real duplicate.
         excluded = originals if replace_existing else []
 
-    query = _auto_stock_query(project, scene)
+    query = _auto_stock_query(project, scene, override=query_override)
 
     excluded_ids: set[str] = set()
     for ea in excluded:
@@ -2592,10 +2593,21 @@ async def _auto_attach_under_lease(db, lease, project_id: str, project: dict, bo
             if not await project_lease.renew(db, lease, ttl_seconds=project_lease.ASSET_LEASE_TTL_SECONDS):
                 aborted = "lease_lost"
                 break
+            explicit = (body.scene_queries or {}).get(scene_id) or []
+            if not explicit and (project.get("visual_director") or {}).get("enabled"):
+                from ..visual_director import stock_queries_by_scene
+                explicit = stock_queries_by_scene(project.get("visual_director") or {}).get(scene_id) or []
+            overrides = [q.strip() for q in explicit if isinstance(q, str) and 2 <= len(q.split()) <= 12 and len(q) <= 160][:8]
+            scene_for_search = scene
+            query_override = None
+            if overrides:
+                query_override = overrides[0]
+                scene_for_search = {**scene, "search_terms": overrides, "visual_direction": overrides[0]}
             try:
                 outcome = await _attach_scene_stock(
-                    db, lease=lease, project=project, scene=scene, replace_existing=body.replace_existing, user=user,
+                    db, lease=lease, project=project, scene=scene_for_search, replace_existing=body.replace_existing, user=user,
                     store=store, visual_titles=visual_titles, media_type=body.media_type, op_id=op_id,
+                    query_override=query_override,
                 )
             except asset_commit.LeaseLost:
                 aborted = "lease_lost"
@@ -2639,6 +2651,113 @@ async def _auto_attach_under_lease(db, lease, project_id: str, project: dict, bo
             except Exception:  # noqa: BLE001
                 logger.critical("could not mark auto-attach operation failed op=%s", op_id, exc_info=True)
         raise
+
+
+
+def _clean_directed_queries(explicit) -> list[str]:
+    return [q.strip() for q in (explicit or []) if isinstance(q, str) and 2 <= len(q.split()) <= 12 and len(q) <= 160][:8]
+
+
+async def _run_directed_attach(db, project: dict, user: dict, plan: dict) -> dict:
+    """Persist stock for a saved plan through the existing auto-attach lease.
+
+    replace_existing stays false, so scenes that already have enough assets are
+    skipped and customer selections are not deleted.
+    """
+    from ..models import AutoAttachRequest
+    from ..visual_director import stock_queries_by_scene
+    queries = {scene_id: _clean_directed_queries(items) for scene_id, items in stock_queries_by_scene(plan).items()}
+    queries = {scene_id: items for scene_id, items in queries.items() if items}
+    if not queries:
+        return {"attached": 0, "skipped": 0, "failed": 0, "aborted": None, "reason": "no_stock_shots"}
+    key = "vd-" + str(plan.get("source_hash") or "plan")[:24]
+    body = AutoAttachRequest(
+        replace_existing=False, media_type="videos", idempotency_key=key, scene_queries=queries,
+    )
+    lease = await project_lease.acquire(
+        db, project["id"], project_lease.ASSET_LEASE, ttl_seconds=project_lease.ASSET_LEASE_TTL_SECONDS,
+    )
+    if lease is None:
+        return {"attached": 0, "skipped": 0, "failed": 0, "aborted": "lease_busy"}
+    try:
+        return await _auto_attach_under_lease(db, lease, project["id"], project, body, user, f"{project['id']}:{key}")
+    except HTTPException as exc:
+        return {"attached": 0, "skipped": 0, "failed": 0, "aborted": "attach_rejected", "detail": exc.detail}
+    except Exception:
+        logging.getLogger("facelessforge.routes").exception("directed attach failed project=%s", project.get("id"))
+        return {"attached": 0, "skipped": 0, "failed": 0, "aborted": "attach_failed"}
+    finally:
+        await project_lease.release(db, lease)
+
+
+@router.post("/projects/{project_id}/visual-direction")
+async def generate_visual_direction(project_id: str, refresh: bool = False, user=Depends(get_current_user)):
+    """Explicit Gemini planning. Stock search, download and attachment stay in Python."""
+    from ..visual_director import direct, checked_shots, source_hash, DirectorError
+    db = get_db()
+    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    _ensure_project_access(project, user, write=True)
+    if project.get("production_mode") == "commercial_ad":
+        raise HTTPException(400, "Directed stock visuals are not enabled for client-asset projects")
+    if await db.render_jobs.find_one({"project_id": project_id, "status": {"$in": [
+            "queued", "validating", "preparing_assets", "rendering", "verifying"]}}):
+        raise HTTPException(409, "Wait for the current render before changing visual direction")
+    scenes = await db.scenes.find({"project_id": project_id}, {"_id": 0}).sort("scene_number", 1).to_list(500)
+    script = await db.scripts.find_one({"project_id": project_id}, {"_id": 0}) or {}
+    text = script.get("full_script") or ""
+    if not text or not scenes:
+        raise HTTPException(400, "Generate the script and scenes first")
+    previous = project.get("visual_director") or {}
+    plan = previous
+    if not refresh and previous.get("source_hash") == source_hash(scenes, text):
+        try:
+            checked_shots(previous, scenes, text)
+        except DirectorError:
+            plan = None
+        else:
+            plan = previous
+            await db.projects.update_one({"id": project_id}, {"$set": {"visual_director.enabled": True}})
+    else:
+        plan = None
+    if plan is None:
+        token = str(uuid.uuid4())
+        now = _now()
+        lease = await db.projects.update_one({"id": project_id, "$or": [
+            {"visual_director_lease": {"$exists": False}},
+            {"visual_director_lease.until": {"$lt": now}}]},
+            {"$set": {"visual_director_lease": {"token": token, "until": now + timedelta(seconds=120)}}})
+        if not lease.modified_count:
+            raise HTTPException(409, "Visual direction is already being generated")
+        try:
+            plan = await direct(scenes, text)
+            current_scenes = await db.scenes.find({"project_id": project_id}, {"_id": 0}).sort("scene_number", 1).to_list(500)
+            current_script = await db.scripts.find_one({"project_id": project_id}, {"_id": 0}) or {}
+            if source_hash(current_scenes, current_script.get("full_script") or "") != plan["source_hash"]:
+                raise HTTPException(409, "The script or scenes changed; the old visual plan was preserved")
+            plan.update({"enabled": True, "created_at": _now()})
+            saved = await db.projects.update_one({"id": project_id, "visual_director_lease.token": token},
+                                                 {"$set": {"visual_director": plan, "updated_at": _now()}})
+            if not saved.matched_count:
+                raise HTTPException(409, "Planning lease expired; no plan was saved")
+        except DirectorError as exc:
+            raise HTTPException(422, str(exc)) from None
+        finally:
+            await db.projects.update_one({"id": project_id, "visual_director_lease.token": token},
+                                         {"$unset": {"visual_director_lease": ""}})
+    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    attachment = await _run_directed_attach(db, project, user, plan)
+    view = await _attach_project_view(db, await db.projects.find_one({"id": project_id}, {"_id": 0}))
+    view["visual_attachment"] = attachment
+    return view
+
+
+@router.post("/projects/{project_id}/visual-direction/disable")
+async def disable_visual_direction(project_id: str, user=Depends(get_current_user)):
+    db = get_db()
+    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    _ensure_project_access(project, user, write=True)
+    await db.projects.update_one({"id": project_id}, {"$set": {"visual_director.enabled": False}})
+    return await _attach_project_view(db, await db.projects.find_one({"id": project_id}, {"_id": 0}))
 
 
 # ============================ THUMBNAIL IMAGE GENERATION ============================

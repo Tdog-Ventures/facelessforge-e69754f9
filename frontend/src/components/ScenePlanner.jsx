@@ -20,6 +20,7 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
   const [exhaustedInfo, setExhaustedInfo] = useState(null);
   const [showPricingModal, setShowPricingModal] = useState(false);
   const [fullRenderLoading, setFullRenderLoading] = useState(false);
+  const [directing, setDirecting] = useState(false);
   const [innerProject, setInnerProject] = useState(project || null);
   const confirm = useConfirm();
   const navigate = useNavigate();
@@ -66,6 +67,27 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
     }
     return false;
   };
+
+  const directVisuals = async (disable = false, refresh = false) => {
+    setDirecting(true);
+    try {
+      const endpoint = `/projects/${projectId}/visual-direction${disable ? "/disable" : refresh ? "?refresh=true" : ""}`;
+      const { data } = await api.post(endpoint, {}, { timeout: 120000 });
+      onChange(data);
+      if (data.project) setInnerProject(data.project);
+      const attachment = data.visual_attachment;
+      const attached = attachment ? `${attachment.attached ?? 0} attached` : "plan saved";
+      toast.success(disable ? "Using existing visuals" : `AI shot plan ready. ${attached}.`);
+    } catch (error) {
+      toast.error("Visual direction was not changed", {
+        description: formatApiError(error.response?.data?.detail) || "Planning did not finish. Check the saved plan before retrying."
+      });
+    } finally {
+      setDirecting(false);
+    }
+  };
+
+  const directorPlan = innerProject?.visual_director || project?.visual_director;
 
   const generate = async () => {
     if (credits && !credits.operator_unmetered && (credits.remaining ?? credits.credits) <= 0) {
@@ -294,6 +316,34 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
           </button>
         )}
         <BillingBar />
+        {canEdit && scenes.length > 0 && project?.production_mode !== "commercial_ad" && (
+          <section className="rounded-lg border border-blue-400/30 bg-[var(--ff-surface)] p-4" aria-label="AI visual director">
+            <h3 className="font-semibold">AI visual director</h3>
+            <p className="my-2 text-sm text-[var(--ff-text-muted)]">Gemini chooses footage and graphics. FacelessForge searches Pexels, Pixabay and Unsplash, then attaches the files to these scenes. Existing attachments stay unless you replace them. Planning can use provider quota.</p>
+            <button data-testid="direct-visuals" onClick={() => directVisuals(false, Boolean(directorPlan?.enabled))} disabled={directing || generating}
+              className="rounded bg-blue-600 px-3 py-2 text-white disabled:opacity-50">
+              {directing ? "Planning visuals..." : directorPlan?.enabled ? "Replan visuals with AI" : "Plan visuals with AI"}
+            </button>
+            {directorPlan?.enabled && (
+              <>
+                <span className="ml-3 text-sm">{directorPlan.shots?.length || 0} directed shots for the next render</span>
+                <button onClick={() => directVisuals(true)} disabled={directing} className="ml-3 underline">Use existing visuals</button>
+                <details className="mt-3">
+                  <summary className="cursor-pointer">Review shot directions</summary>
+                  <ol className="mt-2 max-h-80 space-y-2 overflow-auto text-sm">
+                    {(directorPlan.shots || []).map((shot) => (
+                      <li key={shot.id} className="border-t border-[rgba(59,130,246,0.15)] pt-2">
+                        <strong>{String(shot.kind || "").split("_").join(" ")} | {(shot.frames / 30).toFixed(1)}s</strong>
+                        <p>{shot.narration}</p>
+                        <p className="text-sky-300">{shot.query || (shot.labels || []).join(" / ")}</p>
+                      </li>
+                    ))}
+                  </ol>
+                </details>
+              </>
+            )}
+          </section>
+        )}
         <div className="flex items-center justify-between">
           <div className="font-mono text-[11px] text-[var(--ff-text-muted)]" title="Expected scene count is ceil((target − intro) / 30). Intro is 2.5s for editorial videos.">
             {(() => {

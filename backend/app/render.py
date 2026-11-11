@@ -2459,6 +2459,21 @@ async def _run_render(job_id: str, project_id: str):
         ordered_scenes = sorted(scenes, key=lambda x: x.get("scene_number", 0))
         plan = _build_subclip_plan(ordered_scenes, timing.narration_seconds)
         plan_by_idx = {p["scene_index"]: p for p in plan}
+        directed_by_scene = {}
+        director_plan = project.get("visual_director") or {}
+        if director_plan.get("enabled"):
+            from .visual_director import DirectorError, checked_shots, resolve_directed_scene
+            try:
+                directed_by_scene = checked_shots(
+                    director_plan, scenes, (script or {}).get("full_script") or "")
+            except DirectorError as exc:
+                logger.warning("VISUAL_DIRECTOR_STALE %s", exc)
+                directed_by_scene = {}
+            else:
+                for i, scene in enumerate(scenes):
+                    shots = directed_by_scene.get(scene.get("id")) or []
+                    if shots and i in plan_by_idx:
+                        plan_by_idx[i]["subclips"] = [shot["frames"] / 30 for shot in shots]
 
         await _set_job(job_id, current_step="preparing_scenes", progress=35)
         scene_visuals: list[tuple[list[tuple[Path, str]], dict]] = []
@@ -2469,10 +2484,18 @@ async def _run_render(job_id: str, project_id: str):
             # twenty sources for a short scene turns transient stock-download
             # failures into a long, unnecessary retry loop before fallback.
             required_visuals = max(n_clips, 1)
-            visuals = await _resolve_scene_visuals(scene, assets, project, work_dir, i,
-                                                   max_visuals=required_visuals,
-                                                   used_ext_ids=used_ext_ids,
-                                                   allow_fallback=not commercial)
+            if directed_by_scene.get(scene.get("id")):
+                try:
+                    visuals = await resolve_directed_scene(
+                        scene, directed_by_scene[scene["id"]], project, work_dir, i,
+                        W, H, used_ext_ids, _resolve_scene_visual, attached_assets=assets)
+                except DirectorError as exc:
+                    raise RuntimeError(str(exc)) from None
+            else:
+                visuals = await _resolve_scene_visuals(scene, assets, project, work_dir, i,
+                                                       max_visuals=required_visuals,
+                                                       used_ext_ids=used_ext_ids,
+                                                       allow_fallback=not commercial)
             scene_visuals.append((visuals, scene))
 
         # CONSTITUTION §5: Select hook footage — first video clip for intro background.
@@ -2534,6 +2557,8 @@ async def _run_render(job_id: str, project_id: str):
                 )
                 if chosen is None:
                     chosen = min(range(len(visuals)), key=lambda vi: last_used.get(vi, -1e9))
+                if directed_by_scene:
+                    chosen = min(j, len(visuals) - 1)
                 path, kind = visuals[chosen]
                 # Seek pass advances each time the same source repeats
                 pass_num = use_count.get(chosen, 0)
