@@ -1,6 +1,6 @@
 """Production video selection guards — no placeholders, off-topic assets or blurred strips."""
-from backend.app.asset_relevance import candidate_is_relevant, relevant_candidates
-from backend.app import render, stock
+from app.asset_relevance import candidate_is_relevant, relevant_candidates
+from app import render, stock
 
 
 def test_cricket_video_does_not_pick_lava_lamp_or_office():

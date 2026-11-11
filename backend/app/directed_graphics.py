@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -38,7 +39,18 @@ def graphic_frame(shot, progress, width, height):
     labels = shot.get("labels") or []
     if not 1 <= len(labels) <= 4:
         raise ValueError("Graphic labels are required")
-    image = Image.new("RGB", (width, height), "#0b1220")
+    # Consecutive sentences need a full-frame change large enough for scene detection.
+    palette = (
+        (12, 12, 12),
+        (60, 60, 60),
+        (108, 108, 108),
+        (156, 156, 156),
+        (204, 204, 204),
+        (252, 252, 252),
+    )
+    digest = hashlib.sha256("\n".join(str(label) for label in labels).encode("utf-8")).digest()
+    background = palette[int.from_bytes(digest[:4], "big") % len(palette)]
+    image = Image.new("RGB", (width, height), background)
     draw = ImageDraw.Draw(image)
     margin = int(min(width, height) * .08)
     gap = max(8, margin // 3)

@@ -288,3 +288,94 @@ def test_directed_plan_covers_pacing_without_stock(monkeypatch):
     covered = validate_prerequisites(enabled, script, scenes, metadata, assets)
     assert pacing(covered) is True
     assert covered["ok"] is True
+
+
+def test_distinct_labels_change_the_full_frame_background():
+    first = graphic_frame({"kind": "text", "labels": ["North"]}, 0, 320, 180)
+    second = graphic_frame({"kind": "text", "labels": ["South"]}, 0, 320, 180)
+    assert first.getpixel((0, 0)) != second.getpixel((0, 0))
+    for image in (first, second):
+        color = image.getpixel((0, 0))
+        assert image.getpixel((319, 0)) == color
+        assert image.getpixel((0, 179)) == color
+        assert image.getpixel((319, 179)) == color
+
+
+def test_api_key_evaluator_omits_response_schema(monkeypatch, tmp_path):
+    from google.genai import types
+    from PIL import Image
+    from app import video_qa
+
+    monkeypatch.setenv("VIDEO_QA_PROVIDER", "gemini")
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    monkeypatch.delenv("GOOGLE_GENAI_API_KEY", raising=False)
+    image = tmp_path / "frame.png"
+    Image.new("RGB", (8, 8), (0, 0, 0)).save(image)
+    captured = {}
+
+    class Models:
+        def generate_content(self, *, model, contents, config):
+            captured["config"] = config
+
+            class Response:
+                text = "{}"
+
+            return Response()
+
+    class Client:
+        def __init__(self, api_key=None, **kwargs):
+            captured["vertexai"] = kwargs.get("vertexai")
+            self.models = Models()
+
+    monkeypatch.setattr("google.genai.Client", Client)
+    evaluator = video_qa.configured_vision_evaluator()
+    assert evaluator is not None
+    assert evaluator("vid-1", [{
+        "frame_ref": "frame_000.png", "timestamp": 0.0, "path": str(image),
+    }]) == "{}"
+    config = captured["config"]
+    assert config.response_mime_type == "application/json"
+    assert config.response_schema is None
+    assert captured["vertexai"] is not True
+    vertex = video_qa._vertex_response_config(types)
+    assert vertex.response_mime_type == "application/json"
+    assert vertex.response_schema is video_qa.VisualQAResult
+
+
+def test_api_key_evaluator_valueerror_is_not_a_pass(monkeypatch, tmp_path):
+    from PIL import Image
+    from app import video_qa
+
+    monkeypatch.setenv("VIDEO_QA_PROVIDER", "gemini")
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    monkeypatch.delenv("GOOGLE_GENAI_API_KEY", raising=False)
+    image = tmp_path / "frame.png"
+    Image.new("RGB", (8, 8), (0, 0, 0)).save(image)
+
+    class Models:
+        def generate_content(self, *, model, contents, config):
+            raise ValueError("additionalProperties is not supported in the Gemini API")
+
+    class Client:
+        def __init__(self, api_key=None, **kwargs):
+            self.models = Models()
+
+    monkeypatch.setattr("google.genai.Client", Client)
+    evaluator = video_qa.configured_vision_evaluator()
+    with pytest.raises(video_qa.VisualContractError, match="ValueError"):
+        evaluator("vid-1", [{
+            "frame_ref": "frame_000.png", "timestamp": 0.0, "path": str(image),
+        }])
+
+
+def test_frame_judgment_requires_the_queried_action_and_setting():
+    import inspect
+    from app import asset_relevance
+
+    source = inspect.getsource(asset_relevance.judge_frame)
+    assert "A kettle matches a kettle" not in source
+    assert "queried action" in source
+    assert "queried setting" in source
+    assert "outdoor kettle" in source
+    assert asset_relevance._JUDGE_MODEL == "gemini-3.8-flash"
+    assert asset_relevance.MIN_RELEVANCE_SCORE == 70

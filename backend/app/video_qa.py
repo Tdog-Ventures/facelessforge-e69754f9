@@ -183,10 +183,16 @@ def _gemini_api_key_evaluator() -> VisionEvaluator | None:
 
         prompt = (
             "Inspect these sampled video frames for visual-quality problems. "
-            "Return only JSON matching the response schema. "
+            "Return only a JSON object with no extra keys: "
+            "schema_version (string), video_id (string), status (\"PASS\" or \"FAIL\"), "
+            "score (integer 0-100), frames_analyzed (integer), and issues (array). "
             f"Use video_id {video_id!r}, schema_version {SCHEMA_VERSION!r}, and frames_analyzed {len(frames)}. "
             "Set status to PASS and issues to [] only when the frames form a coherent watchable video. "
-            "A PASS result must not contain issues. A FAIL result needs at least one complete issue. "
+            "A PASS result must not contain issues. A FAIL result needs at least one issue object with "
+            "issue_id, category, severity (low, medium, high, or critical), confidence from 0 to 1, "
+            "timestamp_start, timestamp_end, frame_refs (array of strings), element, observation, "
+            "expected, measured (object), and remediation (object with action, target, property, "
+            "and recommended_value). "
             "score is an integer from 0 to 100."
         )
         parts: list[Any] = [prompt]
@@ -198,10 +204,15 @@ def _gemini_api_key_evaluator() -> VisionEvaluator | None:
             parts.append(types.Part.from_bytes(data=Path(image_path).read_bytes(), mime_type="image/png"))
         client = genai.Client(api_key=key)
         try:
+            # The API-key client rejects response_schema values that contain
+            # additionalProperties. JSON is checked by validate_visual_result.
             response = client.models.generate_content(
                 model=model,
                 contents=parts,
-                config=_vertex_response_config(types),
+                config=types.GenerateContentConfig(
+                    temperature=0,
+                    response_mime_type="application/json",
+                ),
             )
         except Exception as exc:
             raise VisualContractError(f"Gemini visual evaluation failed: {type(exc).__name__}") from exc

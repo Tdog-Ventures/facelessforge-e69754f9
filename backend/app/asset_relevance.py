@@ -207,9 +207,12 @@ async def judge_frame(image: bytes, mime: str, narration: str, query: str) -> di
         return {"accepted": False, "score": None, "reason": "vision_unconfigured"}
     model = (os.getenv("DIRECTOR_GEMINI_MODEL") or _JUDGE_MODEL).strip() or _JUDGE_MODEL
     prompt = (
-        "Does this video frame show the same specific subject and action as the narration "
-        "and the footage query? Generic shared words are not a match: kitchen, counter, cup, "
-        "water, food, the color orange, rain, or any water. A kettle matches a kettle. "
+        "Does this video frame show the queried action happening in the queried setting? "
+        "Both the action and the setting named in the footage query must be visible. "
+        "One shared object word is not a match. "
+        "An outdoor kettle, or a kettle on a cafe or park table, does not match steam over a kitchen counter. "
+        "Generic shared words are not a match: kitchen, counter, counters, countertop, cup, cups, "
+        "water, food, orange, oranges, rain, rainy, raindrop, raindrops, window, windows, or glass. "
         "A scoreboard, gull, laptop, egg, ink pour, or ocean does not match a kettle, "
         "an orange fruit, a cup, or rain on a window. "
         "Return JSON {\"same_subject\": true or false, \"score\": 0-100, \"reason\": \"short phrase\"}. "
