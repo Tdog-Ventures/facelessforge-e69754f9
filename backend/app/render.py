@@ -3012,6 +3012,7 @@ async def _run_render(job_id: str, project_id: str):
                     # job. It must NOT be marked completed — a failed render is retried, never shipped.
                     summary = verification_result.get("report", {}).get("summary") if verification_result.get("report") else str(verification_result)
                     logger.warning(f"[VERIFY] FAILED → marking render failed: {summary}")
+                    await _set_job(job_id, verification=verification_result, video_qa=qa_result)
                     raise RuntimeError(f"Constitution verification failed: {summary}")
                 else:
                     logger.info(f"[VERIFY] PASSED all checks a-h")
@@ -3023,6 +3024,8 @@ async def _run_render(job_id: str, project_id: str):
         else:
             logger.warning("[VERIFY] verify.py not available — skipping constitution check (DEV ONLY)")
 
+        if verification_result is not None:
+            await _set_job(job_id, verification=verification_result)
         if qa_block_error is not None:
             raise qa_block_error
 
