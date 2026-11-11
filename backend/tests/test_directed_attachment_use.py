@@ -63,3 +63,53 @@ def test_renderer_uses_next_saved_asset_after_a_failed_download(tmp_path, monkey
     assert first[2] == "good-1"
     assert second[2] == "good-2"
     assert searches["count"] == 0
+
+
+def test_unusable_saved_assets_fail_closed_when_fallback_is_off(tmp_path, monkeypatch):
+    searches = {"count": 0}
+
+    async def fake_download(url, out_path, max_bytes, allow_audio=False):
+        return False
+
+    async def fake_motion(path):
+        return True
+
+    async def fail_search(*args, **kwargs):
+        searches["count"] += 1
+        raise AssertionError("renderer searched for replacement footage")
+
+    monkeypatch.setattr("app.render._download_to", fake_download)
+    monkeypatch.setattr("app.render._video_has_motion", fake_motion)
+    monkeypatch.setattr("app.render.stock_service.search_stock", fail_search)
+
+    scene = {"id": "scene-a", "narration_text": "steam rises from the kettle"}
+    assets = [
+        {
+            "scene_id": "scene-a",
+            "asset_type": "stock_video",
+            "external_id": "dead-1",
+            "download_url": "http://dead.example/one.mp4",
+        },
+        {
+            "scene_id": "scene-a",
+            "asset_type": "stock_video",
+            "external_id": "dead-2",
+            "download_url": "http://dead.example/two.mp4",
+        },
+    ]
+
+    async def run():
+        await _resolve_scene_visual(
+            scene, assets, {}, tmp_path, 0, used_ext_ids=set(), allow_fallback=False,
+        )
+
+    try:
+        asyncio.run(run())
+    except RuntimeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("resolver returned footage after every download failed")
+    assert "footage: all candidates rejected" in message
+    assert "no stock substitution is permitted" not in message
+    assert searches["count"] == 0
+

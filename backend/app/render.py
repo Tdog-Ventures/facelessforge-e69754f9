@@ -1173,6 +1173,13 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
         return (target, "video", ext_id)
 
     if not allow_fallback:
+        # Stock misses use the footage error. The client sentence is only
+        # for a commercial asset, which must not be relabeled as stock.
+        if any(a.get("asset_type") not in CLIENT_VISUAL_TYPES for a in candidates):
+            raise RuntimeError(
+                f"scene {idx + 1} footage: all candidates rejected (candidates={len(candidates)}); "
+                "no valid stock video/image available — render failed, not completed"
+            )
         raise RuntimeError(f"Client asset for scene {idx + 1} is unavailable or invalid; no stock substitution is permitted")
 
     # ---- Pexels retry: query for fresh results when attached candidates fail ----

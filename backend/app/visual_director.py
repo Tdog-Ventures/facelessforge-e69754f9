@@ -248,8 +248,15 @@ async def resolve_directed_scene(scene, shots, project, work_dir, index,
     from .directed_graphics import render_graphic
     if project.get("production_mode") == "commercial_ad":
         raise DirectorError("AI stock direction cannot replace required client assets")
+    from .grounding import CLIENT_VISUAL_TYPES
     visuals = []
     assets = list(attached_assets or [])
+    # A saved visual is the footage for this scene. Searching would replace it.
+    saved_visual = any(
+        a.get("scene_id") == scene.get("id")
+        and a.get("asset_type") in ("stock_image", "stock_video", *CLIENT_VISUAL_TYPES)
+        for a in assets
+    )
     for number, shot in enumerate(shots):
         if shot["kind"] == "stock_video":
             query = shot["query"]
@@ -257,7 +264,7 @@ async def resolve_directed_scene(scene, shots, project, work_dir, index,
                             "narration_text": query, "caption_text": query}
             path, kind, external_id = await resolve_stock(
                 search_scene, assets, project, work_dir, index * 1000 + number,
-                used_ext_ids=used_ext_ids, allow_fallback=True)
+                used_ext_ids=used_ext_ids, allow_fallback=not saved_visual)
             if kind != "video":
                 raise DirectorError("Directed footage is missing; choose a new visual plan")
             if external_id:

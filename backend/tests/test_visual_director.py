@@ -171,13 +171,13 @@ def test_directed_stock_receives_its_query_and_preserves_order(tmp_path):
 def test_directed_stock_prefers_existing_attachments(tmp_path):
     captured = []
     async def stock(scene, assets, project, work, idx, **kwargs):
-        captured.append(list(assets))
+        captured.append((list(assets), kwargs.get("allow_fallback")))
         return Path("footage.mp4"), "video", "external-9"
     attached = [{"id": "asset-1", "scene_id": "scene-a", "asset_type": "stock_video"}]
     shots = [{"kind": "stock_video", "query": "hands editing timeline", "frames": 90}]
     asyncio.run(resolve_directed_scene(scenes()[0], shots, {}, tmp_path,
                                        0, 640, 360, set(), stock, attached_assets=attached))
-    assert captured == [attached]
+    assert captured == [(attached, False)]
 
 
 def test_images_cannot_silently_replace_directed_footage(tmp_path):
