@@ -1102,6 +1102,12 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
         local = _local_path_for_asset(a)
         ext = (Path(local).suffix.lower() if local else "")
         ext_id = _asset_dedupe_id(a, url, local)
+        if ext_id and str(ext_id) in used_ext_ids:
+            logger.info(
+                "scene=%02d FOOTAGE_SKIP reason=ext_id_used_project_wide ext_id=%s",
+                idx + 1, ext_id,
+            )
+            continue
         # ── Local static images: return as 'image' for Ken Burns (not skip) ──
         if local and ext in (".png", ".jpg", ".jpeg", ".webp"):
             logger.info("scene=%02d FOOTAGE_SELECT type=local_image ext_id=%s path=%s",
