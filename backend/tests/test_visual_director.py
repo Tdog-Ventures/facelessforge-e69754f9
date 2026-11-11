@@ -249,3 +249,42 @@ def test_aggregated_search_preserves_a_director_query(monkeypatch):
     result = asyncio.run(search_stock_aggregated(query, media_type="videos", per_page=2))
     assert result["query"] == query
     assert result["mock"] is True
+
+def test_directed_plan_covers_pacing_without_stock(monkeypatch):
+    from app.render import validate_prerequisites
+    from app.timing import TimingContract
+
+    narration = TimingContract.from_target(5).narration_seconds
+    project = {
+        "id": "p1", "target_duration": 5, "music_enabled": False,
+        "selected_voiceover_asset_id": "v1", "selected_thumbnail_asset_id": "t1",
+    }
+    script = {"full_script": "Rain taps the kitchen window above cups."}
+    scenes = [{
+        "id": "s1", "scene_number": 1, "duration": narration, "end_time": narration,
+        "narration_text": "Rain taps the kitchen window above cups.",
+    }]
+    metadata = {"id": "m1"}
+    assets = [
+        {"id": "t1", "asset_type": "generated_thumbnail"},
+        {"id": "v1", "asset_type": "voiceover_audio", "duration": narration, "status": "selected"},
+    ]
+
+    def pacing(check):
+        return next(item["ok"] for item in check["checklist"] if item["key"] == "scene_assets")
+
+    plain = validate_prerequisites(project, script, scenes, metadata, assets)
+    assert pacing(plain) is False
+    assert "Scene visuals meet 3-second pacing" in plain["issues"]
+
+    enabled = {**project, "visual_director": {"enabled": True}}
+    unplanned = validate_prerequisites(enabled, script, scenes, metadata, assets)
+    assert pacing(unplanned) is False
+
+    def shots(_plan, _scenes, _script):
+        return {"s1": [{"kind": "stock_video", "frames": 75}]}
+
+    monkeypatch.setattr("app.visual_director.checked_shots", shots)
+    covered = validate_prerequisites(enabled, script, scenes, metadata, assets)
+    assert pacing(covered) is True
+    assert covered["ok"] is True

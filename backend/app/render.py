@@ -538,7 +538,24 @@ def validate_prerequisites(project: dict, script: dict | None,
             scene.get("id"): max(1, math.ceil(float(scene.get("duration") or 30) / 3))
             for scene in scenes if scene.get("id")
         }
-        missing = sum(max(0, count - counts.get(sid, 0)) for sid, count in needs.items())
+        # A stale or empty director plan must not waive the stock requirement.
+        planned: dict[str, list] = {}
+        director = project.get("visual_director") or {}
+        if director.get("enabled"):
+            from .visual_director import DirectorError, checked_shots
+            try:
+                planned = checked_shots(
+                    director, scenes, (script or {}).get("full_script") or "",
+                ) or {}
+            except DirectorError:
+                planned = {}
+        missing = 0
+        for sid, count in needs.items():
+            have = counts.get(sid, 0)
+            shots = planned.get(sid) or []
+            if shots and have < count:
+                have += min(count - have, len(shots))
+            missing += max(0, count - have)
         total_required = sum(needs.values())
         _add("scene_assets", "Scene visuals meet 3-second pacing",
              bool(needs) and missing == 0,
