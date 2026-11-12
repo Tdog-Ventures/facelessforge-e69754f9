@@ -243,17 +243,62 @@ def checked_shots(plan: dict, scenes: list[dict], script: str) -> dict[str, list
     return grouped
 
 
+def _share_aligned_frames(total: int, weights: list[int]) -> list[int]:
+    """Divide one spoken segment across shots that already exist.
+
+    The pieces sum to ``total``. No new shot or billable asset is created.
+    """
+    if total < 1 or not weights or any(weight < 1 for weight in weights) or total < len(weights):
+        raise DirectorError("Aligned duration does not cover the directed shots")
+    weight_total = sum(weights)
+    distributable = total - len(weights)
+    ideals = [distributable * weight / weight_total for weight in weights]
+    durations = [1 + math.floor(value) for value in ideals]
+    remaining = total - sum(durations)
+    order = sorted(range(len(weights)), key=lambda i: (-(ideals[i] - math.floor(ideals[i])), i))
+    for index in order[:remaining]:
+        durations[index] += 1
+    if sum(durations) != total:
+        raise DirectorError("Aligned duration could not be shared across shots")
+    return durations
+
+
+def _source_picture_frames(frames: int) -> int:
+    # render_picture rejects a buffer longer than 60s at 30fps. On-screen
+    # holds still come from the subclip plan.
+    cap = 30 * 60
+    if frames > cap:
+        return cap
+    return frames
+
+
 async def resolve_directed_scene(scene, shots, project, work_dir, index,
                                  width, height, used_ext_ids, resolve_stock,
-                                 attached_assets=None):
-    """Resolve the exact shot order. A stock miss becomes a picture, not a new search."""
+                                 attached_assets=None, aligned_frames=None):
+    """Resolve the exact shot order. A stock miss becomes a picture, not a new search.
+
+    ``aligned_frames`` is the spoken segment. A picture fallback uses it
+    instead of the placeholder beat. A miss does not search for stock.
+    """
     from pathlib import Path
     from .directed_graphics import generate_shot_still, render_graphic, render_picture
     if project.get("production_mode") == "commercial_ad":
         raise DirectorError("AI stock direction cannot replace required client assets")
+    if aligned_frames is None:
+        shares = [int(shot["frames"]) for shot in shots]
+    elif shots:
+        shares = _share_aligned_frames(
+            int(aligned_frames),
+            [max(1, int(shot.get("frames") or 1)) for shot in shots],
+        )
+    else:
+        shares = []
     visuals = []
     assets = list(attached_assets or [])
     for number, shot in enumerate(shots):
+        frames = shares[number]
+        if aligned_frames is not None:
+            frames = _source_picture_frames(frames)
         if shot["kind"] == "stock_video":
             query = shot["query"]
             # Keep the shot narration. The resolver only needs the footage query.
@@ -277,7 +322,7 @@ async def resolve_directed_scene(scene, shots, project, work_dir, index,
             try:
                 still = await generate_shot_still(picture_shot)
                 await asyncio.to_thread(
-                    render_picture, still, out, width, height, int(shot["frames"]))
+                    render_picture, still, out, width, height, frames)
             except DirectorError:
                 raise
             except Exception as exc:
@@ -288,6 +333,7 @@ async def resolve_directed_scene(scene, shots, project, work_dir, index,
             visuals.append((out, "video"))
         else:
             path = Path(work_dir) / f"directed_{index:03d}_{number:03d}.mp4"
-            await asyncio.to_thread(render_graphic, shot, path, width, height)
+            await asyncio.to_thread(
+                render_graphic, {**shot, "frames": frames}, path, width, height)
             visuals.append((path, "video"))
     return visuals

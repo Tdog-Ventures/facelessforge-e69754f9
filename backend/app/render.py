@@ -58,9 +58,15 @@ from .storage import STATIC_ROOT, get_storage
 from .subtitles import subtitle_region, write_srt, write_srt_from_cues, write_srt_from_words
 from .transcribe import transcribe_words
 from .visual_query import truncate_words
-from .timing import TimingContract, build_timing_status, narration_fits_budget, normalize_scene_timeline
 from .timing import (
     MIN_AUTOFIT_MOVE_SECONDS,
+    SceneAlignmentError,
+    TimingContract,
+    align_scene_timeline,
+    build_timing_status,
+    narration_fits_budget,
+    normalize_scene_timeline,
+    split_segment_holds,
     suggest_fitted_duration,
 )
 from . import audio_mix as audio_mix
@@ -236,13 +242,47 @@ async def _final_has_audio_stream(path: Optional[Path]) -> Optional[bool]:
         return None
 
 
-def _build_subclip_plan(scenes: list[dict], timeline_duration: Optional[float]) -> list[dict]:
+def _build_subclip_plan(
+    scenes: list[dict],
+    timeline_duration: Optional[float],
+    *,
+    word_aligned: bool = False,
+    fps: int = 30,
+) -> list[dict]:
     """Return a per-scene plan describing how many sub-clips to render and
     each sub-clip's duration. ``timeline_duration`` is derived from the
     selected project duration, never from measured voiceover length.
 
+    Word-aligned scenes already sum to that budget. Flooring a short scene
+    or rescaling the set pulls the picture off the spoken words, so that
+    path stays only for callers with no word timestamps.
+
     Each scene entry: ``{"scene_index": i, "subclips": [seconds, ...]}``.
     """
+    if word_aligned:
+        if fps <= 0:
+            raise ValueError("FPS must be positive")
+        plan: list[dict] = []
+        for i, scene in enumerate(scenes):
+            frames = scene.get("duration_frames")
+            if not frames:
+                start = float(scene.get("start_time") or 0)
+                end = float(scene.get("end_time") or 0)
+                frames = int(round((end - start) * fps))
+            frames = int(frames)
+            if frames < 1:
+                raise ValueError("Word-aligned scene has no positive duration")
+            pieces = split_segment_holds(frames, max_seconds=MAX_SUBCLIP_SECONDS, fps=fps)
+            seconds = [piece / fps for piece in pieces]
+            if len(seconds) > 1:
+                seconds[-1] = (frames / fps) - sum(seconds[:-1])
+            plan.append({
+                "scene_index": i,
+                "subclips": seconds,
+                "target": frames / fps,
+            })
+        return plan
+
     def _scene_dur(s: dict) -> float:
         return max(2.0, float((s.get("end_time") or 0) - (s.get("start_time") or 0)) or 4.0)
 
@@ -2467,17 +2507,9 @@ async def _run_render(job_id: str, project_id: str):
             narration_frames=timing.narration_frames,
             fps=timing.fps,
         )
-        for scene in scenes:
-            if scene.get("id"):
-                await db.scenes.update_one(
-                    {"id": scene["id"], "project_id": project_id},
-                    {"$set": {
-                        key: scene[key] for key in (
-                            "scene_number", "start_frame", "end_frame", "duration_frames",
-                            "start_time", "end_time", "duration",
-                        )
-                    }},
-                )
+        # Director beat counts were built from these placeholder durations.
+        # Word alignment replaces the clock after the fitted words exist.
+        placeholder_scenes = list(scenes)
 
         check = validate_prerequisites(project, script, scenes, metadata, assets)
         if not check["ok"]:
@@ -2509,27 +2541,87 @@ async def _run_render(job_id: str, project_id: str):
         if audio_path and audio_path.exists():
             audio_duration = await _probe_duration_seconds(audio_path)
 
-        # Build the visual plan from the selected narration budget. Long videos
-        # remain valid; ffmpeg and storage capacity, not a hidden 600s cap, are
-        # the operational limits.
-        ordered_scenes = sorted(scenes, key=lambda x: x.get("scene_number", 0))
-        plan = _build_subclip_plan(ordered_scenes, timing.narration_seconds)
+        # Fit and time the narration before any picture is encoded. Word-count
+        # slots are only a placeholder until these fitted-file words exist.
+        spoken_words: list[dict] = []
+        word_aligned = False
+        if audio_path and audio_path.exists():
+            await _set_job(job_id, current_step="normalizing_vo", progress=31)
+            normed_vo = await _normalize_vo_track(audio_path, work_dir)
+            if normed_vo:
+                audio_path = normed_vo
+                audio_duration = await _probe_duration_seconds(audio_path) or audio_duration
+            await _set_job(job_id, current_step="fitting_narration", progress=33)
+            try:
+                fitted_vo = await audio_mix.fit_narration_to_budget(
+                    audio_path, budget_seconds=timing.narration_seconds,
+                    sample_rate=timing.sample_rate, work_dir=work_dir)
+            except RuntimeError as e:
+                raise RuntimeError(f"narration fit failed: {e}")
+            # Words are timed on this fitted file. fit_scale stays 1.
+            audio_path = fitted_vo
+            audio_duration = timing.narration_seconds
+            await _set_job(job_id, current_step="aligning_scenes", progress=34)
+            spoken_words = await transcribe_words(audio_path, language="en")
+            try:
+                scenes = align_scene_timeline(
+                    placeholder_scenes,
+                    spoken_words,
+                    narration_frames=timing.narration_frames,
+                    fps=timing.fps,
+                    intro_seconds=timing.intro_seconds,
+                )
+            except SceneAlignmentError as exc:
+                raise RuntimeError(
+                    "spoken words could not be aligned to the script: "
+                    f"{exc}. Refusing equal-duration scene slots."
+                ) from exc
+            word_aligned = True
+            logger.info(
+                "SCENE_WORDS_ALIGNED scenes=%s narration_frames=%s",
+                len(scenes), timing.narration_frames,
+            )
+
+        for scene in scenes:
+            if scene.get("id"):
+                await db.scenes.update_one(
+                    {"id": scene["id"], "project_id": project_id},
+                    {"$set": {
+                        key: scene[key] for key in (
+                            "scene_number", "start_frame", "end_frame", "duration_frames",
+                            "start_time", "end_time", "duration",
+                        )
+                    }},
+                )
+
+        # Long videos remain valid; ffmpeg and storage, not a hidden cap, are the limits.
+        ordered_scenes = sorted(scenes, key=lambda item: item.get("scene_number", 0))
+        scenes = ordered_scenes
+        plan = _build_subclip_plan(
+            ordered_scenes,
+            timing.narration_seconds,
+            word_aligned=word_aligned,
+            fps=timing.fps,
+        )
         plan_by_idx = {p["scene_index"]: p for p in plan}
         directed_by_scene = {}
         director_plan = project.get("visual_director") or {}
         if director_plan.get("enabled"):
             from .visual_director import DirectorError, checked_shots, resolve_directed_scene
             try:
+                # Placeholder durations keep the saved beat count. Aligned
+                # clocks must not mark that plan stale.
                 directed_by_scene = checked_shots(
-                    director_plan, scenes, (script or {}).get("full_script") or "")
+                    director_plan, placeholder_scenes, (script or {}).get("full_script") or "")
             except DirectorError as exc:
                 logger.warning("VISUAL_DIRECTOR_STALE %s", exc)
                 directed_by_scene = {}
             else:
-                for i, scene in enumerate(scenes):
-                    shots = directed_by_scene.get(scene.get("id")) or []
-                    if shots and i in plan_by_idx:
-                        plan_by_idx[i]["subclips"] = [shot["frames"] / 30 for shot in shots]
+                if not word_aligned:
+                    for i, scene in enumerate(scenes):
+                        shots = directed_by_scene.get(scene.get("id")) or []
+                        if shots and i in plan_by_idx:
+                            plan_by_idx[i]["subclips"] = [shot["frames"] / 30 for shot in shots]
 
         await _set_job(job_id, current_step="preparing_scenes", progress=35)
         scene_visuals: list[tuple[list[tuple[Path, str]], dict]] = []
@@ -2539,12 +2631,18 @@ async def _run_render(job_id: str, project_id: str):
             # One distinct source per emitted sub-clip is sufficient. Requiring
             # twenty sources for a short scene turns transient stock-download
             # failures into a long, unnecessary retry loop before fallback.
-            required_visuals = max(n_clips, 1)
+            # A split must reuse the accepted visual. One source per piece
+            # would search for an unrelated picture.
+            required_visuals = 1 if word_aligned else max(n_clips, 1)
             if directed_by_scene.get(scene.get("id")):
                 try:
                     visuals = await resolve_directed_scene(
                         scene, directed_by_scene[scene["id"]], project, work_dir, i,
-                        W, H, used_ext_ids, _resolve_scene_visual, attached_assets=assets)
+                        W, H, used_ext_ids, _resolve_scene_visual, attached_assets=assets,
+                        aligned_frames=(
+                            int(scene["duration_frames"]) if word_aligned else None
+                        ),
+                    )
                 except DirectorError as exc:
                     raise RuntimeError(str(exc)) from None
             else:
@@ -2674,33 +2772,10 @@ async def _run_render(job_id: str, project_id: str):
         if not ok:
             raise RuntimeError(f"concat failed: {err[-300:]}")
 
-        # FIX 2: Normalize VO FIRST — lock final audio duration before any SRT is built.
-        # Previously Whisper SRT was generated before this step, so timestamps drifted after trim/pad.
-        if audio_path and audio_path.exists():
-            await _set_job(job_id, current_step="normalizing_vo", progress=89)
-            normed_vo = await _normalize_vo_track(audio_path, work_dir)
-            if normed_vo:
-                audio_path = normed_vo
-                audio_duration = await _probe_duration_seconds(audio_path) or audio_duration
-
-        # Caption-sync artifact: fit narration to the EXACT budget BEFORE any
-        # transcription. The mux must not time-stretch afterwards, so caption
-        # timestamps describe the final audio bit-for-bit.
-        fitted_vo: Optional[Path] = None
-        if audio_path and audio_path.exists():
-            await _set_job(job_id, current_step="fitting_narration", progress=90)
-            try:
-                fitted_vo = await audio_mix.fit_narration_to_budget(
-                    audio_path, budget_seconds=timing.narration_seconds,
-                    sample_rate=timing.sample_rate, work_dir=work_dir)
-            except RuntimeError as e:
-                raise RuntimeError(f"narration fit failed: {e}")
-            audio_path = fitted_vo
-            audio_duration = timing.narration_seconds
-
+        # Narration was fitted before the picture plan. These words are from
+        # that fitted file (fit_scale is 1). Do not fit or transcribe again.
         # ---- subtitle burn-in: word-synchronised from Whisper STT + ASS karaoke ----
-        # FIX 2: SRT is generated ONLY after final audio duration is locked (after concat + VO normalize).
-        # No trim/pad/concat or audio filter may run after this point — burn is the last video filter before mux.
+        # No trim, pad, or second atempo may run after this point — burn is the last video filter before mux.
         # Captions are optional at render time (not during production) — default off, auto-captions on platforms
         burned_out = silent_out
         # BEAT overlay removed — FIX 1: BEAT markers must never be burned into the video.
@@ -2708,7 +2783,7 @@ async def _run_render(job_id: str, project_id: str):
         # Still write SRT for download/CapCut even when not burned
         if audio_path and audio_path.exists():
             await _set_job(job_id, current_step="transcribing_audio", progress=91)
-            words = await transcribe_words(audio_path, language="en")
+            words = spoken_words
             if burn_enabled and not words:
                 raise RuntimeError(
                     "caption alignment failed: transcription produced no word "

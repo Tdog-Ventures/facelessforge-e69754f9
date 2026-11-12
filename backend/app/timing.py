@@ -288,3 +288,344 @@ def _positive_seconds(value: Any) -> float | None:
     if number is None or number <= 0:
         return None
     return number
+
+
+
+class SceneAlignmentError(ValueError):
+    """Fitted words do not match the script. Callers must not invent equal slots."""
+
+
+def _norm_token(text: Any) -> str:
+    return re.sub(r"[^\w]+", "", str(text or "").lower())
+
+
+def _script_tokens(text: Any) -> list[str]:
+    return [token for token in (_norm_token(part) for part in str(text or "").split()) if token]
+
+
+def _word_token(word: Any) -> str:
+    if not isinstance(word, dict):
+        return ""
+    return _norm_token(word.get("word"))
+
+
+def _word_bounds(word: dict) -> tuple[float, float]:
+    try:
+        start = float(word["start"])
+        end = float(word["end"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SceneAlignmentError("Spoken word is missing a timestamp") from exc
+    if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end < start:
+        raise SceneAlignmentError("Spoken word has an invalid timestamp")
+    return start, end
+
+
+def _next_spoken(words: list[dict], index: int) -> int:
+    while index < len(words) and not _word_token(words[index]):
+        index += 1
+    return index
+
+
+def _consume_scene_words(
+    script_tokens: list[str],
+    words: list[dict],
+    index: int,
+    scene_label: Any,
+) -> tuple[list[int], int]:
+    """Consume the next spoken tokens that spell this scene, in order.
+
+    Adjacent whisper tokens may join into one script token, and adjacent
+    script tokens may join into one whisper token, but only when the pieces
+    spell the same word. A shared word such as "rain" does not match
+    "raindrops", and words are never skipped to find a later hit.
+    """
+    if not script_tokens:
+        raise SceneAlignmentError(f"Scene {scene_label} has no narration to align")
+    consumed: list[int] = []
+    script_index = 0
+    cursor = _next_spoken(words, index)
+    while script_index < len(script_tokens):
+        cursor = _next_spoken(words, cursor)
+        if cursor >= len(words):
+            raise SceneAlignmentError(
+                f"Scene {scene_label} is missing spoken words for '{script_tokens[script_index]}'"
+            )
+        spoken = _word_token(words[cursor])
+        wanted = script_tokens[script_index]
+        if spoken == wanted:
+            consumed.append(cursor)
+            cursor += 1
+            script_index += 1
+            continue
+        joined = spoken
+        group = [cursor]
+        scan = cursor
+        spelled = False
+        while len(joined) < len(wanted):
+            scan = _next_spoken(words, scan + 1)
+            if scan >= len(words):
+                break
+            nxt = _word_token(words[scan])
+            if not wanted.startswith(joined + nxt):
+                break
+            joined += nxt
+            group.append(scan)
+            if joined == wanted:
+                consumed.extend(group)
+                cursor = scan + 1
+                script_index += 1
+                spelled = True
+                break
+        if spelled:
+            continue
+        joined_script = wanted
+        script_end = script_index
+        while len(joined_script) < len(spoken):
+            if script_end + 1 >= len(script_tokens):
+                break
+            nxt_script = script_tokens[script_end + 1]
+            if not spoken.startswith(joined_script + nxt_script):
+                break
+            joined_script += nxt_script
+            script_end += 1
+            if joined_script == spoken:
+                consumed.append(cursor)
+                cursor += 1
+                script_index = script_end + 1
+                spelled = True
+                break
+        if spelled:
+            continue
+        raise SceneAlignmentError(
+            f"Scene {scene_label} does not match the spoken words at '{wanted}'"
+        )
+    if not consumed:
+        raise SceneAlignmentError(f"Scene {scene_label} matched no spoken words")
+    previous: float | None = None
+    for word_index in consumed:
+        start, _end = _word_bounds(words[word_index])
+        if previous is not None and start < previous:
+            raise SceneAlignmentError(f"Scene {scene_label} spoken timestamps go backwards")
+        previous = start
+    return consumed, cursor
+
+
+def align_scene_timeline(
+    scenes: list[dict[str, Any]],
+    words: list[dict[str, Any]],
+    *,
+    narration_frames: int,
+    fps: int = DEFAULT_FPS,
+    intro_seconds: float = float(DEFAULT_INTRO_SECONDS),
+) -> list[dict[str, Any]]:
+    """Replace placeholder scene bounds with fitted-word boundaries.
+
+    Word ``start``/``end`` are seconds on the fitted narration file.
+    ``fit_scale`` is 1 and is not applied again. Returned ``start_time`` /
+    ``end_time`` stay on the narration clock, the same keys as
+    :func:`normalize_scene_timeline`. The video clock is
+    ``intro_seconds + narration_time`` and is applied by
+    :func:`word_alignment_report`, not stored here.
+
+    The first scene starts at 0 so leading silence stays on that picture.
+    Each later scene starts at its first matched word, so the pause after a
+    sentence stays on that sentence. The last scene ends on the narration
+    budget, including trailing silence, and absorbs frame-rounding remainder.
+    """
+    try:
+        intro = float(intro_seconds)
+    except (TypeError, ValueError) as exc:
+        raise SceneAlignmentError("Intro seconds must be zero or positive") from exc
+    if not math.isfinite(intro) or intro < 0:
+        raise SceneAlignmentError("Intro seconds must be zero or positive")
+    if not isinstance(scenes, list) or not scenes:
+        raise SceneAlignmentError("No scenes to align")
+    if narration_frames < len(scenes) or fps <= 0:
+        raise SceneAlignmentError("Narration budget must provide at least one frame per scene")
+    if not isinstance(words, list) or not any(_word_token(word) for word in words):
+        raise SceneAlignmentError("No spoken words to align")
+
+    consumed_by_scene: list[list[int]] = []
+    cursor = 0
+    for index, scene in enumerate(scenes):
+        label = scene.get("scene_number") or index + 1
+        tokens = _script_tokens(scene.get("narration_text"))
+        consumed, cursor = _consume_scene_words(tokens, words, cursor, label)
+        consumed_by_scene.append(consumed)
+    cursor = _next_spoken(words, cursor)
+    if cursor < len(words):
+        raise SceneAlignmentError("Leftover spoken words do not belong to a script segment")
+
+    previous_word = -1.0
+    boundaries = [0]
+    for index, consumed in enumerate(consumed_by_scene):
+        word_start, _word_end = _word_bounds(words[consumed[0]])
+        if index > 0 and word_start <= previous_word:
+            raise SceneAlignmentError("Spoken timestamps go backwards")
+        previous_word = word_start
+        if index == 0:
+            continue
+        frame = _units(Decimal(str(word_start)), fps)
+        if frame <= boundaries[-1] or frame >= narration_frames:
+            label = scenes[index].get("scene_number") or index + 1
+            raise SceneAlignmentError(
+                f"Scene {label} boundary does not fit the narration budget"
+            )
+        boundaries.append(frame)
+    boundaries.append(narration_frames)
+
+    aligned: list[dict[str, Any]] = []
+    for index, (scene, consumed) in enumerate(zip(scenes, consumed_by_scene)):
+        start = boundaries[index]
+        end = boundaries[index + 1]
+        item = dict(scene)
+        number = scene.get("scene_number") or index + 1
+        item.update({
+            "scene_number": number,
+            "start_frame": start,
+            "end_frame": end,
+            "duration_frames": end - start,
+            "start_time": round(start / fps, 6),
+            "end_time": round(end / fps, 6),
+            "duration": round((end - start) / fps, 6),
+            "aligned_words": [dict(words[word_index]) for word_index in consumed],
+        })
+        aligned.append(item)
+    return aligned
+
+
+def split_segment_holds(duration_frames: int, *, max_seconds: float, fps: int) -> list[int]:
+    """Contiguous visual holds of one spoken segment. Each piece is <= max_seconds.
+
+    The pieces sum to ``duration_frames``. Neighboring segments are not resized.
+    A segment that already fits the maximum stays one hold.
+    """
+    if duration_frames < 1:
+        raise ValueError("Segment must contain at least one frame")
+    if fps <= 0 or max_seconds <= 0:
+        raise ValueError("FPS and maximum hold must be positive")
+    max_frames = _units(Decimal(str(max_seconds)), fps)
+    if max_frames < 1:
+        raise ValueError("Maximum hold must cover at least one frame")
+    if duration_frames <= max_frames:
+        return [duration_frames]
+    count = math.ceil(duration_frames / max_frames)
+    base, extra = divmod(duration_frames, count)
+    pieces = [base + (1 if index < extra else 0) for index in range(count)]
+    if any(piece < 1 or piece > max_frames for piece in pieces) or sum(pieces) != duration_frames:
+        raise ValueError("Hold split did not fit the spoken segment")
+    return pieces
+
+
+def _within_frame(deviation_ms: float, fps: int) -> bool:
+    return deviation_ms <= (1000.0 / fps) + 1e-6
+
+
+def _cue_matches_word(cue_word: dict, spoken: dict, intro: float) -> bool:
+    if _norm_token(cue_word.get("word")) != _norm_token(spoken.get("word")):
+        return False
+    try:
+        cue_start = float(cue_word["start"])
+        spoken_start = float(intro) + float(spoken["start"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return abs(cue_start - spoken_start) <= 1e-4
+
+
+def word_alignment_report(
+    scenes: list[dict[str, Any]],
+    cues: list[dict[str, Any]],
+    *,
+    fps: int,
+    intro_seconds: float,
+    asset_ids: list[Any] | None = None,
+    visual_spans: list[tuple[float, float]] | None = None,
+) -> list[dict[str, Any]]:
+    """Picture-versus-speech records on the video clock. No I/O.
+
+    Narration times are the spoken segment (first scene at ``intro_seconds``,
+    each later scene at its first word, last scene ending on the narration
+    budget). Visual times are that segment's picture window. Pass
+    ``visual_spans`` on the narration clock; intro is added once. Subtitle
+    times are the first and last cue from :func:`build_cues_from_words` that
+    contain the segment's words. Cue starts are not moved.
+
+    ``within_frame`` is false when the picture misses the spoken segment by
+    more than one frame (``1000/fps`` milliseconds).
+    """
+    try:
+        intro = float(intro_seconds)
+    except (TypeError, ValueError) as exc:
+        raise SceneAlignmentError("Intro seconds must be zero or positive") from exc
+    if fps <= 0 or not math.isfinite(intro) or intro < 0:
+        raise SceneAlignmentError("FPS must be positive and intro must be zero or positive")
+    if not scenes:
+        return []
+    if asset_ids is None:
+        asset_ids = [None] * len(scenes)
+    if len(asset_ids) != len(scenes):
+        raise SceneAlignmentError("Asset ids must match the aligned scenes")
+    if visual_spans is not None and len(visual_spans) != len(scenes):
+        raise SceneAlignmentError("Visual spans must match the aligned scenes")
+    if any(not scene.get("aligned_words") for scene in scenes):
+        raise SceneAlignmentError("Scene has no spoken-word alignment")
+
+    budget = scenes[-1]["end_frame"] / fps
+    records: list[dict[str, Any]] = []
+    for index, scene in enumerate(scenes):
+        spoken_words = scene["aligned_words"]
+        raw_start = 0.0 if index == 0 else float(spoken_words[0]["start"])
+        if index + 1 < len(scenes):
+            raw_end = float(scenes[index + 1]["aligned_words"][0]["start"])
+        else:
+            raw_end = budget
+        if visual_spans is None:
+            visual_start = scene["start_frame"] / fps
+            visual_end = scene["end_frame"] / fps
+        else:
+            visual_start, visual_end = visual_spans[index]
+            visual_start = float(visual_start)
+            visual_end = float(visual_end)
+        if visual_end < visual_start or raw_end < raw_start:
+            raise SceneAlignmentError("Timeline interval goes backwards")
+        narration_start = round(intro + raw_start, 6)
+        narration_end = round(intro + raw_end, 6)
+        picture_start = round(intro + visual_start, 6)
+        picture_end = round(intro + visual_end, 6)
+        deviation_ms = round(max(
+            abs(picture_start - narration_start),
+            abs(picture_end - narration_end),
+        ) * 1000.0, 6)
+        belonging = [
+            cue for cue in cues
+            if any(
+                _cue_matches_word(cue_word, spoken, intro)
+                for cue_word in (cue.get("words") or [])
+                for spoken in spoken_words
+            )
+        ]
+        try:
+            number = int(scene.get("scene_number") or index + 1)
+        except (TypeError, ValueError):
+            number = index + 1
+        records.append({
+            "scene_id": scene.get("id"),
+            "scene_number": number,
+            "narration_start": narration_start,
+            "narration_end": narration_end,
+            "visual_start": picture_start,
+            "visual_end": picture_end,
+            "asset_id": asset_ids[index],
+            "subtitle_start": belonging[0]["start"] if belonging else None,
+            "subtitle_end": belonging[-1]["end"] if belonging else None,
+            "deviation_ms": deviation_ms,
+            "within_frame": _within_frame(deviation_ms, fps),
+        })
+    return records
+
+
+def alignment_within_frame(records: list[dict[str, Any]], *, fps: int) -> bool:
+    """False when any picture window misses its spoken segment by more than one frame."""
+    if fps <= 0:
+        raise SceneAlignmentError("FPS must be positive")
+    return all(_within_frame(float(record["deviation_ms"]), fps) for record in records)
