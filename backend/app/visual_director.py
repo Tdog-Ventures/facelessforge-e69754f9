@@ -243,26 +243,12 @@ def checked_shots(plan: dict, scenes: list[dict], script: str) -> dict[str, list
     return grouped
 
 
-def _narration_graphic(shot: dict) -> dict:
-    """Use the plan's labels, or one literal narration excerpt. Never a new stock id."""
-    kind = shot.get("kind")
-    if kind in {"text", "steps", "comparison", "timeline"} and shot.get("labels"):
-        return shot
-    narration = " ".join(str(shot.get("narration") or "").split())
-    if len(narration) > 80:
-        clipped = narration[:80]
-        narration = clipped.rsplit(" ", 1)[0].strip() if " " in clipped else clipped
-    if not narration or not shot.get("frames"):
-        raise DirectorError("Directed footage is missing and cannot become a graphic")
-    return {**shot, "kind": "text", "labels": [narration], "frames": shot["frames"]}
-
-
 async def resolve_directed_scene(scene, shots, project, work_dir, index,
                                  width, height, used_ext_ids, resolve_stock,
                                  attached_assets=None):
-    """Resolve the exact shot order. A stock miss becomes a graphic, not a new search."""
+    """Resolve the exact shot order. A stock miss becomes a picture, not a new search."""
     from pathlib import Path
-    from .directed_graphics import render_graphic
+    from .directed_graphics import generate_shot_still, render_graphic, render_picture
     if project.get("production_mode") == "commercial_ad":
         raise DirectorError("AI stock direction cannot replace required client assets")
     visuals = []
@@ -286,10 +272,19 @@ async def resolve_directed_scene(scene, shots, project, work_dir, index,
                 logger.info("DIRECTED_STOCK scene_index=%s shot=%s ext_id=%s", index, number, external_id)
                 visuals.append((path, kind))
                 continue
-            graphic = _narration_graphic({**shot, "narration": shot.get("narration") or scene.get("narration_text")})
             out = Path(work_dir) / f"directed_{index:03d}_{number:03d}.mp4"
-            await asyncio.to_thread(render_graphic, graphic, out, width, height)
-            logger.info("DIRECTED_GRAPHIC scene_index=%s shot=%s", index, number)
+            picture_shot = {**shot, "narration": shot.get("narration") or scene.get("narration_text")}
+            try:
+                still = await generate_shot_still(picture_shot)
+                await asyncio.to_thread(
+                    render_picture, still, out, width, height, int(shot["frames"]))
+            except DirectorError:
+                raise
+            except Exception as exc:
+                detail = str(exc) if str(exc).startswith("Directed picture") else type(exc).__name__
+                logger.info("DIRECTED_PICTURE_FAILED scene_index=%s shot=%s", index, number)
+                raise DirectorError(f"Scene {index + 1} picture failed: {detail}") from None
+            logger.info("DIRECTED_PICTURE scene_index=%s shot=%s", index, number)
             visuals.append((out, "video"))
         else:
             path = Path(work_dir) / f"directed_{index:03d}_{number:03d}.mp4"

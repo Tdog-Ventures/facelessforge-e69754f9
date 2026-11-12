@@ -8,7 +8,7 @@ import pytest
 from app.visual_director import (DirectorError, make_beats, validate_choices, direct,
                                  checked_shots, resolve_directed_scene, gemini_choices,
                                  stock_queries_by_scene)
-from app.directed_graphics import graphic_frame
+from app.directed_graphics import graphic_frame, picture_prompt
 
 
 def test_deepseek_request_and_response_contract(monkeypatch):
@@ -181,18 +181,55 @@ def test_directed_stock_prefers_existing_attachments(tmp_path):
     assert captured == [(attached, False)]
 
 
+def _nonuniform_png() -> bytes:
+    import io
+    from PIL import Image
+
+    image = Image.new("RGB", (80, 120))
+    pixels = image.load()
+    for y in range(120):
+        for x in range(80):
+            pixels[x, y] = ((x * 13) % 256, (y * 9) % 256, ((x + y) * 5) % 256)
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def test_picture_prompt_depicts_the_shot_and_forbids_lettering():
+    prompt = picture_prompt({
+        "query": "boiling kettle releasing steam",
+        "narration": "The kitchen kettle steams on the counter.",
+    })
+    lowered = prompt.lower()
+    assert "boiling kettle releasing steam" in lowered
+    assert "kitchen kettle steams on the counter" in lowered
+    assert "9:16" in lowered
+    assert "1080x1920" in lowered
+    for banned in ("no words", "watermarks", "maps", "avatars", "charts", "code"):
+        assert banned in lowered
+
+
 def test_images_cannot_silently_replace_directed_footage(tmp_path, monkeypatch):
     import subprocess
+    from PIL import Image
     from app.render import _resolve_scene_visual
 
     searches = {"n": 0}
+    pictures = {"n": 0}
+    png = _nonuniform_png()
 
     async def fail_search(*args, **kwargs):
         searches["n"] += 1
         raise AssertionError("search_stock")
 
+    async def fake_still(shot):
+        pictures["n"] += 1
+        assert "kettle" in shot["narration"].lower() or "rain" in shot["narration"].lower()
+        return png
+
     monkeypatch.setattr("app.render.stock_service.search_stock", fail_search)
     monkeypatch.setattr("app.render.stock_service.search_stock_videos", fail_search)
+    monkeypatch.setattr("app.directed_graphics.generate_shot_still", fake_still)
 
     async def resolve(scene, assets, project, work, idx, **kwargs):
         assert kwargs.get("allow_fallback") is False
@@ -211,6 +248,7 @@ def test_images_cannot_silently_replace_directed_footage(tmp_path, monkeypatch):
     result = asyncio.run(resolve_directed_scene(
         scenes()[0], shots, {}, tmp_path, 0, 640, 360, set(), resolve))
     assert searches["n"] == 0
+    assert pictures["n"] == 2
     assert [kind for _path, kind in result] == ["video", "video"]
     assert all(path.name.startswith("directed_000_") for path, _kind in result)
     assert Path("still.jpg") not in [path for path, _kind in result]
@@ -234,6 +272,60 @@ def test_images_cannot_silently_replace_directed_footage(tmp_path, monkeypatch):
         )
         frames.append(dest.read_bytes())
     assert frames[0] != frames[1]
+    adjacent = tmp_path / "adjacent.png"
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-i", str(graphic),
+         "-ss", f"{1 / 30:.5f}", "-frames:v", "1", str(adjacent)],
+        check=True,
+    )
+    assert adjacent.read_bytes() != frames[0]
+    opened = Image.open(tmp_path / "a.png")
+    assert opened.getpixel((0, 0)) != opened.getpixel((opened.width - 1, opened.height // 2))
+
+
+def test_saved_stock_is_not_replaced_by_a_picture(tmp_path, monkeypatch):
+    async def fake_still(_shot):
+        raise AssertionError("picture")
+
+    async def stock(scene, assets, project, work, idx, **kwargs):
+        assert kwargs.get("allow_fallback") is False
+        return Path("footage.mp4"), "video", "11722"
+
+    monkeypatch.setattr("app.directed_graphics.generate_shot_still", fake_still)
+    shots = [{"kind": "stock_video", "query": "rain on a kitchen window", "frames": 30,
+              "narration": "Rain taps the kitchen window above cups."}]
+    result = asyncio.run(resolve_directed_scene(
+        scenes()[0], shots, {}, tmp_path, 1, 640, 360, set(), stock))
+    assert result == [(Path("footage.mp4"), "video")]
+    assert list(tmp_path.glob("directed_*.mp4")) == []
+
+
+def test_picture_failure_does_not_write_a_card_or_attach_stock(tmp_path, monkeypatch):
+    searches = {"n": 0}
+
+    async def fail_search(*args, **kwargs):
+        searches["n"] += 1
+        raise AssertionError("search_stock")
+
+    async def fail_still(_shot):
+        raise RuntimeError("Directed picture generation failed: no image")
+
+    monkeypatch.setattr("app.render.stock_service.search_stock", fail_search)
+    monkeypatch.setattr("app.render.stock_service.search_stock_videos", fail_search)
+    monkeypatch.setattr("app.directed_graphics.generate_shot_still", fail_still)
+
+    async def resolve(scene, assets, project, work, idx, **kwargs):
+        assert kwargs.get("allow_fallback") is False
+        return Path("unrelated-stock.mp4"), "image", "other-scene"
+
+    shots = [{"kind": "stock_video", "query": "boiling kettle releasing steam", "frames": 12,
+              "narration": "The kitchen kettle steams on the counter."}]
+    with pytest.raises(DirectorError, match="picture failed"):
+        asyncio.run(resolve_directed_scene(
+            scenes()[0], shots, {}, tmp_path, 0, 640, 360, set(), resolve))
+    assert searches["n"] == 0
+    assert list(tmp_path.glob("*.mp4")) == []
+    assert list(tmp_path.rglob("*.png")) == []
 
 
 def test_client_asset_projects_are_protected(tmp_path):
