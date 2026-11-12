@@ -7,7 +7,12 @@ from app.render import (
     _intro_title_placement,
     _try_load_font,
 )
-from app.subtitles import build_cues_from_words, build_srt_from_words, subtitle_region
+from app.subtitles import (
+    build_ass_karaoke,
+    build_cues_from_words,
+    build_srt_from_words,
+    subtitle_region,
+)
 
 
 def _overlaps(box, region) -> bool:
@@ -97,15 +102,60 @@ def test_final_cue_keeps_the_last_words_inside_the_video():
     assert merged[0]["start"] == 2.5 + 53.10
     assert "dries." in merged[0]["text"]
 
-    # A cue that would run past the video keeps every word. Start stays on the
-    # first word even when that word is already past the video.
-    late = [{"word": token, "start": 58.0 + i * 0.4, "end": 58.2 + i * 0.4} for i, token in enumerate(tokens)]
-    clamped = build_cues_from_words(late, narration_start=2.5, video_end=60.0, words_per_cue=7)
-    assert clamped[-1]["start"] == 2.5 + 58.0
-    assert clamped[-1]["start"] > 60.0
-    assert clamped[-1]["end"] <= 60.0
-    assert "dries." in clamped[-1]["text"]
-    assert "counter" in clamped[-1]["text"]
+
+def _srt_spans(srt: str) -> list[tuple[str, str]]:
+    return [tuple(line.split(" --> ")) for line in srt.splitlines() if " --> " in line]
+
+
+def _ass_spans(ass: str) -> list[tuple[str, str]]:
+    spans = []
+    for line in ass.splitlines():
+        if line.startswith("Dialogue:"):
+            parts = line.split(",")
+            spans.append((parts[1], parts[2]))
+    return spans
+
+
+def test_cue_past_video_end_is_omitted_and_inside_cue_is_clamped():
+    # Narration 58.2 with a 2.5s intro is 60.70. Clamping only the end wrote
+    # 60.70 --> 60.00 into SRT and ASS.
+    past = [{"word": "later.", "start": 58.2, "end": 58.5}]
+    assert build_cues_from_words(past, narration_start=2.5, video_end=60.0) == []
+    srt = build_srt_from_words(past, intro_offset_seconds=2.5, video_end=60.0)
+    ass = build_ass_karaoke(
+        past, intro_offset_seconds=2.5, video_end=60.0, play_res_x=1080, play_res_y=1920,
+    )
+    assert _srt_spans(srt) == []
+    assert _ass_spans(ass) == []
+    assert "00:01:00,700 --> 00:01:00,000" not in srt
+    assert "0:01:00.70,0:01:00.00" not in ass
+
+    # A word placed exactly on the video end has no samples left either.
+    edge = [{"word": "edge.", "start": 57.5, "end": 57.7}]
+    assert build_cues_from_words(edge, narration_start=2.5, video_end=60.0) == []
+
+    # "Now." is spoken at 59.90, inside the video. Emit it, clamp the end, leave the start.
+    spoken = 57.4
+    inside = [{"word": "Now.", "start": spoken, "end": spoken + 0.1}]
+    cues = build_cues_from_words(inside, narration_start=2.5, video_end=60.0)
+    assert len(cues) == 1
+    assert cues[0]["text"] == "Now."
+    assert cues[0]["start"] == 2.5 + spoken
+    assert cues[0]["start"] < 60.0
+    assert cues[0]["end"] == 60.0
+    assert cues[0]["start"] != 59.5
+    srt = build_srt_from_words(inside, intro_offset_seconds=2.5, video_end=60.0)
+    ass = build_ass_karaoke(
+        inside, intro_offset_seconds=2.5, video_end=60.0, play_res_x=1080, play_res_y=1920,
+    )
+    srt_spans = _srt_spans(srt)
+    ass_spans = _ass_spans(ass)
+    assert len(srt_spans) == 1
+    assert len(ass_spans) == 1
+    assert srt_spans[0][0] <= srt_spans[0][1]
+    assert ass_spans[0][0] <= ass_spans[0][1]
+    assert "Now." in srt
+    assert "Now." in ass
 
 
 def test_paused_short_tail_stays_on_its_word_time():

@@ -186,6 +186,8 @@ def build_cues_from_words(
 
     A cue closes on punctuation, a pause over 0.45s, or the word cap. A
     duration limit is not a flush: that clamp used to hide the last words.
+    A cue whose first word is already at or after ``video_end`` is omitted.
+    A cue that starts inside the video keeps that start and clamps its end.
     """
     if fit_scale <= 0:
         raise ValueError("fit_scale must be positive")
@@ -206,9 +208,11 @@ def build_cues_from_words(
     cues: list[dict] = []
     bucket: list[dict] = []
 
-    def _close(group: list[dict]) -> dict:
+    def _close(group: list[dict]) -> dict | None:
         start = group[0]["start"]
         end = group[-1]["end"]
+        if video_end is not None and start >= float(video_end):
+            return None
         if end < start + min_cue_seconds:
             end = start + min_cue_seconds
         if video_end is not None:
@@ -224,8 +228,10 @@ def build_cues_from_words(
         nonlocal bucket
         if not bucket:
             return
-        cues.append(_close(bucket))
+        cue = _close(bucket)
         bucket = []
+        if cue is not None:
+            cues.append(cue)
 
     for index, word in enumerate(placed):
         bucket.append(word)
@@ -243,9 +249,10 @@ def build_cues_from_words(
     if len(cues) >= 2 and len(cues[-1]["words"]) <= 2:
         gap = cues[-1]["words"][0]["start"] - cues[-2]["words"][-1]["end"]
         if gap <= pause_gap and not cues[-2]["text"].rstrip().endswith((".", "!", "?")):
-            merged = cues[-2]["words"] + cues[-1]["words"]
-            cues[-2] = _close(merged)
-            cues.pop()
+            merged = _close(cues[-2]["words"] + cues[-1]["words"])
+            if merged is not None:
+                cues[-2] = merged
+                cues.pop()
     return cues
 
 
