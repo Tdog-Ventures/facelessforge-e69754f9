@@ -207,6 +207,34 @@ def test_short_final_cue_is_not_pulled_over_the_previous_cue():
     assert yes_cues[-1]["start"] != 59.50
 
 
+def test_min_duration_does_not_cover_the_next_cue():
+    # Pause is 0.46s, so these stay two cues. Stretching "Hi." to 0.50s
+    # covered "There." spoken at 0.48s.
+    words = [
+        {"word": "Hi.", "start": 0.00, "end": 0.02},
+        {"word": "There.", "start": 0.48, "end": 0.70},
+    ]
+    cues = build_cues_from_words(words, narration_start=0)
+    assert len(cues) == 2
+    assert cues[0]["text"] == "Hi."
+    assert cues[1]["text"] == "There."
+    assert cues[0]["start"] == words[0]["start"]
+    assert cues[1]["start"] == words[1]["start"]
+    assert cues[0]["start"] >= words[0]["start"]
+    assert cues[1]["start"] >= words[1]["start"]
+    assert cues[0]["end"] <= cues[1]["start"]
+    assert cues[0]["end"] == cues[1]["start"]
+    assert cues[0]["end"] > cues[0]["start"]
+    assert cues[1]["end"] == cues[1]["start"] + 0.5
+
+    srt_spans = _srt_spans(build_srt_from_words(words, intro_offset_seconds=0))
+    ass_spans = _ass_spans(build_ass_karaoke(words, intro_offset_seconds=0))
+    assert len(srt_spans) == 2
+    assert len(ass_spans) == 2
+    assert srt_spans[0][1] <= srt_spans[1][0]
+    assert ass_spans[0][1] <= ass_spans[1][0]
+
+
 def test_line_length_clamp_does_not_drop_words():
     tokens = ["alpha", "beta"] + ["supercalifragilisticexpialidocious"] * 4
     from app.subtitles import _clean_caption

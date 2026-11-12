@@ -188,6 +188,10 @@ def build_cues_from_words(
     duration limit is not a flush: that clamp used to hide the last words.
     A cue whose first word is already at or after ``video_end`` is omitted.
     A cue that starts inside the video keeps that start and clamps its end.
+    A short cue may stretch toward the minimum duration. Its end then stops
+    at the next cue's start and at ``video_end``, and the start stays on the
+    first word. Touching the next cue is allowed; a backwards interval is
+    omitted.
     """
     if fit_scale <= 0:
         raise ValueError("fit_scale must be positive")
@@ -253,7 +257,27 @@ def build_cues_from_words(
             if merged is not None:
                 cues[-2] = merged
                 cues.pop()
-    return cues
+
+    # The floor stretches forward. The next cue already owns the clock from
+    # its first word, so this end cannot pass that start.
+    visible: list[dict] = []
+    for index, cue in enumerate(cues):
+        start = cue["start"]
+        end = cue["end"]
+        if index + 1 < len(cues):
+            end = min(end, cues[index + 1]["start"])
+        if video_end is not None:
+            end = min(end, float(video_end))
+        if end < start:
+            continue
+        spoken_start = cue["words"][0]["start"]
+        spoken_end = cue["words"][-1]["end"]
+        if end == start and not (spoken_start == spoken_end == start):
+            continue
+        if end != cue["end"]:
+            cue = {**cue, "end": end}
+        visible.append(cue)
+    return visible
 
 
 def build_srt_from_words(
