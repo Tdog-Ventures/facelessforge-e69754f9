@@ -710,7 +710,7 @@ def _resolve_font_path() -> str:
 def _wrap_text(text: str, max_chars: int = 30) -> str:
     """Wrap text into lines of at most max_chars characters.
 
-    CONSTITUTION §5: Intro title centered, wrapped, ≥80px side margins.
+    CONSTITUTION §5: Intro title wrapped, ≥80px side margins.
     At 72pt font, 30 chars ≈ safe width within 1760px usable area.
     """
     words = text.split()
@@ -812,17 +812,6 @@ def _intro_title_placement(text: str, *, width: int, height: int) -> tuple[str, 
     if block_h and y + block_h > sub_top - gap:
         y = max(0, sub_top - gap - block_h)
     return wrapped, font_size, int(y)
-
-
-def intro_title_bounds(text: str, width: int, height: int) -> tuple[int, int, int, int]:
-    """Pixel box of the intro title drawn by the ffmpeg intro filters."""
-    wrapped, font_size, y = _intro_title_placement(text, width=width, height=height)
-    lines = [line for line in (wrapped or "").split("\n") if line]
-    font = _try_load_font(font_size)
-    text_w = max((int(font.getlength(line)) for line in lines), default=0)
-    block_h = len(lines) * (font_size + 8) if lines else 0
-    x = max(0, (width - text_w) // 2)
-    return x, y, x + text_w, y + block_h
 
 
 def _pil_caption_frame(out_path: Path, *, title: str, subtitle: str = "",
@@ -1877,8 +1866,8 @@ def _ffmpeg_normalise_video(src: Path, duration: float, out: Path,
     return cmd
 
 
-# CONSTITUTION §5: Intro card (≤2.5s): title centered, wrapped, ≥80px side
-# margins, over hook footage with dark overlay 30%.
+# CONSTITUTION §5: Intro card (≤2.5s): title top-pinned above the subtitle
+# band, wrapped, ≥80px side margins, over hook footage with dark overlay 30%.
 def _ffmpeg_intro_from_video(src: Path, duration: float, out: Path, title: str, work_dir: Path, w: int = None, h: int = None) -> list[str]:
     """Create intro clip from video hook footage with dark overlay and title."""
     W = w or WIDTH

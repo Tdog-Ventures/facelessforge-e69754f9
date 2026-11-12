@@ -1,7 +1,12 @@
 """Caption clock: narration placement, not scene boundaries."""
 from pathlib import Path
 
-from app.render import _ffmpeg_intro_from_image, _ffmpeg_intro_from_video, intro_title_bounds
+from app.render import (
+    _ffmpeg_intro_from_image,
+    _ffmpeg_intro_from_video,
+    _intro_title_placement,
+    _try_load_font,
+)
 from app.subtitles import build_cues_from_words, build_srt_from_words, subtitle_region
 
 
@@ -9,6 +14,17 @@ def _overlaps(box, region) -> bool:
     ax0, ay0, ax1, ay1 = box
     bx0, by0, bx1, by1 = region
     return ax0 < bx1 and ax1 > bx0 and ay0 < by1 and ay1 > by0
+
+
+def _title_box(title: str, width: int, height: int) -> tuple[int, int, int, int]:
+    """Pixel box for the y `_intro_title_placement` already pins on the filter."""
+    wrapped, font_size, y = _intro_title_placement(title, width=width, height=height)
+    lines = [line for line in (wrapped or "").split("\n") if line]
+    font = _try_load_font(font_size)
+    text_w = max((int(font.getlength(line)) for line in lines), default=0)
+    block_h = len(lines) * (font_size + 8) if lines else 0
+    x = max(0, (width - text_w) // 2)
+    return x, y, x + text_w, y + block_h
 
 
 def test_word_clock_includes_intro_and_ignores_scene_boundaries():
@@ -65,7 +81,6 @@ def test_final_cue_keeps_the_last_words_inside_the_video():
         narration_start=2.5,
         video_end=video_end,
         words_per_cue=7,
-        max_cue_seconds=3.0,
     )
     assert len(cues) == 1
     for token in tokens:
@@ -74,12 +89,72 @@ def test_final_cue_keeps_the_last_words_inside_the_video():
     assert cues[0]["end"] <= video_end
     assert cues[0]["end"] >= 2.5 + 53.10 + sum(holds) - 0.01
 
-    # A cue that would run past the video keeps every word and ends on the video.
+    # The word cap would split "dries." off. The gap is 0, so it stays on the sentence.
+    merged = build_cues_from_words(
+        words, narration_start=2.5, video_end=video_end, words_per_cue=6,
+    )
+    assert len(merged) == 1
+    assert merged[0]["start"] == 2.5 + 53.10
+    assert "dries." in merged[0]["text"]
+
+    # A cue that would run past the video keeps every word. Start stays on the
+    # first word even when that word is already past the video.
     late = [{"word": token, "start": 58.0 + i * 0.4, "end": 58.2 + i * 0.4} for i, token in enumerate(tokens)]
     clamped = build_cues_from_words(late, narration_start=2.5, video_end=60.0, words_per_cue=7)
+    assert clamped[-1]["start"] == 2.5 + 58.0
+    assert clamped[-1]["start"] > 60.0
     assert clamped[-1]["end"] <= 60.0
     assert "dries." in clamped[-1]["text"]
     assert "counter" in clamped[-1]["text"]
+
+
+def test_paused_short_tail_stays_on_its_word_time():
+    narration_start = 2.5
+    words = []
+    t = 10.0
+    for token in ("one", "two", "three", "four", "five", "six", "seven"):
+        words.append({"word": token, "start": t, "end": t + 0.30})
+        t += 0.35
+    tail_start = words[-1]["end"] + 1.2
+    words.append({"word": "late", "start": tail_start, "end": tail_start + 0.25})
+    words.append({"word": "tail", "start": tail_start + 0.30, "end": tail_start + 0.55})
+    cues = build_cues_from_words(words, narration_start=narration_start, words_per_cue=7)
+    assert len(cues) == 2
+    assert "tail" not in cues[0]["text"]
+    assert cues[1]["text"] == "late tail"
+    assert cues[1]["start"] == narration_start + tail_start
+    assert cues[1]["start"] != cues[0]["start"]
+
+
+def test_short_final_cue_is_not_pulled_over_the_previous_cue():
+    narration_start = 2.5
+    video_end = 60.0
+    # "The counter." is on screen 59.00–59.55. "Done." is spoken at 59.70.
+    words = [
+        {"word": "The", "start": 56.50, "end": 56.80},
+        {"word": "counter.", "start": 56.80, "end": 57.05},
+        {"word": "Done.", "start": 57.20, "end": 57.35},
+    ]
+    cues = build_cues_from_words(words, narration_start=narration_start, video_end=video_end)
+    done_start = narration_start + 57.20
+    assert cues[0]["text"] == "The counter."
+    assert cues[0]["end"] == narration_start + 57.05
+    assert cues[1]["text"] == "Done."
+    assert cues[1]["start"] == done_start
+    assert cues[1]["start"] >= cues[0]["end"]
+    assert cues[1]["end"] <= video_end
+    assert cues[1]["end"] < done_start + 0.5
+    assert cues[1]["start"] != video_end - 0.5
+
+    # "Yes." is spoken at 59.85. The last 0.5s must not pull it back to 59.50.
+    yes = words[:2] + [{"word": "Yes.", "start": 57.35, "end": 57.50}]
+    yes_cues = build_cues_from_words(yes, narration_start=narration_start, video_end=video_end)
+    yes_start = narration_start + 57.35
+    assert yes_cues[-1]["text"] == "Yes."
+    assert yes_cues[-1]["start"] == yes_start
+    assert yes_cues[-1]["start"] >= yes_cues[0]["end"]
+    assert yes_cues[-1]["end"] <= video_end
+    assert yes_cues[-1]["start"] != 59.50
 
 
 def test_line_length_clamp_does_not_drop_words():
@@ -100,7 +175,7 @@ def test_line_length_clamp_does_not_drop_words():
 def test_intro_title_box_does_not_cover_the_subtitle_region(tmp_path: Path):
     title = "RAIN ON THE KITCHEN COUNTER"
     width, height = 1080, 1920
-    box = intro_title_bounds(title, width, height)
+    box = _title_box(title, width, height)
     region = subtitle_region(width, height)
     assert not _overlaps(box, region)
     assert box[1] <= 160
@@ -108,11 +183,11 @@ def test_intro_title_box_does_not_cover_the_subtitle_region(tmp_path: Path):
     assert box[3] <= region[1]
 
     long_title = " ".join(["KITCHEN"] * 40)
-    long_box = intro_title_bounds(long_title, width, height)
+    long_box = _title_box(long_title, width, height)
     assert not _overlaps(long_box, subtitle_region(width, height))
     assert long_box[3] <= region[1]
 
-    wide = intro_title_bounds(title, 1920, 1080)
+    wide = _title_box(title, 1920, 1080)
     assert not _overlaps(wide, subtitle_region(1920, 1080))
 
     for builder in (_ffmpeg_intro_from_video, _ffmpeg_intro_from_image):
