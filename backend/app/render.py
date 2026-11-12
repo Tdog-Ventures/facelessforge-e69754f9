@@ -2569,7 +2569,6 @@ async def _run_render(job_id: str, project_id: str):
                     spoken_words,
                     narration_frames=timing.narration_frames,
                     fps=timing.fps,
-                    intro_seconds=timing.intro_seconds,
                 )
             except SceneAlignmentError as exc:
                 raise RuntimeError(

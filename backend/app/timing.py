@@ -416,15 +416,13 @@ def align_scene_timeline(
     *,
     narration_frames: int,
     fps: int = DEFAULT_FPS,
-    intro_seconds: float = float(DEFAULT_INTRO_SECONDS),
 ) -> list[dict[str, Any]]:
     """Replace placeholder scene bounds with fitted-word boundaries.
 
     Word ``start``/``end`` are seconds on the fitted narration file.
     ``fit_scale`` is 1 and is not applied again. Returned ``start_time`` /
     ``end_time`` stay on the narration clock, the same keys as
-    :func:`normalize_scene_timeline`. The video clock is
-    ``intro_seconds + narration_time`` and is applied by
+    :func:`normalize_scene_timeline`. Intro is added by
     :func:`word_alignment_report`, not stored here.
 
     The first scene starts at 0 so leading silence stays on that picture.
@@ -432,12 +430,6 @@ def align_scene_timeline(
     sentence stays on that sentence. The last scene ends on the narration
     budget, including trailing silence, and absorbs frame-rounding remainder.
     """
-    try:
-        intro = float(intro_seconds)
-    except (TypeError, ValueError) as exc:
-        raise SceneAlignmentError("Intro seconds must be zero or positive") from exc
-    if not math.isfinite(intro) or intro < 0:
-        raise SceneAlignmentError("Intro seconds must be zero or positive")
     if not isinstance(scenes, list) or not scenes:
         raise SceneAlignmentError("No scenes to align")
     if narration_frames < len(scenes) or fps <= 0:

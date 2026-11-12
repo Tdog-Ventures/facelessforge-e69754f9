@@ -243,26 +243,6 @@ def checked_shots(plan: dict, scenes: list[dict], script: str) -> dict[str, list
     return grouped
 
 
-def _share_aligned_frames(total: int, weights: list[int]) -> list[int]:
-    """Divide one spoken segment across shots that already exist.
-
-    The pieces sum to ``total``. No new shot or billable asset is created.
-    """
-    if total < 1 or not weights or any(weight < 1 for weight in weights) or total < len(weights):
-        raise DirectorError("Aligned duration does not cover the directed shots")
-    weight_total = sum(weights)
-    distributable = total - len(weights)
-    ideals = [distributable * weight / weight_total for weight in weights]
-    durations = [1 + math.floor(value) for value in ideals]
-    remaining = total - sum(durations)
-    order = sorted(range(len(weights)), key=lambda i: (-(ideals[i] - math.floor(ideals[i])), i))
-    for index in order[:remaining]:
-        durations[index] += 1
-    if sum(durations) != total:
-        raise DirectorError("Aligned duration could not be shared across shots")
-    return durations
-
-
 def _source_picture_frames(frames: int) -> int:
     # render_picture rejects a buffer longer than 60s at 30fps. On-screen
     # holds still come from the subclip plan.
@@ -284,21 +264,13 @@ async def resolve_directed_scene(scene, shots, project, work_dir, index,
     from .directed_graphics import generate_shot_still, render_graphic, render_picture
     if project.get("production_mode") == "commercial_ad":
         raise DirectorError("AI stock direction cannot replace required client assets")
-    if aligned_frames is None:
-        shares = [int(shot["frames"]) for shot in shots]
-    elif shots:
-        shares = _share_aligned_frames(
-            int(aligned_frames),
-            [max(1, int(shot.get("frames") or 1)) for shot in shots],
-        )
-    else:
-        shares = []
     visuals = []
     assets = list(attached_assets or [])
+    # On-screen cuts come from the subclip plan. Each generated picture is the
+    # spoken segment so a later in-point is not the same frozen frame.
+    spoken = None if aligned_frames is None else _source_picture_frames(int(aligned_frames))
     for number, shot in enumerate(shots):
-        frames = shares[number]
-        if aligned_frames is not None:
-            frames = _source_picture_frames(frames)
+        frames = int(shot["frames"]) if spoken is None else spoken
         if shot["kind"] == "stock_video":
             query = shot["query"]
             # Keep the shot narration. The resolver only needs the footage query.

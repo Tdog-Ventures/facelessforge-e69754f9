@@ -26,9 +26,9 @@ def _words(text: str, start: float, step: float = 0.3) -> list[dict]:
     return words
 
 
-def _align(scenes, words, *, frames=900, fps=30, intro=2.5):
+def _align(scenes, words, *, frames=900, fps=30):
     return align_scene_timeline(
-        scenes, words, narration_frames=frames, fps=fps, intro_seconds=intro,
+        scenes, words, narration_frames=frames, fps=fps,
     )
 
 
@@ -368,6 +368,7 @@ def test_missing_stock_picture_uses_the_spoken_segment(tmp_path, monkeypatch):
     assert calls["stock"] == 1
     assert calls["still"] == 1
     assert captured["frames"] == 240
+    assert "_share_aligned_frames" not in inspect.getsource(resolve_directed_scene)
     assert captured["frames"] != 87
     assert [kind for _path, kind in result] == ["video"]
     plan = _build_subclip_plan(aligned, 10.0, word_aligned=True, fps=30)
