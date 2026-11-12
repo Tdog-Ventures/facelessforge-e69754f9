@@ -38,6 +38,19 @@ def _ass_layout(play_res_x: int, play_res_y: int) -> tuple[int, int, int, int]:
     return 60, 460, 460, 280  # 16:9 landscape
 
 
+def subtitle_region(play_res_x: int, play_res_y: int) -> tuple[int, int, int, int]:
+    """Pixel box the burned captions occupy, including their bottom margin.
+
+    Alignment 2 places the text bottom ``margin_v`` pixels above the frame.
+    Two lines plus the outline sit above that edge. Returned as
+    ``(x0, y0, x1, y1)``.
+    """
+    font, margin_l, margin_r, margin_v = _ass_layout(play_res_x, play_res_y)
+    band_h = 2 * font + 16
+    y0 = max(0, int(play_res_y) - int(margin_v) - band_h)
+    return int(margin_l), y0, max(int(margin_l), int(play_res_x) - int(margin_r)), int(play_res_y)
+
+
 def build_ass_header(play_res_x: int = 1920, play_res_y: int = 1080) -> str:
     font_size, margin_l, margin_r, margin_v = _ass_layout(play_res_x, play_res_y)
     style = (
@@ -82,30 +95,34 @@ def _format_ts(seconds: float) -> str:
 
 
 def _clean_caption(text: str, max_chars_per_line: int = DEFAULT_MAX_CHARS_PER_LINE) -> str:
-    """Soft-wrap a caption into at most 2 lines for legibility.
+    """Soft-wrap a caption into at most 2 lines without dropping words.
 
     CONSTITUTION §5: Never more than 2 lines; text band ≤15% of frame height.
+    A line that exceeds the character budget keeps its words — an ellipsis
+    clamp used to cut the last word off the sentence.
     """
     text = (text or "").strip().replace("\r", "")
     if not text:
         return ""
-    # Collapse whitespace
     text = " ".join(text.split())
     if len(text) <= max_chars_per_line:
         return text
-    # Greedy two-line wrap
     words = text.split()
-    line1, line2 = "", ""
-    for w in words:
-        if len(line1) + len(w) + 1 <= max_chars_per_line:
-            line1 = f"{line1} {w}".strip()
-        else:
-            line2 = f"{line2} {w}".strip()
-            if len(line2) > max_chars_per_line:
-                # Hard cut — better than dropping content silently
-                line2 = line2[: max_chars_per_line - 1] + "…"
+    lines = ["", ""]
+    index = 0
+    for word in words:
+        placed = False
+        for i in range(index, 2):
+            candidate = f"{lines[i]} {word}".strip()
+            if not lines[i] or len(candidate) <= max_chars_per_line:
+                lines[i] = candidate
+                index = i
+                placed = True
                 break
-    return f"{line1}\n{line2}".strip()
+        if not placed:
+            lines[1] = f"{lines[1]} {word}".strip()
+            index = 1
+    return "\n".join(line for line in lines if line)
 
 
 def build_srt(
@@ -153,66 +170,133 @@ def write_srt(scenes: list[dict], out_path: Path, *, intro_offset_seconds: float
     return out_path
 
 
+def build_cues_from_words(
+    words: list[dict],
+    *,
+    narration_start: float = 0.0,
+    fit_scale: float = 1.0,
+    video_end: float | None = None,
+    words_per_cue: int = DEFAULT_WORDS_PER_CUE,
+    max_cue_seconds: float = DEFAULT_MAX_CUE_SECONDS,
+    min_cue_seconds: float = DEFAULT_MIN_CUE_SECONDS,
+) -> list[dict]:
+    """Group whisper words onto the video clock.
+
+    Word ``start``/``end`` are seconds from the beginning of the narration
+    file. Playback places that file at ``narration_start`` (the same intro
+    delay as ``place_narration``). When the words were timed before the fit,
+    ``fit_scale`` is ``budget/measured`` — atempo uses ``measured/budget``,
+    so cue time is ``narration_start + word_time * (budget/measured)``.
+    Times already taken from the fitted file use ``fit_scale=1``.
+
+    ``max_cue_seconds`` does not close a cue. A duration clamp used to flush
+    mid-sentence and leave the last words on a stub that ended early.
+    """
+    if fit_scale <= 0:
+        raise ValueError("fit_scale must be positive")
+    # Kept on the signature so callers share one clock. It must not split a
+    # sentence or drop the words that cross it.
+    del max_cue_seconds
+    placed: list[dict] = []
+    for word in words or []:
+        token = str(word.get("word") or "").strip()
+        if not token:
+            continue
+        start = float(narration_start) + float(word["start"]) * float(fit_scale)
+        end = float(narration_start) + float(word["end"]) * float(fit_scale)
+        if end < start:
+            end = start
+        placed.append({"word": token, "start": start, "end": end})
+    if not placed:
+        return []
+
+    cues: list[dict] = []
+    bucket: list[dict] = []
+
+    def _close(group: list[dict]) -> dict:
+        start = group[0]["start"]
+        end = group[-1]["end"]
+        if end < start + min_cue_seconds:
+            end = start + min_cue_seconds
+        if video_end is not None:
+            limit = float(video_end)
+            if end > limit:
+                end = limit
+            if end - start < min(min_cue_seconds, max(limit, 0.0)):
+                start = end - min(min_cue_seconds, max(limit, 0.0))
+            if start < 0:
+                start = 0.0
+            if end > limit:
+                end = limit
+            if end < start:
+                end = start
+        return {
+            "start": start,
+            "end": end,
+            "text": " ".join(item["word"] for item in group),
+            "words": list(group),
+        }
+
+    def _flush() -> None:
+        nonlocal bucket
+        if not bucket:
+            return
+        cues.append(_close(bucket))
+        bucket = []
+
+    for index, word in enumerate(placed):
+        bucket.append(word)
+        nxt = placed[index + 1] if index + 1 < len(placed) else None
+        long_pause = nxt is not None and (nxt["start"] - word["end"]) > 0.45
+        sentence_break = word["word"].endswith((".", "!", "?"))
+        cue_full = len(bucket) >= words_per_cue
+        if sentence_break or long_pause or cue_full:
+            _flush()
+    _flush()
+
+    # A 1-2 word tail is the remainder of the previous sentence, not its own
+    # caption. Leaving it separate is what cut "dries." off the line on screen.
+    if (
+        len(cues) >= 2
+        and len(cues[-1]["words"]) <= 2
+        and not cues[-2]["text"].rstrip().endswith((".", "!", "?"))
+    ):
+        merged = cues[-2]["words"] + cues[-1]["words"]
+        cues[-2] = _close(merged)
+        cues.pop()
+    return cues
+
+
 def build_srt_from_words(
     words: list[dict],
     *,
     intro_offset_seconds: float = 0.0,
-    words_per_cue: int = DEFAULT_WORDS_PER_CUE,    # CHANGED: 5 → 7 (CONSTITUTION §5)
+    words_per_cue: int = DEFAULT_WORDS_PER_CUE,
     max_cue_seconds: float = DEFAULT_MAX_CUE_SECONDS,
-    min_cue_seconds: float = DEFAULT_MIN_CUE_SECONDS,  # CHANGED: 0.7 → 0.5 (CONSTITUTION §5)
+    min_cue_seconds: float = DEFAULT_MIN_CUE_SECONDS,
+    fit_scale: float = 1.0,
+    video_end: float | None = None,
 ) -> str:
-    """Word-synchronised SRT.
+    """Word-synchronised SRT on the video clock.
 
-    Groups Whisper word records into compact cues that hold for at most
-    ``max_cue_seconds`` and at least ``min_cue_seconds``. Each cue contains
-    up to ``words_per_cue`` words (auto-breaks on long pauses or sentence
-    punctuation for natural reading).
-
-    CONSTITUTION §5: Captions cover FULL video; 6-8 word chunks timed
-    proportionally within each scene's narration.
+    ``intro_offset_seconds`` is the narration placement delay, not a fudge
+    factor and not a scene boundary. See :func:`build_cues_from_words`.
     """
-    if not words:
-        return ""
-    cues: list[tuple[float, float, str]] = []
-    bucket_words: list[str] = []
-    bucket_start: float | None = None
-    last_end: float = 0.0
-
-    def _flush(end_ts: float):
-        nonlocal bucket_words, bucket_start
-        if not bucket_words or bucket_start is None:
-            return
-        text = " ".join(bucket_words).strip()
-        if text:
-            start = bucket_start + intro_offset_seconds
-            end = max(end_ts, bucket_start + min_cue_seconds) + intro_offset_seconds
-            cues.append((start, end, text))
-        bucket_words = []
-        bucket_start = None
-
-    for i, w in enumerate(words):
-        wt = w["word"].strip()
-        if not wt:
-            continue
-        if bucket_start is None:
-            bucket_start = w["start"]
-        bucket_words.append(wt)
-        last_end = w["end"]
-        long_pause = (i + 1 < len(words)
-                      and words[i + 1]["start"] - w["end"] > 0.45)
-        sentence_break = wt.endswith((".", "!", "?"))
-        cue_full = len(bucket_words) >= words_per_cue
-        cue_too_long = (w["end"] - bucket_start) >= max_cue_seconds
-        if cue_full or sentence_break or long_pause or cue_too_long:
-            _flush(w["end"])
-    _flush(last_end)
-
+    cues = build_cues_from_words(
+        words,
+        narration_start=intro_offset_seconds,
+        fit_scale=fit_scale,
+        video_end=video_end,
+        words_per_cue=words_per_cue,
+        max_cue_seconds=max_cue_seconds,
+        min_cue_seconds=min_cue_seconds,
+    )
     out: list[str] = []
-    for idx, (start, end, text) in enumerate(cues, 1):
-        # Wrap long single-line cues for readability
-        # CHANGED: max_chars_per_line tightened to 38 (CONSTITUTION §5)
-        text = _clean_caption(text, max_chars_per_line=DEFAULT_MAX_CHARS_PER_LINE)
-        out.append(f"{idx}\n{_format_ts(start)} --> {_format_ts(end)}\n{text}\n")
+    for idx, cue in enumerate(cues, 1):
+        text = _clean_caption(cue["text"], max_chars_per_line=DEFAULT_MAX_CHARS_PER_LINE)
+        if not text:
+            continue
+        out.append(f"{idx}\n{_format_ts(cue['start'])} --> {_format_ts(cue['end'])}\n{text}\n")
     return "\n".join(out) + ("\n" if out else "")
 
 
@@ -224,6 +308,8 @@ def write_srt_from_words(
     words_per_cue: int = DEFAULT_WORDS_PER_CUE,
     max_cue_seconds: float = DEFAULT_MAX_CUE_SECONDS,
     min_cue_seconds: float = DEFAULT_MIN_CUE_SECONDS,
+    fit_scale: float = 1.0,
+    video_end: float | None = None,
 ) -> Path:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(
@@ -233,6 +319,8 @@ def write_srt_from_words(
             words_per_cue=words_per_cue,
             max_cue_seconds=max_cue_seconds,
             min_cue_seconds=min_cue_seconds,
+            fit_scale=fit_scale,
+            video_end=video_end,
         ),
         encoding="utf-8",
     )
@@ -316,6 +404,15 @@ def _ass_ts(seconds: float) -> str:
     m = int((seconds % 3600) // 60)
     s = int(seconds % 60)
     cs = int(round((seconds - int(seconds)) * 100))
+    if cs >= 100:
+        cs = 0
+        s += 1
+        if s >= 60:
+            s = 0
+            m += 1
+            if m >= 60:
+                m = 0
+                h += 1
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 
@@ -326,49 +423,33 @@ def build_ass_karaoke(
     words_per_cue: int = DEFAULT_WORDS_PER_CUE,
     play_res_x: int = 1920,
     play_res_y: int = 1080,
+    fit_scale: float = 1.0,
+    video_end: float | None = None,
+    max_cue_seconds: float = DEFAULT_MAX_CUE_SECONDS,
+    min_cue_seconds: float = DEFAULT_MIN_CUE_SECONDS,
 ) -> str:
-    """Generate ASS karaoke subtitles: 62px white bold black stroke, karaoke effect."""
-    if not words:
-        return build_ass_header(play_res_x, play_res_y)
-    cues: list[tuple[float, float, str, list[dict]]] = []
-    bucket: list[dict] = []
-    bucket_start: float | None = None
-    last_end = 0.0
-
-    def _flush(end_ts: float):
-        nonlocal bucket, bucket_start
-        if not bucket or bucket_start is None:
-            return
-        cues.append((bucket_start, end_ts, " ".join(w["word"] for w in bucket), list(bucket)))
-        bucket = []
-        bucket_start = None
-
-    for i, w in enumerate(words):
-        wt = w["word"].strip()
-        if not wt:
-            continue
-        if bucket_start is None:
-            bucket_start = w["start"]
-        bucket.append(w)
-        last_end = w["end"]
-        long_pause = i + 1 < len(words) and words[i + 1]["start"] - w["end"] > 0.45
-        sentence_break = wt.endswith((".", "!", "?"))
-        cue_full = len(bucket) >= words_per_cue
-        cue_too_long = (w["end"] - bucket_start) >= 3.0
-        if cue_full or sentence_break or long_pause or cue_too_long:
-            _flush(w["end"])
-    _flush(last_end)
-
-    lines = [build_ass_header(play_res_x, play_res_y).strip()]
-    for start, end, text, wlist in cues:
-        s = start + intro_offset_seconds
-        e = max(end, start + 0.5) + intro_offset_seconds
+    """Generate ASS karaoke subtitles on the narration placement clock."""
+    header = build_ass_header(play_res_x, play_res_y)
+    cues = build_cues_from_words(
+        words,
+        narration_start=intro_offset_seconds,
+        fit_scale=fit_scale,
+        video_end=video_end,
+        words_per_cue=words_per_cue,
+        max_cue_seconds=max_cue_seconds,
+        min_cue_seconds=min_cue_seconds,
+    )
+    if not cues:
+        return header
+    lines = [header.strip()]
+    for cue in cues:
         karaoke = ""
-        for w in wlist:
-            dur_cs = max(1, int(round((w["end"] - w["start"]) * 100)))
-            karaoke += f"{{\\k{dur_cs}}}{w['word']} "
-        karaoke = karaoke.strip()
-        lines.append(f"Dialogue: 0,{_ass_ts(s)},{_ass_ts(e)},Default,,0,0,0,,{karaoke}")
+        for word in cue["words"]:
+            dur_cs = max(1, int(round((word["end"] - word["start"]) * 100)))
+            karaoke += f"{{\\k{dur_cs}}}{word['word']} "
+        lines.append(
+            f"Dialogue: 0,{_ass_ts(cue['start'])},{_ass_ts(cue['end'])},Default,,0,0,0,,{karaoke.strip()}"
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -380,6 +461,10 @@ def write_ass_karaoke(
     words_per_cue: int = DEFAULT_WORDS_PER_CUE,
     play_res_x: int = 1920,
     play_res_y: int = 1080,
+    fit_scale: float = 1.0,
+    video_end: float | None = None,
+    max_cue_seconds: float = DEFAULT_MAX_CUE_SECONDS,
+    min_cue_seconds: float = DEFAULT_MIN_CUE_SECONDS,
 ) -> Path:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(
@@ -389,6 +474,10 @@ def write_ass_karaoke(
             words_per_cue=words_per_cue,
             play_res_x=play_res_x,
             play_res_y=play_res_y,
+            fit_scale=fit_scale,
+            video_end=video_end,
+            max_cue_seconds=max_cue_seconds,
+            min_cue_seconds=min_cue_seconds,
         ),
         encoding="utf-8",
     )

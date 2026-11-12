@@ -55,7 +55,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .db import get_db
 from .storage import STATIC_ROOT, get_storage
-from .subtitles import write_srt, write_srt_from_cues, write_srt_from_words
+from .subtitles import subtitle_region, write_srt, write_srt_from_cues, write_srt_from_words
 from .transcribe import transcribe_words
 from .visual_query import truncate_words
 from .timing import TimingContract, build_timing_status, narration_fits_budget, normalize_scene_timeline
@@ -726,10 +726,14 @@ def _wrap_text(text: str, max_chars: int = 30) -> str:
     return "\n".join(lines)
 
 
-def _intro_title_layout(text: str, *, width: int, height: int) -> tuple[str, int]:
+def _intro_title_layout(
+    text: str, *, width: int, height: int, max_block_height: Optional[int] = None,
+) -> tuple[str, int]:
     """Wrap an intro title using measured pixels for the actual canvas."""
     safe_width = max(1, width - 160)
     safe_height = max(1, height - 160)
+    if max_block_height is not None:
+        safe_height = max(1, min(safe_height, int(max_block_height)))
     start_size = 64 if height > width else 72
     words = " ".join((text or "").split()).split()
     if not words:
@@ -786,6 +790,39 @@ def intro_overlay_title(project: dict, script: Optional[dict], metadata: Optiona
            or (project or {}).get("name")
            or "FacelessForge")
     return _intro_title_text(str(raw))
+
+
+def _intro_title_placement(text: str, *, width: int, height: int) -> tuple[str, int, int]:
+    """Place the title above the burned-caption band.
+
+    A vertically centered title shares the frame with the first caption.
+    The block is pinned to the top safe margin and shortened so its bottom
+    stays above ``subtitle_region``.
+    """
+    _x0, sub_top, _x1, _y1 = subtitle_region(width, height)
+    top_margin = 80
+    gap = 48
+    max_block = max(48, sub_top - gap - top_margin)
+    wrapped, font_size = _intro_title_layout(
+        text, width=width, height=height, max_block_height=max_block,
+    )
+    lines = [line for line in (wrapped or "").split("\n") if line]
+    block_h = len(lines) * (font_size + 8)
+    y = top_margin
+    if block_h and y + block_h > sub_top - gap:
+        y = max(0, sub_top - gap - block_h)
+    return wrapped, font_size, int(y)
+
+
+def intro_title_bounds(text: str, width: int, height: int) -> tuple[int, int, int, int]:
+    """Pixel box of the intro title drawn by the ffmpeg intro filters."""
+    wrapped, font_size, y = _intro_title_placement(text, width=width, height=height)
+    lines = [line for line in (wrapped or "").split("\n") if line]
+    font = _try_load_font(font_size)
+    text_w = max((int(font.getlength(line)) for line in lines), default=0)
+    block_h = len(lines) * (font_size + 8) if lines else 0
+    x = max(0, (width - text_w) // 2)
+    return x, y, x + text_w, y + block_h
 
 
 def _pil_caption_frame(out_path: Path, *, title: str, subtitle: str = "",
@@ -1846,7 +1883,7 @@ def _ffmpeg_intro_from_video(src: Path, duration: float, out: Path, title: str, 
     """Create intro clip from video hook footage with dark overlay and title."""
     W = w or WIDTH
     H = h or HEIGHT
-    wrapped, font_size = _intro_title_layout(title, width=W, height=H)
+    wrapped, font_size, title_y = _intro_title_placement(title, width=W, height=H)
     text_file = work_dir / "intro_title.txt"
     text_file.write_text(wrapped, encoding="utf-8")
     font_path = _resolve_font_path()
@@ -1860,7 +1897,7 @@ def _ffmpeg_intro_from_video(src: Path, duration: float, out: Path, title: str, 
             f"drawbox=y=0:color=black@0.3:w=iw:h=ih:t=fill,"
             f"drawtext=fontfile='{font_path}':"
             f"textfile='{text_file.as_posix()}':fontcolor=white:fontsize={font_size}:"
-            f"x=(w-text_w)/2:y=(h-text_h)/2:line_spacing=8"
+            f"x=(w-text_w)/2:y={title_y}:line_spacing=8"
         ),
         "-r", str(FPS),
         "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
@@ -1874,7 +1911,7 @@ def _ffmpeg_intro_from_image(src: Path, duration: float, out: Path, title: str, 
     Used only when no video hook footage is available."""
     W = w or WIDTH
     H = h or HEIGHT
-    wrapped, font_size = _intro_title_layout(title, width=W, height=H)
+    wrapped, font_size, title_y = _intro_title_placement(title, width=W, height=H)
     text_file = work_dir / "intro_title.txt"
     text_file.write_text(wrapped, encoding="utf-8")
     font_path = _resolve_font_path()
@@ -1888,7 +1925,7 @@ def _ffmpeg_intro_from_image(src: Path, duration: float, out: Path, title: str, 
             f"drawbox=y=0:color=black@0.3:w=iw:h=ih:t=fill,"
             f"drawtext=fontfile='{font_path}':"
             f"textfile='{text_file.as_posix()}':fontcolor=white:fontsize={font_size}:"
-            f"x=(w-text_w)/2:y=(h-text_h)/2:line_spacing=8"
+            f"x=(w-text_w)/2:y={title_y}:line_spacing=8"
         ),
         "-r", str(FPS),
         "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
@@ -2693,10 +2730,14 @@ async def _run_render(job_id: str, project_id: str):
             try:
                 from .subtitles import write_ass_karaoke, write_ass_from_cues
                 if words:
+                    # Whisper ran on the fitted file. fit_scale is budget/measured
+                    # only when the words were timed before atempo.
                     write_srt_from_words(
                         words, srt_path,
                         intro_offset_seconds=intro_duration,
                         words_per_cue=7,
+                        fit_scale=1.0,
+                        video_end=timing.target_seconds,
                     )
                     write_ass_karaoke(
                         words, ass_path,
@@ -2704,6 +2745,8 @@ async def _run_render(job_id: str, project_id: str):
                         words_per_cue=7,
                         play_res_x=W,
                         play_res_y=H,
+                        fit_scale=1.0,
+                        video_end=timing.target_seconds,
                     )
                 else:
                     cues: list[dict] = []
