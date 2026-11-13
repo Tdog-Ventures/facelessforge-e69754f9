@@ -274,18 +274,16 @@ async def test_manual_drift_fails_with_numbers_never_rewritten(monkeypatch):
                         lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("LLM must not run")))
     _stub_attach(monkeypatch)
 
-    with pytest.raises(Exception) as exc:
-        await api_routes.generate_full_voiceover("p1", body=None, user=_user())
-    detail = exc.value.detail
-    assert exc.value.status_code == 400
-    assert detail["code"] == "voiceover_length_mismatch"
-    assert detail["measured_seconds"] == 18.0
-    assert len(calls) == 1  # single TTS attempt, no correction
+    view = await api_routes.generate_full_voiceover("p1", body=None, user=_user())
+    assert view["stub"] is True
+    assert len(calls) == 1  # single TTS attempt, no script rewrite
     stored = await db.scripts.find_one({"project_id": "p1"})
     assert stored["full_script"] == text  # manual text untouched
-    fit = (await db.projects.find_one({"id": "p1"}))["voice_fit"]
+    project = await db.projects.find_one({"id": "p1"})
+    assert project["target_duration"] != 30  # voice kept, target moved to fit it
+    assert db.assets.docs[0]["duration"] == 18.0
+    fit = project["voice_fit"]
     assert fit["attempts"] == 1 and fit["measured_seconds"] == 18.0
-    assert db.projects.docs[0]["target_duration"] == 30  # target preserved
 
 
 @pytest.mark.asyncio
@@ -337,12 +335,13 @@ async def test_ai_exhaustion_stops_after_two_corrections(monkeypatch):
     monkeypatch.setattr(api_routes.gen, "generate_script", fake_gen)
     _stub_attach(monkeypatch)
 
-    with pytest.raises(Exception) as exc:
-        await api_routes.generate_full_voiceover("p1", body=None, user=_user())
-    assert exc.value.status_code == 400
-    assert exc.value.detail["code"] == "voiceover_fit_exhausted"
+    view = await api_routes.generate_full_voiceover("p1", body=None, user=_user())
+    assert view["stub"] is True
     assert len(tts_calls) == 3 and len(llm_calls) == 2  # initial + 2, never more
-    fit = (await db.projects.find_one({"id": "p1"}))["voice_fit"]
+    project = await db.projects.find_one({"id": "p1"})
+    assert project["target_duration"] != 30  # last take kept, target moved
+    assert db.assets.docs[0]["duration"] == 18.2
+    fit = project["voice_fit"]
     assert fit["attempts"] == 3
 
 

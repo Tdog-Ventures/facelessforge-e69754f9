@@ -39,7 +39,7 @@ except Exception:
     check_credits = None  # fallback if billing not yet patched
 from ..scoring import quality_score, quality_label, compute_project_status, scenes_to_csv
 from ..grounding import CLIENT_VISUAL_TYPES
-from ..timing import build_timing_status, narration_fits_budget
+from ..timing import build_timing_status, narration_fits_budget, suggest_fitted_duration
 from ..grounding import commercial_project_errors
 from ..storage import resolve_delivery_url
 from .. import generation as gen
@@ -3014,6 +3014,7 @@ async def generate_full_voiceover(
         })
     actions: list = []
     llm_calls = 0
+    duration_fallback = None
     current_text = text
     current_script_id = script.get("id")
     payload = None
@@ -3035,28 +3036,39 @@ async def generate_full_voiceover(
         if narration_fits_budget(measured, narration_budget):
             actions.append(f"attempt {attempts_used}: measured {measured:.2f}s fits {narration_budget:.2f}s budget")
             break
-        # Outside tolerance: manual scripts are never rewritten — stop with numbers.
-        if script_source == "manual":
-            actions.append(f"attempt {attempts_used}: measured {measured:.2f}s outside 5% of {narration_budget:.2f}s budget (manual script kept)")
-            await _record_voice_fit(db, project_id, script_version, attempts_used, 1, llm_calls, measured, actions)
-            suggestion = render_service.suggest_duration_autofit(
-                project, {"duration": measured})
+        # Outside tolerance. Keep the spoken take and move the target to the
+        # length that take fits. Manual text is never rewritten. Stop only
+        # when the audio cannot fit any legal duration (5s to 60min).
+        intro_seconds = 0.0 if project.get("production_mode") == "commercial_ad" else 2.5
+        if script_source == "manual" or attempts_used >= 3:
+            fitted = suggest_fitted_duration(voiceover_seconds=measured, intro_seconds=intro_seconds)
+            current_target = int(float(project.get("target_duration") or 0))
+            if fitted is not None and int(fitted) != current_target:
+                actions.append(
+                    f"attempt {attempts_used}: measured {measured:.2f}s outside {narration_budget:.2f}s — "
+                    f"duration fallback {current_target}s -> {int(fitted)}s"
+                )
+                duration_fallback = int(fitted)
+                project["target_duration"] = duration_fallback
+                break
+            actions.append(
+                f"attempt {attempts_used}: measured {measured:.2f}s outside {narration_budget:.2f}s and no legal duration fits"
+            )
+            await _record_voice_fit(
+                db, project_id, script_version, attempts_used,
+                1 if script_source == "manual" else attempts_used,
+                llm_calls, measured, actions,
+            )
+            code = "voiceover_length_mismatch" if script_source == "manual" else "voiceover_fit_exhausted"
             raise HTTPException(status_code=400, detail={
-                "code": "voiceover_length_mismatch",
-                "message": f" narration is {measured:.1f}s but the {float(project.get('target_duration') or 30):.0f}s target allows {narration_budget:.1f}s: shorten/lengthen the script, or apply an explicit duration fit.",
+                "code": code,
+                "message": (
+                    f"Narration is {measured:.1f}s and cannot fit any duration from 5s to 60min "
+                    f"within 5% of a {current_target:.0f}s target."
+                ),
                 "measured_seconds": round(measured, 2),
                 "narration_budget_seconds": round(narration_budget, 2),
-                "autofit_suggestion": suggestion,
-            })
-        if attempts_used >= 3:
-            actions.append(f"attempt {attempts_used}: still outside tolerance after 2 corrections")
-            await _record_voice_fit(db, project_id, script_version, attempts_used, attempts_used, llm_calls, measured, actions)
-            raise HTTPException(status_code=400, detail={
-                "code": "voiceover_fit_exhausted",
-                "message": f"Voiceover still outside 5% after 2 corrections ({measured:.1f}s vs {narration_budget:.1f}s budget). Edit the script or apply an explicit duration fit.",
-                "measured_seconds": round(measured, 2),
-                "narration_budget_seconds": round(narration_budget, 2),
-                "autofit_suggestion": render_service.suggest_duration_autofit(project, {"duration": measured}),
+                "autofit_suggestion": None,
             })
         # Bounded AI correction: same generator, length instruction scaled to the
         # measured shortfall/overrun. Meaning preserved; full new text is spoken
@@ -3108,12 +3120,19 @@ async def generate_full_voiceover(
         {"$set": {"status": "generated", "updated_at": _now()}},
     )
     await db.assets.insert_one(dict(payload))
-    # Requested target stays authoritative: never move it here (the previous
-    # silent target_duration overwrite from the byte-size estimate caused the
-    # preflight mismatch loop). Record the fit instead.
+    # A byte-size estimate must not move the target. The duration fallback
+    # may: it is the measured take, and only runs after the script corrections
+    # have missed. Record the fit after that write so the stored target matches.
+    if duration_fallback is not None:
+        await db.projects.update_one(
+            {"id": project_id},
+            {"$set": {"target_duration": duration_fallback, "updated_at": _now()}},
+        )
     await _record_voice_fit(db, project_id, script_version, attempts_used, attempts_used, llm_calls,
                             float(payload.get("duration") or 0), actions)
     project_set = {"selected_voiceover_asset_id": payload["id"], "updated_at": _now()}
+    if duration_fallback is not None:
+        project_set["target_duration"] = duration_fallback
 
     if not payload.get("mock"):
         cost = float(payload.get("cost_estimate") or 0)
