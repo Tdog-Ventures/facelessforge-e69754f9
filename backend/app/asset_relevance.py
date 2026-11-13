@@ -161,6 +161,67 @@ async def probe_stock_video(path: Path) -> dict | None:
     return {"width": width, "height": height, "duration": duration, "file_size": size}
 
 
+def _still_mime(raw: bytes) -> str | None:
+    """Image files only. Unknown bytes are not treated as JPEG."""
+    if raw.startswith(b"\xff\xd8"):
+        return "image/jpeg"
+    if raw.startswith(b"\x89PNG"):
+        return "image/png"
+    if raw.startswith(b"RIFF") and b"WEBP" in raw[:16]:
+        return "image/webp"
+    return None
+
+
+async def _ffprobe_visual(path: Path) -> dict | None:
+    from .verify import FFPROBE_BIN, _run_cmd
+    try:
+        stdout, _stderr, rc = await _run_cmd(
+            FFPROBE_BIN, "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=codec_name,width,height,duration:format=duration",
+            "-of", "json", str(path),
+            timeout=30,
+        )
+    except Exception:
+        return None
+    if rc != 0 or not stdout.strip():
+        return None
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError:
+        return None
+    stream = (data.get("streams") or [None])[0]
+    if not isinstance(stream, dict) or not stream.get("codec_name"):
+        return None
+    try:
+        width = int(stream.get("width") or 0)
+        height = int(stream.get("height") or 0)
+    except (TypeError, ValueError):
+        return None
+    if width < MIN_EDGE_PX or height < MIN_EDGE_PX:
+        return None
+    return {"stream": stream, "format": data.get("format") or {}, "width": width, "height": height}
+
+
+async def probe_still_image(path: Path) -> dict | None:
+    """A real photograph. Still files have no playable duration; the slot is 3 seconds."""
+    try:
+        size = path.stat().st_size if path.exists() else 0
+        raw = path.read_bytes()[:16]
+    except OSError:
+        return None
+    if size < 32 or _still_mime(raw) is None:
+        return None
+    visual = await _ffprobe_visual(path)
+    if not visual:
+        return None
+    return {
+        "width": visual["width"],
+        "height": visual["height"],
+        "duration": 3.0,
+        "file_size": size,
+    }
+
+
 def _image_mime(raw: bytes) -> str:
     if raw.startswith(b"\x89PNG"):
         return "image/png"
@@ -259,15 +320,24 @@ def _reject(candidate: dict, reason: str) -> dict:
 async def _inspect_one(candidate: dict, scene: dict, query: str) -> dict | None:
     query_text = str(candidate.get("matched_query") or query or "")
     narration = str(scene.get("narration_text") or "")
+    used_still = False
     with tempfile.TemporaryDirectory(prefix="ff-stock-") as tmp:
         work = Path(tmp)
         video = work / "clip.mp4"
         if not await download_candidate(str(candidate.get("download_url") or ""), video):
             return _reject(candidate, "download_failed")
         probe = await probe_stock_video(video)
-        if not probe:
-            return _reject(candidate, "probe_failed")
-        image = await _representative_image(video, candidate, work)
+        if probe:
+            image = await _representative_image(video, candidate, work)
+        else:
+            # Photo results are valid footage. A video probe has no duration for a
+            # JPEG, and that used to reject every still before the frame check.
+            probe = await probe_still_image(video)
+            if not probe:
+                return _reject(candidate, "probe_failed")
+            used_still = True
+            raw = video.read_bytes()
+            image = (raw, _still_mime(raw) or _image_mime(raw))
         if image is None:
             return _reject(candidate, "frame_unavailable")
         try:
@@ -275,6 +345,9 @@ async def _inspect_one(candidate: dict, scene: dict, query: str) -> dict | None:
         except Exception:
             judgment = {"accepted": False, "score": None, "reason": "vision_failed"}
     accepted = dict(candidate)
+    if used_still:
+        accepted["media_type"] = "stock_image"
+        accepted["asset_type"] = "stock_image"
     accepted["visual_relevance"] = judgment
     accepted["probed_duration"] = probe["duration"]
     accepted["file_size"] = probe["file_size"]
@@ -301,11 +374,19 @@ async def select_footage_candidates(candidates, scene, query, *, needed: int, re
                 rejected.append(_reject(candidate, "unusable"))
             continue
         pool.append(candidate)
-    pool.sort(key=lambda item: len(specific_overlap(item, scene, query)), reverse=True)
+    def _rank(item: dict) -> tuple:
+        kind = str(item.get("media_type") or item.get("asset_type") or "")
+        # Motion clips first. Stills still count, and they must not hide the videos.
+        return (1 if kind == "stock_video" else 0, len(specific_overlap(item, scene, query)))
+
+    pool.sort(key=_rank, reverse=True)
     limit = max(1, int(needed or 1))
+    # Six inspections cannot fill a 30-second scene, which needs ten pictures.
+    # Keep looking until the scene is full or the fetched pool runs out.
+    inspect_budget = min(len(pool), max(INSPECT_CAP, limit * 2))
     inspected = 0
     for candidate in pool:
-        if len(accepted) >= limit or inspected >= INSPECT_CAP:
+        if len(accepted) >= limit or inspected >= inspect_budget:
             break
         if renew is not None and not await renew():
             break
