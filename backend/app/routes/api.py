@@ -2105,6 +2105,38 @@ def _auto_stock_query(project: dict, scene: dict, override: str | None = None) -
     return _build_scene_stock_query(scene, project, override=override)
 
 
+# Reasons whose clips must not be downloaded or judged again on a resume.
+_STOCK_SKIP_AGAIN = frozenset({
+    "vision_rejected", "vision_failed", "probe_failed", "download_failed",
+    "frame_unavailable", "unusable", "irrelevant_or_unverified", "near_duplicate",
+    "rejected", "no_relevant_stock",
+})
+_STOCK_PAGE_CAP = 3
+_STOCK_FETCH_CAP = 12
+
+
+def _remember_stock(known: set[str], item: dict, *, title: bool = False) -> None:
+    for field in ("external_id", "preview_url"):
+        value = item.get(field)
+        if value:
+            known.add(str(value))
+    if title:
+        label = str(item.get("title") or item.get("name") or "").strip().casefold()
+        if label:
+            known.add("title:" + label)
+
+
+def _stock_already_seen(item: dict, known: set[str]) -> bool:
+    external_id = str(item.get("external_id") or "")
+    preview = str(item.get("preview_url") or "")
+    label = str(item.get("title") or item.get("name") or "").strip().casefold()
+    if external_id and external_id in known:
+        return True
+    if preview and preview in known:
+        return True
+    return bool(label) and ("title:" + label) in known
+
+
 async def _asset_write(db, lease, collection, method, *args, **kwargs):
     async def write(fenced_db):
         return await getattr(getattr(fenced_db, collection), method)(*args, **kwargs)
@@ -2126,55 +2158,132 @@ async def _attach_scene_stock(db, *, lease, project, scene, replace_existing, us
     result, search_error = None, None
     if needs_search:
         remaining = needed if replace_existing else max(1, needed - len(originals))
-        per_page = min(max(remaining * 2, remaining + 5), 40)
         query = _auto_stock_query(project, scene, override=query_override)
-        # Stock providers can return only one result for an over-specific query.
-        # Search alternative scene terms before accepting a partial selection.
-        # The commit phase still deduplicates, fences writers and retains old assets.
-        candidates = []
-        attempted = set()
+        # One provider page is not a scene. Keep the clips already paid for,
+        # skip frames this operation already rejected, and ask for the next page
+        # until the 3-second gap is filled or the search budget runs out.
+        known: set[str] = set()
+        carried_rejections: list[dict] = []
+        for asset in originals:
+            _remember_stock(known, asset)
+        scene_key = str(scene.get("id") or scene.get("_id"))
+        if op_id:
+            prior = await db.asset_operations.find_one({"_id": op_id}, {"_id": 0, "scene_results": 1})
+            previous = ((prior or {}).get("scene_results") or {}).get(scene_key) or {}
+            for detail in previous.get("details") or []:
+                if not isinstance(detail, dict):
+                    continue
+                if str(detail.get("reason") or "") not in _STOCK_SKIP_AGAIN:
+                    continue
+                carried_rejections.append(dict(detail))
+                _remember_stock(known, detail, title=True)
+        terms: list[str] = []
+        attempted_terms: set[str] = set()
         fallbacks = list(scene.get("search_terms") or []) if isinstance(scene.get("search_terms"), list) else []
         fallbacks.append(scene.get("visual_direction") or "")
         fallbacks.append(project.get("topic") or "")
         for term in [query, *fallbacks]:
             term = compact_stock_query(term)
-            if not term or term.casefold() in attempted:
+            if not term or term.casefold() in attempted_terms:
                 continue
-            attempted.add(term.casefold())
-            try:
-                if hasattr(stock_service, "search_stock_aggregated"):
-                    found = await stock_service.search_stock_aggregated(
-                        query=term, media_type=media_type or "both", per_page=per_page,
-                        orientation="portrait" if project.get("aspect_ratio") == "9:16" else None,
-                    )
-                else:
-                    found = await stock_service.search_stock(term, "both", per_page)
-                for item in (found or {}).get("results") or []:
-                    if isinstance(item, dict):
-                        candidates.append({**item, "matched_query": term})
-                # Leave headroom for a frame check without paging the provider forever.
-                if len(_dedup_by_preview(candidates)) >= max(remaining * 2, 6):
-                    break
-            except Exception as exc:  # noqa: BLE001
-                search_error = exc
-            # A stock lookup may outlive its lease. Stop issuing fallback
-            # provider requests immediately when ownership has transferred.
-            if not await project_lease.renew(
+            attempted_terms.add(term.casefold())
+            terms.append(term)
+        orientation = "portrait" if project.get("aspect_ratio") == "9:16" else None
+        inspect_cap = min(48, max(12, remaining * 6))
+        accepted_all: list[dict] = []
+        rejected_all: list[dict] = []
+        pending: list[dict] = []
+        spent = 0
+        fetches = 0
+        fetches_ok = 0
+        term_index = 0
+        page = 1
+        rate_limited = False
+
+        async def _renew_attach_lease() -> bool:
+            return await project_lease.renew(
                 db, lease, ttl_seconds=project_lease.ASSET_LEASE_TTL_SECONDS,
-            ):
-                break
-        if candidates:
-            search_error = None
-
-            async def _renew_attach_lease() -> bool:
-                return await project_lease.renew(
-                    db, lease, ttl_seconds=project_lease.ASSET_LEASE_TTL_SECONDS,
-                )
-
-            accepted, rejected = await select_footage_candidates(
-                candidates, scene, query, needed=remaining, renew=_renew_attach_lease,
             )
-            result = {"results": accepted, "rejected": rejected}
+
+        while len(accepted_all) < remaining and spent < inspect_cap and not rate_limited:
+            if not pending:
+                if term_index >= len(terms) or fetches >= _STOCK_FETCH_CAP:
+                    break
+                if not await _renew_attach_lease():
+                    break
+                term = terms[term_index]
+                try:
+                    if hasattr(stock_service, "search_stock_aggregated"):
+                        found = await stock_service.search_stock_aggregated(
+                            query=term, media_type=media_type or "both", per_page=40,
+                            orientation=orientation, page=page,
+                        )
+                    elif page > 1:
+                        found = {"results": []}
+                    else:
+                        found = await stock_service.search_stock(term, "both", 40)
+                    fetches += 1
+                    fetches_ok += 1
+                except Exception as exc:  # noqa: BLE001
+                    search_error = exc
+                    fetches += 1
+                    message = str(exc).lower()
+                    if "rate" in message:
+                        rate_limited = True
+                    page += 1
+                    if page > _STOCK_PAGE_CAP:
+                        term_index += 1
+                        page = 1
+                    continue
+                raw = [item for item in ((found or {}).get("results") or []) if isinstance(item, dict)]
+                if (found or {}).get("mock"):
+                    raw = []
+                if not raw:
+                    term_index += 1
+                    page = 1
+                    continue
+                fresh = []
+                for item in raw:
+                    if _stock_already_seen(item, known):
+                        continue
+                    _remember_stock(known, item)
+                    fresh.append({**item, "matched_query": term})
+                page += 1
+                if page > _STOCK_PAGE_CAP:
+                    term_index += 1
+                    page = 1
+                pending.extend(fresh)
+                if not pending:
+                    continue
+            still = remaining - len(accepted_all)
+            judge_room = min(max(6, still * 4), inspect_cap - spent, len(pending))
+            batch = pending[:judge_room]
+            pending = pending[judge_room:]
+            accepted, rejected = await select_footage_candidates(
+                batch, scene, query, needed=still, renew=_renew_attach_lease,
+            )
+            accepted_all.extend(accepted)
+            rejected_all.extend(rejected)
+            judged = 0
+            for item in accepted:
+                judged += 1
+                if isinstance(item, dict):
+                    _remember_stock(known, item, title=True)
+            for item in rejected:
+                if not isinstance(item, dict):
+                    continue
+                _remember_stock(known, item, title=True)
+                if item.get("reject_reason") != "unusable":
+                    judged += 1
+            spent += judged
+        if fetches_ok:
+            search_error = None
+        if accepted_all or rejected_all or carried_rejections:
+            result = {
+                "results": accepted_all,
+                "rejected": rejected_all,
+                "carried_rejections": carried_rejections,
+            }
 
 
     async def commit(fenced_db):
@@ -2288,12 +2397,17 @@ async def _attach_scene_stock_committing(
         _detail("failed", reason=str(search_error)[:120])
         return outcome
 
+    for previous in (stock_result or {}).get("carried_rejections") or []:
+        if isinstance(previous, dict):
+            outcome["details"].append(dict(previous))
     for rejected in (stock_result or {}).get("rejected") or []:
         if isinstance(rejected, dict):
             _detail(
                 "skipped",
                 reason=str(rejected.get("reject_reason") or "rejected")[:80],
                 title=rejected.get("title") or rejected.get("name"),
+                external_id=rejected.get("external_id"),
+                preview_url=rejected.get("preview_url"),
             )
     results = (stock_result.get("results") or []) if stock_result else []
     filtered = []

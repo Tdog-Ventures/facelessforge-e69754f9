@@ -381,9 +381,9 @@ async def select_footage_candidates(candidates, scene, query, *, needed: int, re
 
     pool.sort(key=_rank, reverse=True)
     limit = max(1, int(needed or 1))
-    # Six inspections cannot fill a 30-second scene, which needs ten pictures.
-    # Keep looking until the scene is full or the fetched pool runs out.
-    inspect_budget = min(len(pool), max(INSPECT_CAP, limit * 2))
+    # About one frame in four passes the judge. A 30-second scene needs ten
+    # pictures, so judging twice the gap stops the scene half empty.
+    inspect_budget = min(len(pool), max(INSPECT_CAP, limit * 4))
     inspected = 0
     for candidate in pool:
         if len(accepted) >= limit or inspected >= inspect_budget:

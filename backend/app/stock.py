@@ -595,17 +595,18 @@ def _normalise_pixabay_video(hit: dict, query: str) -> Optional[dict]:
         "query": query,
     }
 
-async def _search_pixabay(query: str, media_type: MediaType, per_page: int) -> list[dict]:
+async def _search_pixabay(query: str, media_type: MediaType, per_page: int, *, page: int = 1) -> list[dict]:
     key = os.environ.get("PIXABAY_API_KEY", "").strip()
     if not key:
         logger.info("Pixabay search skipped: no API key")
         raise RuntimeError("pixabay_no_key")
     per_page = max(1, min(int(per_page), 40))
+    page = max(1, int(page))
     out: list[dict] = []
     timeout = httpx.Timeout(10.0, connect=5.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         if media_type in ("both", "photos"):
-            params = {"key": key, "q": query, "image_type": "photo", "per_page": per_page, "safesearch": "true", "orientation": "horizontal"}
+            params = {"key": key, "q": query, "image_type": "photo", "per_page": per_page, "page": page, "safesearch": "true", "orientation": "horizontal"}
             r = await client.get("https://pixabay.com/api/", params=params)
             if r.status_code == 401:
                 logger.warning("Pixabay photos auth failed (401) query=%r — mock fallback", query[:60])
@@ -621,7 +622,7 @@ async def _search_pixabay(query: str, media_type: MediaType, per_page: int) -> l
             # Over-fetch to ensure 12 landscape results after filtering (portrait filtered)
             fetch_n = max(per_page * 2, per_page + 10)
             fetch_n = min(fetch_n, 40)
-            params = {"key": key, "q": query, "per_page": fetch_n, "safesearch": "true"}
+            params = {"key": key, "q": query, "per_page": fetch_n, "page": page, "safesearch": "true"}
             r = await client.get("https://pixabay.com/api/videos/", params=params)
             if r.status_code == 401:
                 logger.warning("Pixabay videos auth failed (401) query=%r — mock fallback", query[:60])
@@ -665,16 +666,17 @@ def _normalise_unsplash_photo(p: dict, query: str) -> dict:
         "query": query,
     }
 
-async def _search_unsplash(query: str, per_page: int) -> list[dict]:
+async def _search_unsplash(query: str, per_page: int, *, page: int = 1) -> list[dict]:
     key = os.environ.get("UNSPLASH_ACCESS_KEY", "").strip()
     if not key:
         logger.info("Unsplash search skipped: no API key")
         raise RuntimeError("unsplash_no_key")
     per_page = max(1, min(int(per_page), 30))
+    page = max(1, int(page))
     headers = {"Authorization": f"Client-ID {key}"}
     timeout = httpx.Timeout(10.0, connect=5.0)
     async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
-        params = {"query": query, "per_page": per_page, "orientation": "landscape"}
+        params = {"query": query, "per_page": per_page, "page": page, "orientation": "landscape"}
         r = await client.get("https://api.unsplash.com/search/photos", params=params)
         if r.status_code == 429:
             raise RuntimeError("unsplash_rate_limited")
@@ -750,6 +752,7 @@ async def search_stock_aggregated(
     per_page: int = 12,
     *,
     orientation: Optional[str] = None,
+    page: int = 1,
 ) -> dict:
     """Aggregated search across Pexels + Pixabay + Unsplash.
 
@@ -797,6 +800,7 @@ async def search_stock_aggregated(
             "warning": "No stock API keys configured — showing deterministic mock results.",
         }
 
+    page = max(1, int(page))
     # Build tasks per provider; each gets per_page to allow merging then slice
     tasks = []
     task_sources: list[str] = []
@@ -808,13 +812,13 @@ async def search_stock_aggregated(
         if src == "unsplash" and media_type == "both":
             mt = "photos"
         if src == "pexels":
-            tasks.append(_search_pexels(query, mt, per_page, orientation=orientation))
+            tasks.append(_search_pexels(query, mt, per_page, orientation=orientation, page=page))
             task_sources.append(src)
         elif src == "pixabay":
-            tasks.append(_search_pixabay(query, mt, per_page))
+            tasks.append(_search_pixabay(query, mt, per_page, page=page))
             task_sources.append(src)
         elif src == "unsplash":
-            tasks.append(_search_unsplash(query, per_page))
+            tasks.append(_search_unsplash(query, per_page, page=page))
             task_sources.append(src)
 
     gathered = await asyncio.gather(*tasks, return_exceptions=True)
@@ -842,7 +846,10 @@ async def search_stock_aggregated(
             successful_sources.append(src)
 
     if not results_by_source or all(len(lst) == 0 for lst in results_by_source):
-        # All providers returned empty — fallback to mock with warning if appropriate
+        # A later page being empty means the provider ran out. It is not a cue to
+        # invent mock footage, which the first-page fallback still does.
+        if page > 1:
+            return {"source": "mixed", "results": [], "mock": False, "query": query}
         logger.warning("search_stock_aggregated all providers empty query=%r, falling back to mock", query[:60])
         return {
             "source": "mock",
