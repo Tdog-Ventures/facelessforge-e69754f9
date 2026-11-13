@@ -566,18 +566,26 @@ def validate_prerequisites(project: dict, script: dict | None,
         for item in grounding["checklist"]:
             _add(item["key"], item["label"], item["ok"], "Resolve this commercial grounding requirement before rendering.")
     else:
-        # A single stock image in each 30-second scene is NOT sufficient.
-        # Gate render-readiness on visual segment coverage (max 3s per segment).
-        # Legacy mock items are never valid footage for customer-facing videos.
+        # Footage covers a scene when the stored holds sum to its duration.
+        # Older rows have no hold and still pass when there are enough 3-second
+        # clips. A short file or a still is looped for that hold at encode time
+        # (-stream_loop -1 for video, -loop 1 for an image). Mock clips never count.
+        from .scene_terms import holds_cover
         valid = [a for a in scene_assets if str(a.get("source") or "").lower() != "mock"
                  and a.get("status") != "rejected"]
-        counts = {}
-        for asset in valid:
-            counts[asset["scene_id"]] = counts.get(asset["scene_id"], 0) + 1
-        needs = {
-            scene.get("id"): max(1, math.ceil(float(scene.get("duration") or 30) / 3))
-            for scene in scenes if scene.get("id")
+        scenes_by_id = {scene.get("id"): scene for scene in scenes if scene.get("id")}
+        needs = dict(scenes_by_id)
+        # Visual Director: aim for one distinct picture every 3 seconds.
+        ideal_by_scene = {
+            sid: max(1, math.ceil(float(scene.get("duration") or 30) / 3))
+            for sid, scene in scenes_by_id.items()
         }
+        counts: dict[str, int] = {}
+        clips_by_scene: dict[str, list] = {}
+        for asset in valid:
+            sid = asset.get("scene_id")
+            counts[sid] = counts.get(sid, 0) + 1
+            clips_by_scene.setdefault(sid, []).append(asset)
         # A stale or empty director plan must not waive the stock requirement.
         planned: dict[str, list] = {}
         director = project.get("visual_director") or {}
@@ -589,18 +597,33 @@ def validate_prerequisites(project: dict, script: dict | None,
                 ) or {}
             except DirectorError:
                 planned = {}
+        uncovered = []
         missing = 0
-        for sid, count in needs.items():
+        total_required = sum(ideal_by_scene.values())
+        for sid, scene in needs.items():
+            duration = float(scene.get("duration") or 30)
+            ideal = ideal_by_scene[sid]
             have = counts.get(sid, 0)
+            clips = clips_by_scene.get(sid, [])
             shots = planned.get(sid) or []
-            if shots and have < count:
-                have += min(count - have, len(shots))
-            missing += max(0, count - have)
-        total_required = sum(needs.values())
+            if shots and have < ideal:
+                have += min(ideal - have, len(shots))
+            # PR #33: footage whose stored holds cover the scene duration stays
+            # covered with fewer cuts. The Visual Director's 3-second target is
+            # the other accepted path. Both are preserved.
+            if holds_cover(duration, clips) or have >= ideal:
+                continue
+            uncovered.append(sid)
+            missing += max(0, ideal - have)
+        # Fail closed: a scene without an id cannot be coverage-checked, so
+        # render-readiness is not granted. bool(needs) keeps legacy projects
+        # from being waved through with unverifiable footage.
         _add("scene_assets", "Scene visuals meet 3-second pacing",
-             bool(needs) and missing == 0,
-             f"{len(valid)}/{total_required} usable visual segments; {missing} still missing. "
-             "Run auto-attach top-up or select relevant footage before rendering.")
+             bool(needs) and not uncovered,
+             f"{len(needs) - len(uncovered)}/{len(needs)} scenes covered; "
+             f"{missing}/{total_required} visual segments still missing (3-second target); "
+             f"{len(uncovered)} scenes need footage. "
+             "Run auto-attach. Fewer clips are held longer so the scene is still covered.")
 
     return {
         "ok": all(c["ok"] for c in checklist),
@@ -1893,6 +1916,8 @@ def _ffmpeg_normalise_video(src: Path, duration: float, out: Path,
         )
     else:
         vf = _blur_fill_vf(W, H) + f",format=yuv420p,fps={FPS}"
+    # A hold may be longer than the source. Loop the short file for the
+    # full hold instead of stopping when the original clip ends.
     cmd += [
         "-stream_loop", "-1",
         "-i", str(src),

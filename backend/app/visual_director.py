@@ -178,6 +178,10 @@ async def _gemini_generate(model: str, system: str, beats: list[dict], key: str)
 
 
 async def gemini_choices(beats: list[dict]) -> dict:
+    from . import api_limits
+    if not api_limits.paid_call_permitted():
+        raise DirectorError("Paid planning calls are not authorised; no plan was generated")
+    api_limits.record_paid_call()
     key = (os.getenv("GOOGLE_GENAI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
     if not key:
         raise DirectorError("Gemini is not configured; no plan was generated")
@@ -192,6 +196,10 @@ async def gemini_choices(beats: list[dict]) -> dict:
 
 
 async def deepseek_choices(beats: list[dict]) -> dict:
+    from . import api_limits
+    if not api_limits.paid_call_permitted():
+        raise DirectorError("Paid planning calls are not authorised; no plan was generated")
+    api_limits.record_paid_call()
     key = os.getenv("DEEPSEEK_API_KEY", "").strip()
     if not key:
         raise DirectorError("DeepSeek is not configured; no plan was generated")

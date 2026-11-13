@@ -29,6 +29,77 @@ featuring capturing depicts depicting visual visuals illustration
 """.split())
 
 
+def plan_hold_durations(scene_duration: float, count: int) -> list[float]:
+    """Split a scene across the clips we actually have.
+
+    Fewer clips than the 3-second ideal get longer holds. The holds sum to
+    the scene duration. One clip is held for the whole scene.
+    """
+    if count <= 0:
+        return []
+    duration = max(0.1, float(scene_duration or 0))
+    if count == 1:
+        return [round(duration, 3)]
+    step = round(duration / count, 3)
+    holds = [step] * (count - 1)
+    holds.append(round(duration - sum(holds), 3))
+    return holds
+
+
+def holds_cover(scene_duration: float, clips: list) -> bool:
+    if not clips:
+        return False
+    duration = float(scene_duration or 0)
+    if duration <= 0:
+        return True
+    covered = 0.0
+    for clip in clips:
+        try:
+            covered += float(clip.get("duration") or 0)
+        except (TypeError, ValueError):
+            continue
+    return covered + 0.05 >= duration
+
+
+def broaden_stock_queries(scene: dict, project: dict, primary: str = "") -> list[str]:
+    """Specific scene query first, then shorter nouns, the topic, then a generic.
+
+    Cooking topics end on kitchen footage. Other topics end on the niche,
+    then a broad everyday query. Repeated phrases are dropped.
+    """
+    queries: list[str] = []
+
+    def add(value, max_words: int = 5) -> None:
+        term = compact_stock_query(value, max_words=max_words)
+        if term and term.casefold() not in {item.casefold() for item in queries}:
+            queries.append(term)
+
+    add(primary)
+    terms = scene.get("search_terms") or []
+    if isinstance(terms, str):
+        terms = [terms]
+    for term in terms:
+        add(term)
+    add(scene.get("visual_direction") or "")
+    narration = str(scene.get("narration_text") or "")
+    add(narration, 4)
+    add(narration, 2)
+    topic = str((project or {}).get("topic") or "")
+    add(topic, 4)
+    add(topic, 2)
+    niche = str((project or {}).get("niche") or "")
+    add(niche, 3)
+    blob = f"{topic} {niche} {narration} {scene.get('visual_direction') or ''}".lower()
+    if re.search(r"\b(eggs?|cook\w*|kitchen|recipes?|food|fr(?:y|ied|ying)|boil\w*)\b", blob):
+        add("eggs cooking")
+        add("kitchen cooking")
+    elif niche:
+        add(niche, 2)
+    else:
+        add("everyday life")
+    return queries
+
+
 def compact_stock_query(value: str, max_words: int = 5) -> str:
     """Short footage-search keywords; keep detailed visual_direction separately.
 

@@ -212,6 +212,9 @@ async def generate_shot_still(shot: dict) -> bytes:
         _emergent_key, _gemini_via_emergent, _google_api_key, _image_model, _public_error,
     )
 
+    from . import api_limits
+    if not api_limits.paid_call_permitted():
+        raise RuntimeError("Directed picture generation failed: paid API calls are not authorised")
     prompt = picture_prompt(shot)
     model = _image_model()
     emergent = _emergent_key()
@@ -219,6 +222,7 @@ async def generate_shot_still(shot: dict) -> bytes:
     if not emergent and not google_key:
         raise RuntimeError("Directed picture generation failed: Gemini is not configured")
     session = "directed-" + hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+    api_limits.record_paid_call()
     try:
         if emergent:
             image = await asyncio.wait_for(

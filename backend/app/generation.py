@@ -180,6 +180,19 @@ def _extract_json(text: str) -> Optional[dict]:
 
 
 
+def _ollama_reachability_hint(url: str) -> str:
+    """Tell operators why a localhost Ollama URL fails inside a bridge container."""
+    host = (url or "").lower()
+    if "127.0.0.1" not in host and "localhost" not in host:
+        return ""
+    return (
+        " A container on a Docker bridge cannot reach the host at 127.0.0.1. "
+        "Keep Ollama bound to the host loopback, start the app with "
+        "--add-host=host.docker.internal:host-gateway, and set "
+        "OLLAMA_URL=http://host.docker.internal:11434/api/generate."
+    )
+
+
 async def _llm_json(system: str, user: str, cache_key: str = "") -> Optional[dict]:
     """Ollama PRIMARY, then DeepSeek, Kimi, Claude backup.
 
@@ -198,7 +211,7 @@ async def _llm_json(system: str, user: str, cache_key: str = "") -> Optional[dic
     # and a bad timeout value must not block the cloud providers either.
     ollama_model = os.environ.get("OLLAMA_MODEL", "").strip()
     ollama_read = 60.0
-    ollama_timeout = httpx.Timeout(connect=5.0, read=ollama_read, write=30.0, pool=5.0)
+    ollama_timeout = httpx.Timeout(connect=2.0, read=ollama_read, write=10.0, pool=2.0)
     ollama_url = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate").strip() or "http://localhost:11434/api/generate"
     use_chat = ollama_url.rstrip("/").endswith("/chat")
     if not ollama_model:
@@ -208,10 +221,13 @@ async def _llm_json(system: str, user: str, cache_key: str = "") -> Optional[dic
             ollama_read = min(90.0, float(os.environ.get("OLLAMA_TIMEOUT_SECONDS", "60") or 60))
         except (TypeError, ValueError):
             ollama_read = 60.0
-        ollama_timeout = httpx.Timeout(connect=5.0, read=ollama_read, write=30.0, pool=5.0)
+        ollama_timeout = httpx.Timeout(connect=2.0, read=ollama_read, write=10.0, pool=2.0)
     for attempt in range(2 if ollama_model else 0):
         try:
-            logger.info("Ollama (%s) request for %s attempt %d", ollama_model, cache_key, attempt + 1)
+            logger.info(
+                "Ollama (%s) request for %s attempt %d url=%s connect_timeout=2s",
+                ollama_model, cache_key, attempt + 1, ollama_url,
+            )
             async with httpx.AsyncClient(timeout=ollama_timeout) as client:
                 if use_chat:
                     resp = await client.post(
@@ -260,15 +276,24 @@ async def _llm_json(system: str, user: str, cache_key: str = "") -> Optional[dic
                         logger.warning("Ollama non-200 %s %s - %s", resp.status_code, resp.reason_phrase, resp.text[:500])
                         last_error = f"Ollama HTTP {resp.status_code}"
         except httpx.TimeoutException as e:
-            last_error = f"Ollama timeout (connect 5s, read {ollama_read}s)"
-            logger.warning("Ollama (%s) timeout for %s attempt %d: %s", ollama_model, cache_key, attempt + 1, e)
+            last_error = f"Ollama timeout (connect 2s, read {ollama_read}s)"
+            logger.warning(
+                "Ollama (%s) timeout for %s attempt %d url=%s: %s%s",
+                ollama_model, cache_key, attempt + 1, ollama_url, e, _ollama_reachability_hint(ollama_url),
+            )
         except Exception as e:
             last_error = f"Ollama {type(e).__name__}: {e}"
-            logger.warning("Ollama (%s) call failed for %s attempt %d: %s", ollama_model, cache_key, attempt + 1, e)
+            logger.warning(
+                "Ollama (%s) call failed for %s attempt %d url=%s: %s%s",
+                ollama_model, cache_key, attempt + 1, ollama_url, e, _ollama_reachability_hint(ollama_url),
+            )
 
-    # 2. DeepSeek — cloud backup
+    # 2. DeepSeek — cloud backup. Local Ollama is free; cloud providers
+    # are paid and are gated by the same authorisation switch.
+    from . import api_limits
+    cloud_allowed = api_limits.paid_call_permitted()
     deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
-    if deepseek_key:
+    if deepseek_key and cloud_allowed:
         try:
             logger.info("Falling back to DeepSeek for %s", cache_key)
             async with httpx.AsyncClient(timeout=60.0) as client:
@@ -294,7 +319,7 @@ async def _llm_json(system: str, user: str, cache_key: str = "") -> Optional[dic
 
     # 3. Kimi — second cloud backup
     kimi_key = os.environ.get("KIMI_API_KEY", "").strip() or os.environ.get("MOONSHOT_API_KEY", "").strip()
-    if kimi_key:
+    if kimi_key and cloud_allowed:
         try:
             kimi_model = os.environ.get("KIMI_MODEL", "kimi-k2-0711-preview").strip() or "kimi-k2-0711-preview"
             logger.info("Kimi %s for %s", kimi_model, cache_key)
@@ -316,7 +341,7 @@ async def _llm_json(system: str, user: str, cache_key: str = "") -> Optional[dic
 
     # 4. Claude — final backup (per skill: Claude is backup only)
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    if anthropic_key:
+    if anthropic_key and cloud_allowed:
         try:
             # NOTE: "claude-3-5-sonnet-latest" and "claude-3-5-sonnet-20241022" are
             # RETIRED (404 not_found). Use the pinned snapshot claude-sonnet-4-5-20250929.

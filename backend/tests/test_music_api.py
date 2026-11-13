@@ -204,10 +204,18 @@ def test_preflight_music_states():
     base = {"target_duration": 30, "selected_voiceover_asset_id": "v1",
             "selected_thumbnail_asset_id": "t1"}
     script = {"full_script": "w " * 30}
-    scenes = [{"scene_number": 1, "duration": 27.5, "end_time": 27.5}]
+    # A render-ready fixture needs an identifiable scene and footage that
+    # actually covers it (two 13.75s holds for a 27.5s scene). Without a
+    # scene id the coverage gate correctly fails closed.
+    scenes = [{"id": "scene-1", "scene_number": 1, "duration": 27.5,
+               "end_time": 27.5}]
     assets = [{"id": "v1", "asset_type": "voiceover_audio", "duration": 27.2,
                "status": "selected"},
-              {"id": "t1", "asset_type": "generated_thumbnail"}]
+              {"id": "t1", "asset_type": "generated_thumbnail"},
+              {"id": "s1", "asset_type": "stock_video", "scene_id": "scene-1",
+               "source": "pexels", "duration": 13.75, "status": "attached"},
+              {"id": "s2", "asset_type": "stock_video", "scene_id": "scene-1",
+               "source": "pexels", "duration": 13.75, "status": "attached"}]
     off = render.validate_prerequisites(dict(base), script, scenes, {"id": "m"}, assets)
     assert off["music_state"]["enabled"] is False
     assert off["ok"] is True

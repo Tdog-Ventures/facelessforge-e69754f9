@@ -178,6 +178,9 @@ def _gemini_api_key_evaluator() -> VisionEvaluator | None:
     ).strip() or "gemini-3.8-flash"
 
     def evaluate_gemini(video_id: str, frames: list[dict[str, Any]]) -> Any:
+        from . import api_limits
+        if not api_limits.paid_call_permitted():
+            raise VisualContractError("Gemini visual evaluation is not authorised")
         from google import genai
         from google.genai import types
 
@@ -203,6 +206,7 @@ def _gemini_api_key_evaluator() -> VisionEvaluator | None:
             parts.append(f"{frame['frame_ref']} at {frame['timestamp']}s")
             parts.append(types.Part.from_bytes(data=Path(image_path).read_bytes(), mime_type="image/png"))
         client = genai.Client(api_key=key)
+        api_limits.record_paid_call()
         try:
             # The API-key client rejects response_schema values that contain
             # additionalProperties. JSON is checked by validate_visual_result.

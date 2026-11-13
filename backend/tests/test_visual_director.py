@@ -11,6 +11,15 @@ from app.visual_director import (DirectorError, make_beats, validate_choices, di
 from app.directed_graphics import graphic_frame, picture_prompt
 
 
+@pytest.fixture(autouse=True)
+def _authorise_mocked_providers(monkeypatch):
+    """Every provider client here is mocked (httpx.MockTransport or a patched
+    genai.Client). Authorise explicitly so the guard exercises the real call
+    path while the test still makes zero paid network calls.
+    """
+    monkeypatch.setenv("FF_ALLOW_PAID_API_CALLS", "1")
+
+
 def test_deepseek_request_and_response_contract(monkeypatch):
     from app import visual_director
     beats = make_beats(scenes())

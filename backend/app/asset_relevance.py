@@ -263,6 +263,11 @@ async def _representative_image(video: Path, candidate: dict, work: Path) -> tup
 
 async def judge_frame(image: bytes, mime: str, narration: str, query: str) -> dict:
     """Same-subject judgment. Any failed call is a rejection, never a pass."""
+    from . import api_limits
+    # Never spend money without explicit authorisation. A rejection is
+    # safe: it cannot smuggle unusable footage past the visual gate.
+    if not api_limits.paid_call_permitted():
+        return {"accepted": False, "score": None, "reason": "paid_api_not_authorised"}
     key = (os.getenv("GOOGLE_GENAI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
     if not key or not image:
         return {"accepted": False, "score": None, "reason": "vision_unconfigured"}
@@ -282,6 +287,7 @@ async def judge_frame(image: bytes, mime: str, narration: str, query: str) -> di
     try:
         from google import genai
         from google.genai import types
+        api_limits.record_paid_call()
         client = genai.Client(api_key=key)
         response = await client.aio.models.generate_content(
             model=model,
@@ -404,3 +410,19 @@ async def select_footage_candidates(candidates, scene, query, *, needed: int, re
         else:
             rejected.append(_reject(verdict, "vision_rejected"))
     return accepted, rejected
+
+
+def fallback_is_usable(candidate: dict, query: str) -> bool:
+    """A broader search may keep a clip when its own title matches that query.
+
+    The strict scene-subject check still runs first. This only accepts a clip
+    the specific query could not fill, and only when the provider title or
+    URL slug shares a word with the broader query that found it.
+    """
+    source = str(candidate.get("source") or "").strip().lower()
+    if source == "mock" or bool(candidate.get("mock")):
+        return False
+    if not candidate.get("download_url") or not candidate.get("external_id"):
+        return False
+    evidence = _tokens(verified_metadata(candidate))
+    return bool(evidence and evidence & _tokens(query))

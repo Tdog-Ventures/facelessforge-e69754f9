@@ -82,12 +82,16 @@ def _patch_stock(monkeypatch, db, titles, *, by_query=None, ext_prefix="ext"):
     async def fake_search(*_args, **kwargs):
         query = str(kwargs.get("query") or (_args[0] if _args else "")).lower()
         chosen = titles
+        prefix = ext_prefix
         for needle, alt in (by_query or {}).items():
             if needle in query:
                 chosen = alt
+                # A fallback query is different footage, so it must not reuse the
+                # primary result ids. Project-wide dedupe would otherwise drop it.
+                prefix = f"{ext_prefix}-{needle}"
                 break
         return {"results": [
-            {"external_id": f"{ext_prefix}{i}", "preview_url": f"pv-{ext_prefix}{i}", "title": title,
+            {"external_id": f"{prefix}{i}", "preview_url": f"pv-{prefix}{i}", "title": title,
              "media_type": "stock_video", "source": "pexels"}
             for i, title in enumerate(chosen)
         ]}
@@ -203,7 +207,9 @@ def test_topup_does_not_re_attach_existing_assets(monkeypatch):
     assert response["attached"] == 3, response
     assert response["failed"] == 0
     assert db.assets.delete_calls == []
-    assert existing in _rows(db.assets)
+    kept = next(a for a in db.assets.docs if a["id"] == "asset-e1")
+    assert kept["external_id"] == "ext0"
+    assert kept["name"] == "Video editing timeline interface"
     assert [a["external_id"] for a in db.assets.docs].count("ext0") == 1
     assert _balance(db) == 7
 
@@ -322,11 +328,16 @@ def test_actual_duplicate_is_skipped_not_reported_as_failure(monkeypatch):
 
     reasons = [d.get("reason") for d in response["details"] if d.get("status") == "skipped"]
     assert reasons == ["duplicate"], response["details"]
-    # Two committed clips do not fill a 10s scene (4 required), so the
-    # operation must report incomplete coverage, not a false success.
-    assert response["failed"] == 1
-    assert "incomplete_visual_coverage" in [d.get("reason") for d in response["details"]]
+    # Two committed clips cover a 10s scene by holding 5s each. The scene is
+    # partial (fewer than the 4-clip ideal), not a failure, and the duplicate
+    # insert does not raise.
+    assert response["failed"] == 0, response
+    assert response["partial"] == 1
+    assert "incomplete_visual_coverage" not in [d.get("reason") for d in response["details"]]
     assert response["attached"] == 2
+    committed = [a for a in db.assets.docs if a["id"] != "phantom"]
+    assert [a["start_offset"] for a in sorted(committed, key=lambda a: a["start_offset"])] == [0.0, 5.0]
+    assert sum(a["duration"] for a in committed) == pytest.approx(10.0)
     assert _balance(db) == 8, "only the two committed attachments are debited"
 
 

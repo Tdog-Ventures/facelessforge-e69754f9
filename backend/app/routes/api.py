@@ -46,9 +46,9 @@ from .. import generation as gen
 from .. import stock as stock_service
 from .. import thumbnail_images as thumb_images
 from ..asset_dedupe import filter_distinct_titles
-from ..asset_relevance import relevant_candidates, select_footage_candidates
-from ..scene_terms import compact_stock_query
-from .. import asset_commit, project_lease
+from ..asset_relevance import fallback_is_usable, relevant_candidates, select_footage_candidates
+from ..scene_terms import broaden_stock_queries, compact_stock_query, holds_cover, plan_hold_durations
+from .. import api_limits, asset_commit, project_lease
 from ..content_revision import revisions_match
 
 
@@ -2111,8 +2111,9 @@ _STOCK_SKIP_AGAIN = frozenset({
     "frame_unavailable", "unusable", "irrelevant_or_unverified", "near_duplicate",
     "rejected", "no_relevant_stock",
 })
-_STOCK_PAGE_CAP = 3
-_STOCK_FETCH_CAP = 12
+# Page / fetch / judge / paid-call ceilings now come from
+# backend/app/api_limits.py (FF_MAX_* env vars) and are enforced by the
+# per-operation OperationBudget bound in auto_attach_assets().
 
 
 def _remember_stock(known: set[str], item: dict, *, title: bool = False) -> None:
@@ -2143,20 +2144,59 @@ async def _asset_write(db, lease, collection, method, *args, **kwargs):
     return await asset_commit.run(db, lease, write)
 
 
+def _coverage_status(count: int, ideal: int) -> str:
+    """Covered footage is success. Fewer cuts than the 3-second ideal is partial."""
+    if count <= 0:
+        return "failed"
+    if count >= ideal:
+        return "attached"
+    return "partial"
+
+
+async def _retile_scene_holds(db, project_id: str, clips: list, duration: float) -> list:
+    """Give the clips we have holds that sum to the scene, never a fixed 3 seconds."""
+    ordered = sorted(clips, key=lambda clip: (clip.get("order") if clip.get("order") is not None else 0, str(clip.get("id") or "")))
+    holds = plan_hold_durations(duration, len(ordered))
+    cursor = 0.0
+    for clip, hold in zip(ordered, holds):
+        offset = round(cursor, 3)
+        clip["duration"] = hold
+        clip["start_offset"] = offset
+        clip["scene_duration"] = duration
+        await db.assets.update_one(
+            {"id": clip["id"], "project_id": project_id},
+            {"$set": {
+                "duration": hold, "start_offset": offset, "scene_duration": duration, "updated_at": _now(),
+            }},
+        )
+        cursor += hold
+    return ordered
+
+
 async def _attach_scene_stock(db, *, lease, project, scene, replace_existing, user, store,
-                              visual_titles, media_type, op_id=None, query_override: str | None = None):
+                              visual_titles, media_type, op_id=None, query_override: str | None = None,
+                              used_external_ids=None):
     """Slow lookup is revocable; the entire mutation/compensation phase is pinned."""
     originals = await db.assets.find(
         _stock_scene_query(project["id"], str(scene.get("id") or scene.get("_id"))), {"_id": 0},
     ).to_list(500)
     carried = [o for o in originals if op_id and o.get("attach_op") == op_id]
-    needed = max(1, math.ceil(_get_scene_duration(scene) / 3))
+    duration = _get_scene_duration(scene)
+    needed = max(1, math.ceil(duration / 3))
+    blocked = {str(item) for item in (used_external_ids or set()) if item}
+    for original in originals:
+        if original.get("external_id"):
+            blocked.add(str(original.get("external_id")))
     needs_search = not (
         (replace_existing and carried and len(carried) == len(originals))
-        or (not replace_existing and len(originals) >= needed)
+        or (not replace_existing and (holds_cover(duration, originals) or len(originals) >= needed))
     )
     result, search_error = None, None
     if needs_search:
+        limits = api_limits.current_limits()
+        # Request volume is capped per scene; paid-call and spend caps are
+        # enforced by the shared operation budget bound in auto_attach_assets.
+        scene_budget = api_limits.OperationBudget(limits)
         remaining = needed if replace_existing else max(1, needed - len(originals))
         query = _auto_stock_query(project, scene, override=query_override)
         # One provider page is not a scene. Keep the clips already paid for,
@@ -2166,6 +2206,10 @@ async def _attach_scene_stock(db, *, lease, project, scene, replace_existing, us
         carried_rejections: list[dict] = []
         for asset in originals:
             _remember_stock(known, asset)
+        # PR #33: a clip already attached elsewhere in the project is never
+        # re-judged or re-attached to this scene.
+        for external_id in blocked:
+            known.add(str(external_id))
         scene_key = str(scene.get("id") or scene.get("_id"))
         if op_id:
             prior = await db.asset_operations.find_one({"_id": op_id}, {"_id": 0, "scene_results": 1})
@@ -2177,19 +2221,19 @@ async def _attach_scene_stock(db, *, lease, project, scene, replace_existing, us
                     continue
                 carried_rejections.append(dict(detail))
                 _remember_stock(known, detail, title=True)
+        # PR #33 broadens from the specific query to shorter nouns, the topic
+        # and a generic fallback. Director/override queries enter via `query`
+        # and scene.search_terms, so both feature sets keep their queries.
         terms: list[str] = []
         attempted_terms: set[str] = set()
-        fallbacks = list(scene.get("search_terms") or []) if isinstance(scene.get("search_terms"), list) else []
-        fallbacks.append(scene.get("visual_direction") or "")
-        fallbacks.append(project.get("topic") or "")
-        for term in [query, *fallbacks]:
+        for term in broaden_stock_queries(scene, project, query):
             term = compact_stock_query(term)
             if not term or term.casefold() in attempted_terms:
                 continue
             attempted_terms.add(term.casefold())
             terms.append(term)
         orientation = "portrait" if project.get("aspect_ratio") == "9:16" else None
-        inspect_cap = min(48, max(12, remaining * 6))
+        inspect_cap = min(limits.max_judged_candidates, max(12, remaining * 6))
         accepted_all: list[dict] = []
         rejected_all: list[dict] = []
         pending: list[dict] = []
@@ -2207,7 +2251,9 @@ async def _attach_scene_stock(db, *, lease, project, scene, replace_existing, us
 
         while len(accepted_all) < remaining and spent < inspect_cap and not rate_limited:
             if not pending:
-                if term_index >= len(terms) or fetches >= _STOCK_FETCH_CAP:
+                if term_index >= len(terms):
+                    break
+                if not scene_budget.take_request():
                     break
                 if not await _renew_attach_lease():
                     break
@@ -2231,7 +2277,7 @@ async def _attach_scene_stock(db, *, lease, project, scene, replace_existing, us
                     if "rate" in message:
                         rate_limited = True
                     page += 1
-                    if page > _STOCK_PAGE_CAP:
+                    if page > limits.max_pages_per_query:
                         term_index += 1
                         page = 1
                     continue
@@ -2247,9 +2293,9 @@ async def _attach_scene_stock(db, *, lease, project, scene, replace_existing, us
                     if _stock_already_seen(item, known):
                         continue
                     _remember_stock(known, item)
-                    fresh.append({**item, "matched_query": term})
+                    fresh.append({**item, "matched_query": term, "_found_query": term})
                 page += 1
-                if page > _STOCK_PAGE_CAP:
+                if page > limits.max_pages_per_query:
                     term_index += 1
                     page = 1
                 pending.extend(fresh)
@@ -2291,6 +2337,7 @@ async def _attach_scene_stock(db, *, lease, project, scene, replace_existing, us
             fenced_db, project=project, scene=scene, replace_existing=replace_existing, user=user,
             store=store, visual_titles=visual_titles, media_type=media_type, op_id=op_id,
             stock_result=result, search_error=search_error, query_override=query_override,
+            used_external_ids=used_external_ids,
         )
     return await asset_commit.run(db, lease, commit)
 
@@ -2298,7 +2345,7 @@ async def _attach_scene_stock(db, *, lease, project, scene, replace_existing, us
 async def _attach_scene_stock_committing(
     db, *, project: dict, scene: dict, replace_existing: bool, user: dict, store: dict,
     visual_titles: list, media_type: str, stock_result, search_error, op_id: Optional[str] = None,
-    query_override: str | None = None,
+    query_override: str | None = None, used_external_ids: Optional[set] = None,
 ) -> dict:
     """Select and commit stock assets for one scene. Never raises for scene-level failures.
 
@@ -2359,14 +2406,26 @@ async def _attach_scene_stock_committing(
             visual_titles.append(str(doc.get("name") or ""))
             _detail("attached", asset_id=doc["id"], order=doc.get("order"), start_offset=doc.get("start_offset"))
         outcome.update(attached=len(carried), charged=charged_now)
-        if replace_existing:
-            outcome["status"] = "attached"
+        # A finished replacement, or footage that already covers the scene, is not
+        # selected again. Stretch holds when the stored durations still fall short.
+        if replace_existing or holds_cover(duration, originals) or len(originals) >= num_needed:
+            target = carried if replace_existing else originals
+            if target and len(target) < num_needed and not holds_cover(duration, target):
+                await _retile_scene_holds(db, project_id, target, duration)
+            outcome["status"] = _coverage_status(len(target), num_needed)
+            if outcome["status"] == "partial":
+                outcome["reason"] = "stretched_holds"
+                _detail("partial", reason="stretched_holds", available=len(target), required=num_needed)
+            if used_external_ids is not None:
+                for clip in target:
+                    if clip.get("external_id"):
+                        used_external_ids.add(str(clip["external_id"]))
             return outcome
         carried_committed = True
     if originals and not replace_existing:
-        if len(originals) >= num_needed:
+        if holds_cover(duration, originals) or len(originals) >= num_needed:
             if carried_committed:
-                outcome["status"] = "attached"
+                outcome["status"] = _coverage_status(len(originals), num_needed)
             else:
                 outcome.update(status="skipped", skipped=1)
                 _detail("skipped", reason="already_has_stock")
@@ -2385,14 +2444,32 @@ async def _attach_scene_stock_committing(
     query = _auto_stock_query(project, scene, override=query_override)
 
     excluded_ids: set[str] = set()
+    project_blocked = {str(item) for item in (used_external_ids or set()) if item}
     for ea in excluded:
         if ea.get("external_id"):
             excluded_ids.add(str(ea.get("external_id")))
         if ea.get("preview_url"):
             excluded_ids.add(str(ea.get("preview_url")))
 
+    async def _keep_existing_footage(reason: str):
+        """Footage already on the scene covers it. Never fail that scene for a short search."""
+        if not originals or replace_existing:
+            return False
+        if len(originals) < num_needed and not holds_cover(duration, originals):
+            await _retile_scene_holds(db, project_id, originals, duration)
+        outcome["status"] = _coverage_status(len(originals), num_needed)
+        outcome["reason"] = reason if outcome["status"] == "partial" else None
+        _detail(outcome["status"], reason=reason, available=len(originals), required=num_needed)
+        if used_external_ids is not None:
+            for clip in originals:
+                if clip.get("external_id"):
+                    used_external_ids.add(str(clip["external_id"]))
+        return True
+
     if search_error is not None:
         logger.warning("auto-attach search failed scene=%s: %s", scene_id, search_error)
+        if await _keep_existing_footage("search_failed"):
+            return outcome
         outcome["reason"] = "search_failed"
         _detail("failed", reason=str(search_error)[:120])
         return outcome
@@ -2414,11 +2491,21 @@ async def _attach_scene_stock_committing(
     for r in results:
         ext = str(r.get("external_id") or "")
         prev = str(r.get("preview_url") or "")
-        if ext in excluded_ids or prev in excluded_ids:
+        if ext in excluded_ids or prev in excluded_ids or (ext and ext in project_blocked):
             continue
         filtered.append(r)
     unique = _dedup_by_preview(filtered)
     unique, irrelevant = relevant_candidates(unique, scene, query)
+    if len(unique) < remaining:
+        rescued, still_out = [], []
+        for rejected in irrelevant:
+            found_query = str(rejected.get("_found_query") or "")
+            if found_query and found_query.casefold() != str(query or "").casefold() and fallback_is_usable(rejected, found_query):
+                rescued.append(rejected)
+            else:
+                still_out.append(rejected)
+        unique = unique + rescued
+        irrelevant = still_out
     for rejected in irrelevant:
         _detail("skipped", reason="irrelevant_or_unverified", title=rejected.get("title") or rejected.get("name"))
     unique, near_duplicates = filter_distinct_titles(unique, visual_titles)
@@ -2427,7 +2514,10 @@ async def _attach_scene_stock_committing(
         _detail("skipped", reason="near_duplicate", title=dup.get("title") or dup.get("name"))
     unique = unique[:remaining]
     if not unique:
-        # Nothing usable: the scene keeps its current selection untouched.
+        # Nothing new. Keep footage the scene already has and stretch it.
+        # A replacement that found nothing leaves the previous selection untouched.
+        if await _keep_existing_footage("stretched_holds"):
+            return outcome
         outcome["reason"] = "no_relevant_stock"
         _detail("failed", reason="no_relevant_stock")
         return outcome
@@ -2514,22 +2604,36 @@ async def _attach_scene_stock_committing(
             return outcome
         outcome["charged"] += charged_now
 
+    final_clips = list(committed if replace_existing else [*originals, *committed])
+    if not final_clips:
+        outcome["status"] = "failed"
+        outcome["reason"] = "no_relevant_stock"
+        _detail("failed", reason="no_relevant_stock")
+        return outcome
+    # Few distinct clips still cover the scene: each hold gets longer.
+    # One clip is held for the whole scene. Two or more are never the same
+    # clip back to back; the renderer alternates them and loops a short file.
+    if len(final_clips) < num_needed and not holds_cover(duration, final_clips):
+        await _retile_scene_holds(db, project_id, final_clips, duration)
     for doc in committed:
         visual_titles.append(doc["name"])
         await _record_stock_rights(db, project_id=project_id, scene_id=scene_id, doc=doc, user_id=user["id"])
         _detail("attached", asset_id=doc["id"], order=doc["order"], start_offset=doc["start_offset"])
     outcome["attached"] += len(committed)
-    # Successful API writes do not imply the scene meets the 3-second pacing rule.
-    # Keep any good clips as a resumable top-up, but report incomplete coverage.
-    final_count = (0 if replace_existing else len(originals)) + len(committed)
-    if final_count < num_needed:
-        outcome["status"] = "failed"
-        outcome["reason"] = "incomplete_visual_coverage"
-        _detail("failed", reason="incomplete_visual_coverage", required=num_needed, available=final_count)
-    elif carried_committed or committed:
-        outcome["status"] = "attached"
-    else:
+    outcome["status"] = _coverage_status(len(final_clips), num_needed)
+    if outcome["status"] == "partial":
+        outcome["reason"] = "stretched_holds"
+        _detail("partial", reason="stretched_holds", available=len(final_clips), required=num_needed)
+    elif not (carried_committed or committed):
         outcome["status"] = "skipped"
+    if used_external_ids is not None:
+        if replace_existing:
+            for original in originals:
+                if original.get("external_id"):
+                    used_external_ids.discard(str(original["external_id"]))
+        for clip in final_clips:
+            if clip.get("external_id"):
+                used_external_ids.add(str(clip["external_id"]))
     logger.info(
         "auto-attach scene %s duration=%s num_needed=%s committed=%d skipped=%d status=%s",
         scene.get("scene_number"), duration, num_needed, len(committed), outcome["skipped"], outcome["status"],
@@ -2544,6 +2648,7 @@ def _auto_attach_summary(*, total: int, ordered: list, mock: bool, aborted: Opti
         "skipped": sum(r["skipped"] for r in ordered),
         "near_duplicates_skipped": sum(r["near_duplicates"] for r in ordered),
         "failed": sum(1 for r in ordered if r["status"] == "failed"),
+        "partial": sum(1 for r in ordered if r["status"] == "partial"),
         "credits_charged": sum(r["charged"] for r in ordered),
         "details": [d for r in ordered for d in r["details"]],
         "mock": mock,
@@ -2554,7 +2659,7 @@ def _auto_attach_summary(*, total: int, ordered: list, mock: bool, aborted: Opti
 
 @router.post("/projects/{project_id}/auto-attach-assets")
 async def auto_attach_assets(project_id: str, body: AutoAttachRequest, user=Depends(get_current_user)):
-    """3-second rule: ceil(duration/3) assets per scene (10 for 30s), 3s each, order/start_offset.
+    """Aim for ceil(duration/3) clips, but a scene succeeds when their holds cover it.
 
     Writers of a project's stock selection (this route, manual scene attach) share
     one fenced asset lease, so a replacement, top-up or manual attach can never
@@ -2588,6 +2693,9 @@ async def auto_attach_assets(project_id: str, body: AutoAttachRequest, user=Depe
     )
     if lease is None:
         raise HTTPException(status_code=409, detail="Another asset update is running for this project; retry shortly.")
+    # One budget for the whole operation: every scene attach shares it.
+    op_budget = api_limits.OperationBudget()
+    budget_token = api_limits.bind_budget(op_budget)
     try:
         project = await db.projects.find_one({"id": project_id}, {"_id": 0})
         script = await db.scripts.find_one({"project_id": project_id}, {"_id": 0})
@@ -2599,6 +2707,7 @@ async def auto_attach_assets(project_id: str, body: AutoAttachRequest, user=Depe
     except asset_commit.CommitUncertain as exc:
         raise HTTPException(status_code=503, detail="Asset commit requires reconciliation; retry after recovery.") from exc
     finally:
+        api_limits.unbind_budget(budget_token)
         await project_lease.release(db, lease)
 
 
@@ -2636,7 +2745,7 @@ async def _auto_attach_under_lease(db, lease, project_id: str, project: dict, bo
         for scene in scenes:
             needed = max(1, math.ceil(_get_scene_duration(scene) / 3))
             scene_id = str(scene.get("id") or scene.get("_id"))
-            if (resumed.get(scene_id) or {}).get("status") in ("attached", "skipped"):
+            if (resumed.get(scene_id) or {}).get("status") in ("attached", "skipped", "partial"):
                 continue  # finished and charged by an earlier attempt of this same operation
             count = await db.assets.count_documents(_stock_scene_query(project_id, scene_id))
             if op_id:
@@ -2701,7 +2810,7 @@ async def _auto_attach_under_lease(db, lease, project_id: str, project: dict, bo
         # Titles already in the project keep near-duplicate filtering honest. In replace
         # mode only scenes finished by this same operation count; the rest are being replaced.
         if body.replace_existing:
-            done_scene_ids = [sid for sid, r in resumed.items() if r.get("status") in ("attached", "skipped")]
+            done_scene_ids = [sid for sid, r in resumed.items() if r.get("status") in ("attached", "skipped", "partial")]
             visual_titles = []
             if done_scene_ids:
                 done_assets = await db.assets.find(
@@ -2720,9 +2829,17 @@ async def _auto_attach_under_lease(db, lease, project_id: str, project: dict, bo
 
         results: dict = {}
         aborted = None
+        used_external_ids = {
+            str(asset.get("external_id"))
+            for asset in await db.assets.find(
+                {"project_id": project_id, "asset_type": {"$in": STOCK_ASSET_TYPES}},
+                {"_id": 0, "external_id": 1},
+            ).to_list(2000)
+            if asset.get("external_id")
+        }
         for scene in scenes:
             scene_id = str(scene.get("id") or scene.get("_id"))
-            if (resumed.get(scene_id) or {}).get("status") in ("attached", "skipped"):
+            if (resumed.get(scene_id) or {}).get("status") in ("attached", "skipped", "partial"):
                 results[scene_id] = resumed[scene_id]
                 continue
             if not await project_lease.renew(db, lease, ttl_seconds=project_lease.ASSET_LEASE_TTL_SECONDS):
@@ -2742,7 +2859,7 @@ async def _auto_attach_under_lease(db, lease, project_id: str, project: dict, bo
                 outcome = await _attach_scene_stock(
                     db, lease=lease, project=project, scene=scene_for_search, replace_existing=body.replace_existing, user=user,
                     store=store, visual_titles=visual_titles, media_type=body.media_type, op_id=op_id,
-                    query_override=query_override,
+                    query_override=query_override, used_external_ids=used_external_ids,
                 )
             except asset_commit.LeaseLost:
                 aborted = "lease_lost"
@@ -2764,7 +2881,7 @@ async def _auto_attach_under_lease(db, lease, project_id: str, project: dict, bo
                 )
 
         ordered = [results[str(s.get("id") or s.get("_id"))] for s in scenes if str(s.get("id") or s.get("_id")) in results]
-        complete = aborted is None and len(ordered) == len(scenes) and all(r["status"] in ("attached", "skipped") for r in ordered)
+        complete = aborted is None and len(ordered) == len(scenes) and all(r["status"] in ("attached", "skipped", "partial") for r in ordered)
         summary = _auto_attach_summary(total=len(scenes), ordered=ordered, mock=stock_service.is_mock_mode(), aborted=aborted)
         if op_id and aborted != "lease_lost":
             # Only a fully processed operation is final. Anything else stays resumable
@@ -3847,24 +3964,46 @@ def _check_render_rate(user_id: str):
 
 @router.get("/billing/balance")
 async def billing_balance(user=Depends(get_current_user)):
+    """Return the real balance. Never invent one when the source is unavailable.
+
+    The primary billing status carries ``operator_unmetered`` for admin accounts.
+    The Redis tenant mirror is a second real source, but it is not authoritative
+    for admin/unmetered status, so it is reported with that flag false and an
+    explicit ``balance_source`` marker. If neither source can be read we fail
+    closed with 503 rather than fabricating a 30-credit balance.
+    """
     try:
         from ..billing import get_billing_status_for_user
         return await get_billing_status_for_user(user)
     except Exception:
-        try:
-            import redis
-            r = redis.Redis(
-                host=os.getenv("REDIS_HOST", "localhost"),
-                port=int(os.getenv("REDIS_PORT", "6379")),
-                decode_responses=True,
-                socket_connect_timeout=2,
-                socket_timeout=2,
-            )
-            data = r.hgetall(f"tenant:{user['id']}")
-            credits = int(data.get("credits", 0) or 0)
-            return {"credits": credits, "remaining": credits, "monthly": 150, "quota": 150, "plan": "free", "balance": credits}
-        except:
-            return {"credits": 30, "remaining": 30, "monthly": 30, "quota": 30, "plan": "free", "balance": 30}
+        logging.getLogger("facelessforge.routes").warning(
+            "billing status unavailable user=%s", user.get("id"), exc_info=True)
+    try:
+        import redis
+        r = redis.Redis(
+            host=os.getenv("REDIS_HOST", "localhost"),
+            port=int(os.getenv("REDIS_PORT", "6379")),
+            decode_responses=True,
+            socket_connect_timeout=2,
+            socket_timeout=2,
+        )
+        data = r.hgetall(f"tenant:{user['id']}") or {}
+        raw = data.get("credits")
+        if raw is not None:
+            credits = int(raw or 0)
+            return {
+                "operator_unmetered": False,
+                "credits": credits, "remaining": credits, "balance": credits,
+                "can_generate": credits > 0,
+                "balance_source": "redis_tenant_mirror",
+            }
+    except Exception:
+        logging.getLogger("facelessforge.routes").warning(
+            "billing redis mirror unavailable user=%s", user.get("id"), exc_info=True)
+    raise HTTPException(status_code=503, detail={
+        "code": "billing_unavailable",
+        "message": "Credit balance is temporarily unavailable; no balance was assumed.",
+    })
 
 @router.get("/billing/credits")
 async def billing_credits(user=Depends(get_current_user)):
