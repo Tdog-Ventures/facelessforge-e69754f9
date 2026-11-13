@@ -59,3 +59,19 @@ def test_fixed_short_script_is_kept_when_the_model_will_not_expand(monkeypatch):
         "production_mode": "editorial",
     }))
     assert result["full_script"] == text
+
+
+def test_long_script_is_cut_to_the_word_budget():
+    narration = " ".join(["egg"] * 358)
+    out = generation._finalize_script({
+        "full_script": narration,
+        "hook_option_one": "Hook",
+        "hook_option_two": "Hook 2",
+        "hook_option_three": "Hook 3",
+        "selected_hook": "Hook",
+        "retention_beats": [],
+        "cta_block": "Subscribe",
+    }, 133.5)
+    assert out["word_budget"] == 334
+    assert 317 <= out["word_count"] <= 351
+    assert out["estimated_duration"] <= 140

@@ -394,17 +394,19 @@ def _finalize_script(out: dict, narration_duration: float = None) -> dict:
         try:
             target_dur = float(narration_duration)
             target_words = target_word_count(target_dur)
-            # Allow 30% overrun, then word-boundary truncate
-            max_words = int(target_words * 1.5)
+            # Voiceover rejects speech outside 5% of this budget. A draft only
+            # 7% over used to be stored, so the page showed 2:23 against a 2:16 target.
             words_list = re.findall(r"\b\w+\b", full)
-            if len(words_list) > max_words:
-                # Truncate to target_words at word boundary, keep sentences
+            high = max(target_words, math.ceil(target_words * 1.05))
+            low = max(1, math.floor(target_words * 0.95))
+            if len(words_list) > high:
                 truncated = " ".join(words_list[:target_words])
-                # Try to end at sentence boundary if possible
                 if "." in truncated:
                     last_dot = truncated.rfind(".")
                     if last_dot > len(truncated) * 0.7:
-                        truncated = truncated[: last_dot + 1]
+                        snapped = truncated[: last_dot + 1]
+                        if len(re.findall(r"\b\w+\b", snapped)) >= low:
+                            truncated = snapped
                 out["full_script"] = truncated
                 full = truncated
                 logger.info("Script truncated from %s to %s words for narration budget %.2fs", len(words_list), len(re.findall(r"\b\w+\b", truncated)), target_dur)
