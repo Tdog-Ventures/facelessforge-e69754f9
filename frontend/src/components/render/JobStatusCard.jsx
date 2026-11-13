@@ -20,7 +20,7 @@ function fmtSec(s) {
 
 export default function JobStatusCard({
   job, project, selectedThumbnail, canEdit, cancelling, starting,
-  onCancel, onRetry, downloadUrl,
+  onCancel, onRetry, downloadUrl, retryDisabled = false,
 }) {
   const status = String(job.status || "").toLowerCase();
   const failed = status === "failed";
@@ -115,7 +115,7 @@ export default function JobStatusCard({
               <button
                 data-testid="render-retry-btn"
                 onClick={onRetry}
-                disabled={starting}
+                disabled={starting || retryDisabled}
                 className="inline-flex items-center gap-2 border border-[var(--ff-input-border)] text-[var(--ff-text)] hover:text-[#00E5FF] hover:border-[#00E5FF] font-mono text-[11px] uppercase tracking-widest px-3 py-2 rounded-sm transition-colors"
               >
                 {starting ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
@@ -130,7 +130,7 @@ export default function JobStatusCard({
         <button
           data-testid="render-retry-btn"
           onClick={onRetry}
-          disabled={starting}
+          disabled={starting || retryDisabled}
           className="inline-flex items-center gap-2 border border-[var(--ff-input-border)] text-[var(--ff-text)] hover:text-[#00E5FF] hover:border-[#00E5FF] font-mono text-[11px] uppercase tracking-widest px-3 py-2 rounded-sm transition-colors"
         >
           {starting ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}

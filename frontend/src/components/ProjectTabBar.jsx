@@ -4,10 +4,10 @@ import { ChevronDown } from "lucide-react";
 export const CORE_TABS = [
   { id: "overview", label: "Overview" },
   { id: "script", label: "Script" },
+  { id: "voiceover", label: "Voiceover" },
   { id: "scenes", label: "Scenes" },
   { id: "metadata", label: "Metadata" },
   { id: "thumbnails", label: "Thumbnails" },
-  { id: "voiceover", label: "Voiceover" },
   { id: "render", label: "Render & Export" },
 ];
 

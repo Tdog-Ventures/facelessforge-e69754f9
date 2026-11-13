@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
+import LengthFader from "./LengthFader";
 
 const API_BASE = "/api";
 
@@ -60,10 +61,16 @@ function IntakeForm({ onCreated }) {
       <textarea className="w-full border rounded px-3 py-2" placeholder="Topic / brief (min 10 characters)" value={form.topic} onChange={handleChange("topic")} rows={4} required />
       <input className="w-full border rounded px-3 py-2" placeholder="Audience (e.g. Adelaide homeowners)" value={form.audience} onChange={handleChange("audience")} required />
       <input className="w-full border rounded px-3 py-2" placeholder="Tone (e.g. friendly, professional)" value={form.tone} onChange={handleChange("tone")} required />
-      <label className="block text-sm">
-        Target duration (seconds)
-        <input type="number" className="w-full border rounded px-3 py-2 mt-1" value={form.target_duration} onChange={handleChange("target_duration")} min={5} max={3600} />
-      </label>
+      <div className="block text-sm">
+        <label htmlFor="client-length" className="block">Length</label>
+        <span className="block text-xs text-[var(--ff-text-dim)] mb-2">5 seconds – 60 minutes</span>
+        <LengthFader
+          id="client-length"
+          testId="client-length"
+          value={form.target_duration}
+          onChange={(seconds) => setForm((current) => ({ ...current, target_duration: seconds }))}
+        />
+      </div>
       {error && <p className="text-[var(--ff-error)] text-sm">{error}</p>}
       <button type="submit" disabled={submitting} className="bg-[var(--ff-primary)] text-white px-4 py-2 rounded hover:bg-[var(--ff-primary-hover)] disabled:opacity-50">
         {submitting ? "Submitting..." : "Generate video"}

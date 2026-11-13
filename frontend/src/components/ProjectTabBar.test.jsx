@@ -26,6 +26,9 @@ async function render(tab = "scenes") {
 }
 
 test("the main row keeps the video tabs and hides records behind one menu", async () => {
+  expect(CORE_TABS.map((item) => item.id)).toEqual([
+    "overview", "script", "voiceover", "scenes", "metadata", "thumbnails", "render",
+  ]);
   const view = await render();
   const row = view.element.querySelector("[data-testid='project-tab-row']");
   for (const item of CORE_TABS) {

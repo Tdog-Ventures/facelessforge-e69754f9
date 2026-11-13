@@ -107,3 +107,56 @@ test("a later history failure keeps the running job", async () => {
   expect(element.textContent).toContain("Render running");
   expect(element.querySelector("[data-testid='render-start-btn']").disabled).toBe(true);
 });
+
+function mockReady(credits) {
+  api.get.mockImplementation(async (path) => {
+    const value = String(path);
+    if (value.includes("/billing/credits")) return { data: credits };
+    if (value.includes("/render/jobs")) return { data: [] };
+    return { data: { ok: true, issues: [], checklist: [] } };
+  });
+}
+
+test("start stays off when the balance is under 3 credits", async () => {
+  mockReady({ remaining: 2, credits: 2, operator_unmetered: false });
+  api.post.mockResolvedValue({ data: { id: "job", status: "queued" } });
+  await mount();
+  const button = element.querySelector("[data-testid='render-start-btn']");
+  expect(button.disabled).toBe(true);
+  expect(element.querySelector("[data-testid='render-credit-stop']").textContent)
+    .toContain("3 credits required, 2 remaining");
+  await act(async () => { button.click(); });
+  expect(api.post).not.toHaveBeenCalled();
+});
+
+test("start runs when the balance covers the 3-credit render", async () => {
+  mockReady({ remaining: 3, credits: 3, operator_unmetered: false });
+  api.post.mockResolvedValue({ data: { id: "job-9", status: "queued" } });
+  await mount();
+  const button = element.querySelector("[data-testid='render-start-btn']");
+  expect(button.disabled).toBe(false);
+  await act(async () => { button.click(); });
+  expect(api.post).toHaveBeenCalledWith("/projects/p1/render/start", expect.any(Object));
+});
+
+test("an unmetered balance can render with no credits left", async () => {
+  mockReady({ remaining: 0, credits: 0, operator_unmetered: true });
+  await mount();
+  expect(element.querySelector("[data-testid='render-start-btn']").disabled).toBe(false);
+  expect(element.querySelector("[data-testid='render-credit-stop']")).toBeNull();
+});
+
+test("a missing credit balance keeps the render button off", async () => {
+  api.get.mockImplementation(async (path) => {
+    if (String(path).includes("/billing/credits")) throw new Error("balance down");
+    if (String(path).includes("/render/jobs")) return { data: [] };
+    return { data: { ok: true, issues: [], checklist: [] } };
+  });
+  await mount();
+  const button = element.querySelector("[data-testid='render-start-btn']");
+  expect(button.disabled).toBe(true);
+  expect(element.querySelector("[data-testid='render-credit-stop']").textContent)
+    .toContain("Render stays off");
+  await act(async () => { button.click(); });
+  expect(api.post).not.toHaveBeenCalled();
+});

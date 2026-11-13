@@ -6,6 +6,7 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { ThemeProvider } from "next-themes";
 import CreateProjectPage from "./CreateProjectPage";
 import { api } from "../lib/api";
+import { lengthStops } from "../lib/length";
 
 Object.defineProperty(window, "matchMedia", {
   writable: true,
@@ -120,7 +121,7 @@ describe("CreateProjectPage theme, accessibility, and semantic token guardrails"
     expect(screen.getByLabelText(/Tone/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/Voice style/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/Visual style/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/Target duration \(seconds\)/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^Length/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/What's the goal/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/What should they do/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/This is a paid client ad \(commercial\)/i)).toBeInTheDocument();
@@ -167,7 +168,11 @@ describe("CreateProjectPage theme, accessibility, and semantic token guardrails"
     fireEvent.change(screen.getByTestId("field-niche"), { target: { value: "design" } });
     fireEvent.change(screen.getByTestId("field-topic"), { target: { value: "How contrast tokens prevent invisible text regressions" } });
     fireEvent.change(screen.getByTestId("field-audience"), { target: { value: "Frontend engineers" } });
-    fireEvent.click(screen.getByRole("button", { name: "60s" }));
+    expect(screen.getByTestId("length-readout")).toHaveTextContent("5 minutes");
+    fireEvent.change(screen.getByTestId("field-duration"), {
+      target: { value: String(lengthStops().indexOf(60)) },
+    });
+    expect(screen.getByTestId("length-readout")).toHaveTextContent("1 minute");
 
     fireEvent.click(screen.getByTestId("create-project-submit"));
 
@@ -241,5 +246,20 @@ describe("CreateProjectPage theme, accessibility, and semantic token guardrails"
 
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(mockNavigate).toHaveBeenCalledWith("/app/projects");
+  });
+
+  it("shows seconds under a minute and minutes from one minute up, with no second chips", () => {
+    renderPage("light");
+    expect(screen.queryByRole("group", { name: "Target duration presets" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "300s" })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByTestId("field-duration"), {
+      target: { value: String(lengthStops().indexOf(45)) },
+    });
+    expect(screen.getByTestId("length-readout")).toHaveTextContent("45 seconds");
+    fireEvent.change(screen.getByTestId("field-duration"), {
+      target: { value: String(lengthStops().indexOf(600)) },
+    });
+    expect(screen.getByTestId("length-readout")).toHaveTextContent("10 minutes");
+    expect(screen.queryByText("600s")).not.toBeInTheDocument();
   });
 });

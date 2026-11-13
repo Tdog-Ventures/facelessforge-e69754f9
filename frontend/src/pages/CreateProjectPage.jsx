@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import AppShell from "../components/AppShell";
 import TopBar from "../components/TopBar";
 import { api, formatApiError } from "../lib/api";
+import LengthFader from "../components/LengthFader";
 
 const PLATFORMS = [
   { key: "instagram", label: "Instagram" },
@@ -17,8 +18,6 @@ const VOICE_STYLES = ["neutral male narrator", "neutral female narrator", "deep 
 const VISUAL_STYLES = ["cinematic b-roll", "moody minimal", "motion graphic heavy", "archival + painterly", "anime-inspired", "stock + text cards"];
 const MONETISATION = ["Grow channel to 50k subs", "Sell my product", "Build authority", "ads", "ads + affiliate", "affiliate", "digital product", "sponsorship"];
 const CTAS = ["Visit website", "Subscribe", "Buy product", "subscribe", "join newsletter", "visit website", "buy product", "book call"];
-
-const DURATIONS = [5, 15, 30, 60, 120, 300, 600, 1800, 3600];
 
 const inputClass = "ff-input w-full border px-3 py-2.5 text-sm rounded-sm transition-colors";
 const selectClass = "ff-select w-full border px-3 py-2.5 rounded-sm font-mono uppercase text-xs tracking-wider transition-colors";
@@ -111,7 +110,7 @@ export default function CreateProjectPage() {
     if (!form.audience.trim()) e.audience = "Audience is required";
     if (!form.tone) e.tone = "Pick a tone";
     const d = Number(form.target_duration);
-    if (!(d >= 5 && d <= 3600)) e.target_duration = "5–3600 seconds";
+    if (!(d >= 5 && d <= 3600)) e.target_duration = "Choose 5 seconds to 60 minutes";
     if (isCommercial) {
       if (!form.client_name.trim()) e.client_name = "Client name is required";
       for (const key of ["service", "offer", "audience", "location"]) {
@@ -364,39 +363,14 @@ export default function CreateProjectPage() {
                 </select>
               </Field>
             </div>
-            <Field label="Target duration (seconds)" name="target_duration" controlId="field-input-target_duration" hint="5 – 3600" errors={errors}>
-              <div className="flex flex-wrap items-center gap-3">
-                <input
-                  id="field-input-target_duration"
-                  data-testid="field-duration"
-                  type="number"
-                  min={5}
-                  max={3600}
-                  aria-invalid={errors.target_duration ? "true" : undefined}
-                  aria-describedby={durationDescribedBy}
-                  value={form.target_duration}
-                  onChange={(e) => update("target_duration", e.target.value)}
-                  className={inputClass + " w-32 font-mono"}
-                />
-                <div className="flex flex-wrap gap-2" role="group" aria-label="Target duration presets">
-                  {DURATIONS.map((d) => {
-                    const selected = Number(form.target_duration) === d;
-                    return (
-                      <button
-                        key={d}
-                        type="button"
-                        aria-pressed={selected}
-                        onClick={() => update("target_duration", d)}
-                        className={`font-mono text-[10px] px-2 py-1 rounded-sm uppercase tracking-widest ${
-                          selected ? "ff-pill-active" : "ff-pill"
-                        }`}
-                      >
-                        {d}s
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
+            <Field label="Length" name="target_duration" controlId="field-input-target_duration" hint="5 seconds – 60 minutes" errors={errors}>
+              <LengthFader
+                id="field-input-target_duration"
+                value={form.target_duration}
+                describedBy={durationDescribedBy}
+                invalid={Boolean(errors.target_duration)}
+                onChange={(seconds) => update("target_duration", seconds)}
+              />
             </Field>
           </div>
 

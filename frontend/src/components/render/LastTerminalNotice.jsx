@@ -20,7 +20,7 @@ function timeAgo(iso) {
  * job terminated as cancelled or failed. Replaces the frozen progress card
  * so the user is never confused into thinking the render is still running.
  */
-export default function LastTerminalNotice({ job, canEdit, starting, onRetry }) {
+export default function LastTerminalNotice({ job, canEdit, starting, onRetry, retryDisabled = false }) {
   if (!job) return null;
   const status = String(job.status || "").toLowerCase();
   if (status !== "cancelled" && status !== "failed") return null;
@@ -62,7 +62,7 @@ export default function LastTerminalNotice({ job, canEdit, starting, onRetry }) 
           type="button"
           data-testid="render-terminal-retry-btn"
           onClick={onRetry}
-          disabled={starting}
+          disabled={starting || retryDisabled}
           className="inline-flex items-center gap-2 border border-[var(--ff-input-border)] text-[var(--ff-text)] hover:text-[#00E5FF] hover:border-[#00E5FF] font-mono text-[10px] uppercase tracking-widest px-3 py-2 rounded-sm transition-colors disabled:opacity-50"
         >
           {starting ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}

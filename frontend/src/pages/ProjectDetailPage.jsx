@@ -222,9 +222,6 @@ export default function ProjectDetailPage() {
             <div className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <OverviewTile label="Script" ready={!!script} sub={script ? `${script.word_count} words` : "Not generated"} />
-                <OverviewTile label="Scenes" ready={scenes.length > 0} sub={scenes.length > 0 ? `${scenes.length} scenes` : "Not generated"} />
-                <OverviewTile label="Metadata" ready={!!metadata} sub={metadata ? `${metadata.title_options?.length || 0} titles` : "Not generated"} />
-                <OverviewTile label="Thumbnails" ready={assets.some(a => a.asset_type === "thumbnail_concept")} sub={`${assets.filter(a => a.asset_type === "thumbnail_concept").length} concepts`} />
                 <OverviewTile
                   label="Voiceover"
                   ready={assets.some(a => a.asset_type === "voiceover_audio")}
@@ -236,6 +233,9 @@ export default function ProjectDetailPage() {
                     return `${sceneVOs.length}/${scenes.length} scenes${fullVO ? " · full ready" : ""}`;
                   })()}
                 />
+                <OverviewTile label="Scenes" ready={scenes.length > 0} sub={scenes.length > 0 ? `${scenes.length} scenes` : "Not generated"} />
+                <OverviewTile label="Metadata" ready={!!metadata} sub={metadata ? `${metadata.title_options?.length || 0} titles` : "Not generated"} />
+                <OverviewTile label="Thumbnails" ready={assets.some(a => a.asset_type === "thumbnail_concept")} sub={`${assets.filter(a => a.asset_type === "thumbnail_concept").length} concepts`} />
                 <OverviewTile
                   label="Final video"
                   ready={!!render_job && String(render_job.status || "").toLowerCase() === "completed" && !!(render_job.output_storage_key || render_job.output_url)}

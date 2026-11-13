@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Play, Loader2, Film } from "lucide-react";
 import { api, formatApiError, API } from "../lib/api";
+import { RENDER_CREDIT_COST } from "../lib/credits";
 import PrereqChecklist from "./render/PrereqChecklist";
 import RenderPreviewCards from "./render/RenderPreviewCards";
 import JobStatusCard from "./render/JobStatusCard";
@@ -41,6 +42,7 @@ export default function RenderPanel({
   const [starting, setStarting] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [fitting, setFitting] = useState(false);
+  const [creditState, setCreditState] = useState({ status: "loading", remaining: 0, unmetered: false });
   const [voiceStyle, setVoiceStyle] = useState(project?.voice_style || project?.voice_id || "narrator");
   const [burnSubtitles, setBurnSubtitles] = useState(false);
   // was: aspect_ratio: "9:16"
@@ -53,7 +55,29 @@ export default function RenderPanel({
     if (typeof project?.burn_subtitles === "boolean") setBurnSubtitles(project.burn_subtitles);
   }, [project?.voice_style, project?.voice_id, project?.aspect_ratio, project?.burn_subtitles]);
 
+  const loadCredits = async () => {
+    try {
+      const res = await api.get("/billing/credits", { timeout: 15000 });
+      const data = res?.data;
+      const unmetered = data?.operator_unmetered === true;
+      const remaining = Number(data?.remaining ?? data?.credits);
+      if (!unmetered && !Number.isFinite(remaining)) {
+        setCreditState({ status: "unavailable", remaining: 0, unmetered: false });
+        return;
+      }
+      setCreditState({
+        status: "ready",
+        remaining: Number.isFinite(remaining) ? remaining : 0,
+        unmetered,
+      });
+    } catch {
+      setCreditState({ status: "unavailable", remaining: 0, unmetered: false });
+    }
+  };
+
   const refreshAll = async () => {
+    const creditsPromise = loadCredits();
+    try {
     setJobsWarning(null);
     let preflightData = null;
     try {
@@ -96,6 +120,9 @@ export default function RenderPanel({
       // Keep the last known job so a history blip does not hide a running render
       // or enable Start while that job is still going.
       setJobsWarning(status ? `${message} (HTTP ${status})` : message);
+    }
+    } finally {
+      await creditsPromise;
     }
   };
 
@@ -152,7 +179,17 @@ export default function RenderPanel({
     setTimeout(() => resolve(0), 5000);
   });
 
+  const creditsAllow = creditState.status === "ready"
+    && (creditState.unmetered || creditState.remaining >= RENDER_CREDIT_COST);
+
   const start = async () => {
+    if (!creditsAllow) {
+      const description = creditState.status === "ready"
+        ? `${RENDER_CREDIT_COST} credits required, ${creditState.remaining} remaining.`
+        : "Credit balance did not load. Render stays off.";
+      toast.error("Render stays off", { description });
+      return;
+    }
     setStarting(true);
     // Pre-render validation: VO vs scenes total mismatch
     try {
@@ -199,11 +236,26 @@ export default function RenderPanel({
       const jl = await api.get(`/projects/${projectId}/render/jobs`);
       setJobs((jl.data || []).map(normalizeJob));
       console.log("[Render] Queued", data);
+      await loadCredits();
     } catch (err) {
       const detail = err.response?.data?.detail;
       const msg = typeof detail === "object" ? JSON.stringify(detail) : String(detail || err.message);
       console.error("[Render] Start failed", err, detail, err.stack);
-      if (typeof detail === "object" && detail?.issues) {
+      if (err.response?.status === 402) {
+        const remaining = typeof detail === "object" && detail != null && detail.remaining != null
+          ? Number(detail.remaining)
+          : null;
+        toast.error("Render stays off", {
+          description: remaining == null || !Number.isFinite(remaining)
+            ? `${RENDER_CREDIT_COST} credits required.`
+            : `${RENDER_CREDIT_COST} credits required, ${remaining} remaining.`,
+        });
+        if (remaining == null || !Number.isFinite(remaining)) {
+          setCreditState({ status: "unavailable", remaining: 0, unmetered: false });
+        } else {
+          setCreditState({ status: "ready", remaining, unmetered: false });
+        }
+      } else if (typeof detail === "object" && detail?.issues) {
         toast.error("Cannot start render", { description: detail.issues.join(" · ") + ` | VO vs Scenes check: ${msg}` });
       } else if (err.response?.status === 409) {
         toast.error("Render already running", { description: msg });
@@ -256,9 +308,20 @@ export default function RenderPanel({
     );
   }
 
-  const canRender = preflight.ok && !preflightStale && jobsKnown && !ACTIVE_STATES.has(String(activeJob?.status || "").toLowerCase() || "");
+  const creditsAllowNow = creditState.status === "ready"
+    && (creditState.unmetered || creditState.remaining >= RENDER_CREDIT_COST);
+  const canRender = preflight.ok && !preflightStale && jobsKnown && !ACTIVE_STATES.has(String(activeJob?.status || "").toLowerCase() || "") && creditsAllowNow;
   const completed = String(activeJob?.status || "").toLowerCase() === "completed";
   const inProgress = activeJob && ACTIVE_STATES.has(String(activeJob.status || "").toLowerCase());
+  const creditStop = inProgress
+    ? ""
+    : creditState.status === "loading"
+      ? "Checking credits…"
+      : creditState.status !== "ready"
+        ? "Credit balance did not load. Render stays off."
+        : !creditsAllowNow
+          ? `${RENDER_CREDIT_COST} credits required, ${creditState.remaining} remaining. Render stays off.`
+          : "";
 
   const selectedThumbnail = (assets || []).find(
     (a) => a.id === project.selected_thumbnail_asset_id && a.asset_type === "generated_thumbnail"
@@ -388,6 +451,7 @@ export default function RenderPanel({
           starting={starting}
           onCancel={cancel}
           onRetry={start}
+          retryDisabled={!creditsAllowNow}
           downloadUrl={`${API}/projects/${projectId}/render/jobs/${activeJob.id}/download`}
         />
       )}
@@ -398,17 +462,28 @@ export default function RenderPanel({
           canEdit={canEdit}
           starting={starting}
           onRetry={start}
+          retryDisabled={!creditsAllowNow}
         />
       )}
 
       {/* Action bar */}
+      {creditStop && (
+        <p
+          data-testid="render-credit-stop"
+          className={creditState.status === "loading"
+            ? "font-mono text-[11px] text-[var(--ff-text-muted)]"
+            : "font-mono text-[11px] text-[var(--ff-error)]"}
+        >
+          {creditStop}
+        </p>
+      )}
       <div className="flex flex-wrap items-center gap-3">
         {canEdit && (
           <button
             data-testid="render-start-btn"
             onClick={start}
             disabled={!canRender || starting}
-            title={!preflight.ok ? `Missing: ${preflight.issues.join(", ")}` : ""}
+            title={creditStop || (!preflight.ok ? `Missing: ${preflight.issues.join(", ")}` : "")}
             className="flex items-center gap-2 bg-[#00E5FF] text-black font-semibold text-sm px-5 py-2.5 rounded-sm hover:bg-[#33EFFF] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
             {starting ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
