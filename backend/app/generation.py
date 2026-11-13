@@ -425,6 +425,88 @@ def _finalize_script(out: dict, narration_duration: float = None) -> dict:
     return out
 
 
+
+def _script_words(text: str) -> int:
+    return len(re.findall(r"\b\w+\b", text or ""))
+
+
+def _word_window(target_words: int) -> tuple[int, int]:
+    """Same 5% band as the voiceover tempo gate."""
+    low = max(1, math.floor(target_words * 0.95))
+    high = max(low, math.ceil(target_words * 1.05))
+    return low, high
+
+
+async def _rewrite_to_word_budget(coerced: dict, target_words: int, cache_key: str) -> dict:
+    """Retry when a draft is too short or too long for the narration budget.
+
+    The voiceover fit loop speaks whatever this returns. A short draft burns
+    the correction budget, returns 400, and drops scenes. Two rewrites, then
+    the draft closest to the budget. A caller whose model returns one fixed
+    script still receives that script.
+    """
+    if not coerced or not (coerced.get("full_script") or "").strip():
+        return coerced
+    low, high = _word_window(target_words)
+    best = coerced
+    best_words = _script_words(best.get("full_script"))
+    best_gap = abs(best_words - target_words)
+    if low <= best_words <= high:
+        return best
+    for attempt in range(2):
+        words = _script_words(best.get("full_script"))
+        if words < low:
+            direction = (
+                f"The draft is {words} words, which is short. Rewrite full_script to "
+                f"between {low} and {high} words by adding concrete steps, times, and "
+                "examples from the same topic."
+            )
+        else:
+            direction = (
+                f"The draft is {words} words, which is long. Rewrite full_script to "
+                f"between {low} and {high} words without changing the topic."
+            )
+        user = (
+            "Rewrite this faceless narration as strict JSON with keys "
+            "hook_option_one, hook_option_two, hook_option_three, selected_hook, "
+            "full_script, retention_beats, cta_block. "
+            f"{direction} full_script must be one string. Count the words before answering. "
+            "Do not add BEAT markers or section labels.\n\n"
+            f"DRAFT full_script:\n{best.get('full_script')}"
+        )
+        result = await _llm_json(SCRIPT_SYSTEM, user, f"{cache_key}-words-{attempt + 1}")
+        if not result:
+            break
+        rewritten = _coerce_script(result)
+        if not rewritten or not (rewritten.get("full_script") or "").strip():
+            break
+        got = _script_words(rewritten.get("full_script"))
+        logger.info(
+            "Script word rewrite %s attempt %s: %s words, target %s, window %s-%s",
+            cache_key, attempt + 1, got, target_words, low, high,
+        )
+        if abs(got - target_words) < best_gap:
+            best = rewritten
+            best_gap = abs(got - target_words)
+        if low <= got <= high:
+            return rewritten
+    final_words = _script_words(best.get("full_script"))
+    if not (low <= final_words <= high):
+        logger.warning(
+            "Script %s stayed outside the word window: %s words, target %s, window %s-%s",
+            cache_key, final_words, target_words, low, high,
+        )
+    return best
+
+
+async def _accept_script(coerced: dict, project: dict, target_words: int, narration_dur: float, cache_key: str) -> dict:
+    rewritten = await _rewrite_to_word_budget(coerced, target_words, cache_key)
+    if find_unsupported_tool_claims(rewritten, project):
+        logger.warning("Keeping the pre-rewrite script; the length rewrite named an unsupported tool")
+        rewritten = coerced
+    return _finalize_script(rewritten, narration_dur)
+
+
 async def generate_script(project: dict) -> dict:
     # EDUCATIONAL routing - use educational_script.txt for pet/health topics.
     # These topics MUST never run through the generic business origin-story prompt.
@@ -453,7 +535,8 @@ async def generate_script(project: dict) -> dict:
                     if unsupported:
                         logger.warning("Discarding generated script with unsupported tool claims: %s", unsupported)
                     else:
-                        return _finalize_script(coerced, narration_dur)
+                        accepted = await _accept_script(coerced, project, target_words, narration_dur, f"script-{project.get('id') or 'x'}")
+                        return accepted
             logger.warning("Educational template LLM failed - using on-topic deterministic fallback")
         # Educational topics never fall through to the generic business prompt:
         # straight to the on-topic deterministic fallback below.
@@ -486,7 +569,8 @@ Do not include BEAT markers, section headers, or structural labels (such as "BEA
                 if unsupported:
                     logger.warning("Discarding generated script with unsupported tool claims: %s", unsupported)
                 else:
-                    return _finalize_script(coerced, narration_dur)
+                    accepted = await _accept_script(coerced, project, target_words, narration_dur, f"script-{project.get('id') or 'x'}")
+                    return accepted
 
     # Deterministic fallback - on-topic skeleton, never a canned unrelated story.
     topic = (project.get("topic") or project.get("title") or "this subject").strip().rstrip("?")
