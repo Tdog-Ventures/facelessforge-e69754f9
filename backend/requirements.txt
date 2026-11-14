@@ -144,3 +144,6 @@ yarl==1.23.0
 zipp==3.23.0
 rapidfuzz==3.12.1
 dodopayments
+# Local word timestamps for scene alignment (render). av<14 keeps faster-whisper's decode_audio working.
+faster-whisper==1.2.1
+av==13.1.0

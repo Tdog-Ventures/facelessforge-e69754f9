@@ -8,9 +8,13 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+import difflib
+import logging
 import math
 import re
 from typing import Any
+
+logger = logging.getLogger("facelessforge.timing")
 
 
 DEFAULT_INTRO_SECONDS = Decimal("2.5")
@@ -295,8 +299,35 @@ class SceneAlignmentError(ValueError):
     """Fitted words do not match the script. Callers must not invent equal slots."""
 
 
+_UNIT_WORDS = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+               "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
+               "seventeen", "eighteen", "nineteen")
+_TENS_WORDS = ("", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety")
+
+
+def _spoken_number(value: int) -> str:
+    """Spell 0-999 the way narration reads it: 145 -> "onefortyfive"."""
+    if value < 20:
+        return _UNIT_WORDS[value]
+    if value < 100:
+        tens, unit = divmod(value, 10)
+        return _TENS_WORDS[tens] + (_UNIT_WORDS[unit] if unit else "")
+    hundreds, rest = divmod(value, 100)
+    if rest == 0:
+        return _UNIT_WORDS[hundreds] + "hundred"
+    if rest < 10:
+        return _UNIT_WORDS[hundreds] + "hundred" + _UNIT_WORDS[rest]
+    return _UNIT_WORDS[hundreds] + _spoken_number(rest)
+
+
 def _norm_token(text: Any) -> str:
-    return re.sub(r"[^\w]+", "", str(text or "").lower())
+    # Speech-to-text writes numbers as digits or words ("10" vs "ten",
+    # "three-fifty" vs "350") regardless of the script, so digit tokens up to
+    # 999 compare in their spoken spelling on both sides.
+    token = re.sub(r"[^\w]+", "", str(text or "").lower())
+    if token.isdigit() and len(token) <= 3 and not (len(token) > 1 and token.startswith("0")):
+        return _spoken_number(int(token))
+    return token
 
 
 def _script_tokens(text: Any) -> list[str]:
@@ -410,6 +441,87 @@ def _consume_scene_words(
     return consumed, cursor
 
 
+# Speech-to-text mishears a few words in a long narration ("three famous" for
+# "three-fifty", "omelet" for "omelette"). The strict matcher refuses those.
+# The tolerant matcher still times every scene from real spoken words, but
+# only for a long narration where nearly every word matched in order, and only
+# when each scene start is anchored on one of its first few words.
+_TOLERANT_MIN_SCRIPT_TOKENS = 40
+_TOLERANT_MIN_MATCH_RATIO = 0.85
+_TOLERANT_MIN_SCENE_RATIO = 0.6
+_TOLERANT_MAX_START_OFFSET = 3
+
+
+def _strict_scene_words(scenes: list[dict[str, Any]], words: list[dict[str, Any]]) -> list[list[int]]:
+    consumed_by_scene: list[list[int]] = []
+    cursor = 0
+    for index, scene in enumerate(scenes):
+        label = scene.get("scene_number") or index + 1
+        tokens = _script_tokens(scene.get("narration_text"))
+        consumed, cursor = _consume_scene_words(tokens, words, cursor, label)
+        consumed_by_scene.append(consumed)
+    cursor = _next_spoken(words, cursor)
+    if cursor < len(words):
+        raise SceneAlignmentError("Leftover spoken words do not belong to a script segment")
+    return consumed_by_scene
+
+
+def _tolerant_scene_words(scenes: list[dict[str, Any]], words: list[dict[str, Any]]) -> list[list[int]]:
+    script: list[tuple[int, int, str]] = []
+    for scene_index, scene in enumerate(scenes):
+        tokens = _script_tokens(scene.get("narration_text"))
+        if not tokens:
+            label = scene.get("scene_number") or scene_index + 1
+            raise SceneAlignmentError(f"Scene {label} has no narration to align")
+        script.extend((scene_index, offset, token) for offset, token in enumerate(tokens))
+    spoken = [(index, _word_token(word)) for index, word in enumerate(words) if _word_token(word)]
+    if len(script) < _TOLERANT_MIN_SCRIPT_TOKENS:
+        raise SceneAlignmentError("Narration is too short for tolerant matching")
+    if not spoken:
+        raise SceneAlignmentError("No spoken words to align")
+    matcher = difflib.SequenceMatcher(
+        None, [token for _scene, _offset, token in script], [token for _index, token in spoken],
+        autojunk=False,
+    )
+    matched: dict[int, int] = {}
+    for script_pos, spoken_pos, size in matcher.get_matching_blocks():
+        for step in range(size):
+            matched[script_pos + step] = spoken_pos + step
+    if (len(matched) < _TOLERANT_MIN_MATCH_RATIO * len(script)
+            or len(matched) < _TOLERANT_MIN_MATCH_RATIO * len(spoken)):
+        raise SceneAlignmentError(
+            f"Only {len(matched)} of {len(script)} script words matched {len(spoken)} spoken words"
+        )
+    starts: list[int] = []
+    last_matched_spoken = -1
+    first_pos = 0
+    for scene_index, scene in enumerate(scenes):
+        label = scene.get("scene_number") or scene_index + 1
+        positions = [pos for pos in range(first_pos, len(script)) if script[pos][0] == scene_index]
+        first_pos = positions[-1] + 1
+        hits = [pos for pos in positions if pos in matched]
+        if len(hits) < _TOLERANT_MIN_SCENE_RATIO * len(positions):
+            raise SceneAlignmentError(f"Scene {label} matched too few spoken words")
+        anchor = hits[0]
+        offset = script[anchor][1]
+        if offset > _TOLERANT_MAX_START_OFFSET:
+            raise SceneAlignmentError(f"Scene {label} start is not anchored on a spoken word")
+        start = 0 if scene_index == 0 else matched[anchor] - offset
+        if scene_index and start <= last_matched_spoken:
+            raise SceneAlignmentError(f"Scene {label} start overlaps the previous scene")
+        starts.append(start)
+        last_matched_spoken = matched[hits[-1]]
+    consumed_by_scene: list[list[int]] = []
+    for scene_index, start in enumerate(starts):
+        end = starts[scene_index + 1] if scene_index + 1 < len(starts) else len(spoken)
+        consumed = [spoken[pos][0] for pos in range(start, end)]
+        if not consumed:
+            label = scenes[scene_index].get("scene_number") or scene_index + 1
+            raise SceneAlignmentError(f"Scene {label} matched no spoken words")
+        consumed_by_scene.append(consumed)
+    return consumed_by_scene
+
+
 def align_scene_timeline(
     scenes: list[dict[str, Any]],
     words: list[dict[str, Any]],
@@ -437,16 +549,17 @@ def align_scene_timeline(
     if not isinstance(words, list) or not any(_word_token(word) for word in words):
         raise SceneAlignmentError("No spoken words to align")
 
-    consumed_by_scene: list[list[int]] = []
-    cursor = 0
-    for index, scene in enumerate(scenes):
-        label = scene.get("scene_number") or index + 1
-        tokens = _script_tokens(scene.get("narration_text"))
-        consumed, cursor = _consume_scene_words(tokens, words, cursor, label)
-        consumed_by_scene.append(consumed)
-    cursor = _next_spoken(words, cursor)
-    if cursor < len(words):
-        raise SceneAlignmentError("Leftover spoken words do not belong to a script segment")
+    try:
+        consumed_by_scene = _strict_scene_words(scenes, words)
+    except SceneAlignmentError as strict_error:
+        try:
+            consumed_by_scene = _tolerant_scene_words(scenes, words)
+        except SceneAlignmentError as tolerant_error:
+            logger.warning("scene alignment failed: strict=%s tolerant=%s", strict_error, tolerant_error)
+            raise strict_error from None
+        logger.warning(
+            "scene alignment used tolerant matching after strict failure: %s", strict_error,
+        )
 
     previous_word = -1.0
     boundaries = [0]

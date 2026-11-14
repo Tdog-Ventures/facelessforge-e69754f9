@@ -28,10 +28,8 @@ async def transcribe_words(audio_path: Path, *, language: str = "en") -> list[di
     """
     if not audio_path.exists():
         return []
-    if audio_path.stat().st_size > MAX_WHISPER_BYTES:
-        logger.warning("audio too large for Whisper (%d bytes); skipping STT", audio_path.stat().st_size)
-        return []
-    # Try faster-whisper local first (word_timestamps=True)
+    # Try faster-whisper local first (word_timestamps=True). It has no upload
+    # size limit; the byte cap below applies only to the hosted Whisper API.
     try:
         from faster_whisper import WhisperModel  # type: ignore
         model_size = os.environ.get("WHISPER_MODEL", "small")
@@ -48,12 +46,15 @@ async def transcribe_words(audio_path: Path, *, language: str = "en") -> list[di
             logger.info("faster-whisper transcribed %d words (word_timestamps=True)", len(out))
             return [w for w in out if w["word"]]
     except ImportError:
-        pass
+        logger.warning("faster-whisper is not installed; local STT unavailable")
     except Exception as e:  # noqa: BLE001
         logger.warning("faster-whisper failed: %s — falling back to OpenAI", e)
 
     api_key = os.environ.get("EMERGENT_LLM_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
+        return []
+    if audio_path.stat().st_size > MAX_WHISPER_BYTES:
+        logger.warning("audio too large for Whisper API (%d bytes); skipping STT", audio_path.stat().st_size)
         return []
     try:
         from emergentintegrations.llm.openai import OpenAISpeechToText  # type: ignore
