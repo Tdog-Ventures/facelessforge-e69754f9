@@ -392,6 +392,12 @@ def test_render_plans_pictures_from_the_spoken_words():
     assert "word_aligned=word_aligned" in source
     assert "aligned_frames=" in source
     assert "placeholder_scenes" in source
-    assert "if not word_aligned" in source
+    # The Visual Director shot plan must drive the sub-clip boundaries
+    # whenever directed shots exist — including word-aligned scenes. The
+    # old `if not word_aligned` guard silently dropped the plan after a
+    # duration fallback, which is exactly the pacing defect this test
+    # guards against.
+    assert "if directed_by_scene" in source
     assert "Refusing equal-duration scene slots" in source
-    assert "required_visuals = 1 if word_aligned else max(n_clips, 1)" in source
+    assert "required_visuals = max(n_clips, 1)" in source
+    assert "required_visuals = 1 if word_aligned" not in source

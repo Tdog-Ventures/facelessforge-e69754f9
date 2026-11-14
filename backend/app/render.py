@@ -2641,7 +2641,7 @@ async def _run_render(job_id: str, project_id: str):
                 logger.warning("VISUAL_DIRECTOR_STALE %s", exc)
                 directed_by_scene = {}
             else:
-                if not word_aligned:
+                if directed_by_scene:
                     for i, scene in enumerate(scenes):
                         shots = directed_by_scene.get(scene.get("id")) or []
                         if shots and i in plan_by_idx:
@@ -2657,7 +2657,7 @@ async def _run_render(job_id: str, project_id: str):
             # failures into a long, unnecessary retry loop before fallback.
             # A split must reuse the accepted visual. One source per piece
             # would search for an unrelated picture.
-            required_visuals = 1 if word_aligned else max(n_clips, 1)
+            required_visuals = max(n_clips, 1)
             if directed_by_scene.get(scene.get("id")):
                 try:
                     visuals = await resolve_directed_scene(

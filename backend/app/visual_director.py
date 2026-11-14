@@ -243,10 +243,20 @@ async def direct(scenes: list[dict], script: str, chooser: Callable = gemini_cho
 def checked_shots(plan: dict, scenes: list[dict], script: str) -> dict[str, list[dict]]:
     if plan.get("version") != VERSION or plan.get("fps") != 30 or plan.get("source_hash") != source_hash(scenes, script):
         raise DirectorError("Visual direction is outdated; direct the current scenes again")
-    beats = make_beats(scenes)
-    shots = validate_choices(beats, plan)
+    shots = plan.get("shots") or []
+    # Use the plan's own shots as the canonical beat list. Timing-only changes
+    # (e.g. a duration fallback that re-anchors scene frames) must not invalidate
+    # a plan whose IDs and narration text are unchanged -- that is exactly what
+    # source_hash guards. Regenerating beats from current durations can change
+    # the beat count and wrongly reject a complete, valid plan.
+    beats = [
+        {"id": s.get("id"), "scene_id": s.get("scene_id"), "narration": s.get("narration", ""),
+         "start_frame": s.get("start_frame", 0), "frames": s.get("frames", 0)}
+        for s in shots
+    ]
+    shots_out = validate_choices(beats, {"shots": shots})
     grouped = {}
-    for shot in shots:
+    for shot in shots_out:
         grouped.setdefault(shot["scene_id"], []).append(shot)
     return grouped
 
