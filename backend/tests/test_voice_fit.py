@@ -97,7 +97,7 @@ class _FakeCursor:
 
 
 class FakeDB:
-    def __init__(self, project, script, assets=None):
+    def __init__(self, project, script, assets=None, scenes=None):
         self.projects = ProjectCollection("projects", [project])
         self.projects.calls = []
         update_project = self.projects.update_one
@@ -109,8 +109,9 @@ class FakeDB:
         self.projects.update_one = tracked_update
         self.scripts = FakeCollection([script] if script else [])
         self.assets = FakeCollection(assets)
-        self.scenes = FakeCollection([{"id": "sc1", "project_id": project["id"],
-                                       "duration": 27.5, "end_time": 27.5}])
+        self.scenes = FakeCollection(
+            scenes if scenes is not None
+            else [{"id": "sc1", "project_id": project["id"], "duration": 27.5, "end_time": 27.5}])
         self.metadata_packages = FakeCollection([{"id": "m1", "project_id": project["id"]}])
         self.render_jobs = FakeCollection()
 
@@ -288,9 +289,10 @@ async def test_manual_drift_fails_with_numbers_never_rewritten(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_ai_shortfall_corrected_then_fits(monkeypatch):
+    """Pre-scene state: AI scripts are still corrected (bounded) when no scenes exist."""
     short_text = "short ai narration " * 12
     fixed_text = "corrected full narration preserving the original meaning throughout " * 9
-    db = FakeDB(_project(), _script(short_text, source="ai_generated"))
+    db = FakeDB(_project(), _script(short_text, source="ai_generated"), scenes=[])
     monkeypatch.setattr(api_routes, "get_db", lambda: db)
     tts_calls = []
     monkeypatch.setattr(api_routes.tts_service, "generate_voiceover",
@@ -320,8 +322,9 @@ async def test_ai_shortfall_corrected_then_fits(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_ai_exhaustion_stops_after_two_corrections(monkeypatch):
+    """Pre-scene state: corrections stay bounded while no scene work exists."""
     text = "short ai narration " * 12
-    db = FakeDB(_project(), _script(text, source="ai_generated"))
+    db = FakeDB(_project(), _script(text, source="ai_generated"), scenes=[])
     monkeypatch.setattr(api_routes, "get_db", lambda: db)
     tts_calls = []
     monkeypatch.setattr(api_routes.tts_service, "generate_voiceover",

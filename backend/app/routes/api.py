@@ -3207,6 +3207,96 @@ async def _record_voice_fit(db, project_id: str, script_version: str, attempts: 
         pass
 
 
+def _directed_plan_saved(project: dict) -> bool:
+    """A saved Visual Director plan is completed scene work, like the scenes."""
+    plan = project.get("visual_director") or {}
+    return bool(plan.get("enabled") and plan.get("shots"))
+
+
+async def _scene_work_exists(db, project: dict, project_id: str) -> bool:
+    """True once scenes or a Visual Director plan exist for the project.
+
+    Narration-length correction must never republish a script over completed
+    scene work, so the check runs against the stored scenes, not a cached view.
+    """
+    if _directed_plan_saved(project):
+        return True
+    found = await db.scenes.find({"project_id": project_id}, {"_id": 0}).to_list(1)
+    return bool(found)
+
+
+async def _reusable_selected_voiceover(
+    db, project: dict, project_id: str, narration_budget: float,
+    voice: str, tone: Optional[str], text_override: Optional[str],
+) -> Optional[dict]:
+    """Return the selected full-script take when it already fits the budget.
+
+    A retry must never charge a second take while a valid one is selected.
+    Explicit intent always regenerates: new text, another voice or tone, or a
+    take that no longer fits the selected duration.
+    """
+    if (text_override or "").strip():
+        return None
+    selected_id = project.get("selected_voiceover_asset_id")
+    if not selected_id:
+        return None
+    from ..render import is_renderable_voice
+
+    asset = await db.assets.find_one(
+        {"project_id": project_id, "id": selected_id, "asset_type": "voiceover_audio", "scene_id": None},
+        {"_id": 0},
+    )
+    if not asset or not is_renderable_voice(asset):
+        return None
+    if (asset.get("voice_style") or "") != (voice or ""):
+        return None
+    if (asset.get("tone") or None) != (tone or None):
+        return None
+    try:
+        measured = float(asset.get("duration") or 0)
+    except (TypeError, ValueError):
+        return None
+    if measured <= 0 or not narration_fits_budget(measured, narration_budget):
+        return None
+    return asset
+
+
+async def _persist_fitted_scene_timeline(
+    db, project_id: str, target_seconds: float, *, intro_seconds: float,
+) -> int:
+    """Re-anchor stored scene timing to the fitted narration budget.
+
+    The duration fallback moves the selected target to the measured take, so
+    stored scenes keep their content but must carry the frame allocation the
+    new budget implies — exactly what render-time normalization computes.
+    Scene IDs, narration text and every attachment keep their identity; the
+    Visual Director plan is hashed over IDs and narration only, so it stays
+    valid. Returns the number of scenes re-anchored.
+    """
+    from ..timing import TimingContract, normalize_scene_timeline
+
+    scenes = await db.scenes.find({"project_id": project_id}, {"_id": 0}).sort("scene_number", 1).to_list(500)
+    if not scenes:
+        return 0
+    timing = TimingContract.from_target(float(target_seconds), intro_seconds=intro_seconds)
+    normalized = normalize_scene_timeline(scenes, narration_frames=timing.narration_frames, fps=timing.fps)
+    timing_keys = ("scene_number", "start_frame", "end_frame", "duration_frames",
+                   "start_time", "end_time", "duration")
+    re_anchored = 0
+    for scene in normalized:
+        result = await db.scenes.update_one(
+            {"id": scene.get("id"), "project_id": project_id},
+            {"$set": {key: scene.get(key) for key in timing_keys}},
+        )
+        re_anchored += 1 if getattr(result, "matched_count", 0) else 0
+    logger = logging.getLogger("facelessforge.routes")
+    logger.info(
+        "duration fallback re-anchored %s/%s scenes to %.2fs narration budget project=%s",
+        re_anchored, len(scenes), timing.narration_seconds, project_id,
+    )
+    return re_anchored
+
+
 @router.post("/projects/{project_id}/voiceover/generate-script")
 async def generate_full_voiceover(
     project_id: str,
@@ -3233,6 +3323,17 @@ async def generate_full_voiceover(
     )
     fit = project.get("voice_fit") or {}
     script_version = f"{script.get('id')}:{script.get('updated_at')}"
+    # Idempotent retries: a valid selected take is reused, never re-charged.
+    reused = await _reusable_selected_voiceover(
+        db, project, project_id, narration_budget, voice, body.tone, body.text_override,
+    )
+    if reused is not None:
+        logger = logging.getLogger("facelessforge.routes")
+        logger.info(
+            "voiceover generate-script reused selected take %s project=%s (no provider call)",
+            reused.get("id"), project_id,
+        )
+        return await _attach_project_view(db, await db.projects.find_one({"id": project_id}, {"_id": 0}))
     if fit.get("script_version") == script_version:
         attempts_used = int(fit.get("attempts") or 0)
     else:
@@ -3268,10 +3369,20 @@ async def generate_full_voiceover(
             actions.append(f"attempt {attempts_used}: measured {measured:.2f}s fits {narration_budget:.2f}s budget")
             break
         # Outside tolerance. Keep the spoken take and move the target to the
-        # length that take fits. Manual text is never rewritten. Stop only
-        # when the audio cannot fit any legal duration (5s to 60min).
+        # length that take fits. Manual text is never rewritten. Once scenes
+        # or a Visual Director plan exist, the script is frozen as well: a
+        # narration-length mismatch republishes the script and would destroy
+        # the completed scenes, directed stock and concepts, so only the
+        # duration moves. Stop only when the audio cannot fit any legal
+        # duration (5s to 60min).
         intro_seconds = 0.0 if project.get("production_mode") == "commercial_ad" else 2.5
-        if script_source == "manual" or attempts_used >= 3:
+        scene_work = await _scene_work_exists(db, project, project_id)
+        if scene_work and script_source != "manual":
+            actions.append(
+                f"attempt {attempts_used}: measured {measured:.2f}s outside {narration_budget:.2f}s budget — "
+                "scenes and directed visuals are kept; fitting the duration to the take"
+            )
+        if script_source == "manual" or attempts_used >= 3 or scene_work:
             fitted = suggest_fitted_duration(voiceover_seconds=measured, intro_seconds=intro_seconds)
             current_target = int(float(project.get("target_duration") or 0))
             if fitted is not None and int(fitted) != current_target:
@@ -3290,13 +3401,20 @@ async def generate_full_voiceover(
                 1 if script_source == "manual" else attempts_used,
                 llm_calls, measured, actions,
             )
-            code = "voiceover_length_mismatch" if script_source == "manual" else "voiceover_fit_exhausted"
+            code = "voiceover_length_mismatch" if script_source == "manual" else (
+                "voiceover_duration_unfit" if scene_work else "voiceover_fit_exhausted")
+            message = (
+                f"Narration is {measured:.1f}s and cannot fit any duration from 5s to 60min "
+                f"within 5% of a {current_target:.0f}s target."
+            )
+            if scene_work:
+                message += (
+                    " The generated narration and every scene, directed visual and concept"
+                    " were kept; regenerate the voiceover or edit the script explicitly."
+                )
             raise HTTPException(status_code=400, detail={
                 "code": code,
-                "message": (
-                    f"Narration is {measured:.1f}s and cannot fit any duration from 5s to 60min "
-                    f"within 5% of a {current_target:.0f}s target."
-                ),
+                "message": message,
                 "measured_seconds": round(measured, 2),
                 "narration_budget_seconds": round(narration_budget, 2),
                 "autofit_suggestion": None,
@@ -3359,6 +3477,24 @@ async def generate_full_voiceover(
             {"id": project_id},
             {"$set": {"target_duration": duration_fallback, "updated_at": _now()}},
         )
+        # The selected target moved to the measured take, so stored scenes must
+        # carry the frame allocation the new budget implies. Scene IDs,
+        # narration text, attachments and the director plan are untouched.
+        intro_seconds = 0.0 if project.get("production_mode") == "commercial_ad" else 2.5
+        try:
+            await _persist_fitted_scene_timeline(
+                db, project_id, duration_fallback, intro_seconds=intro_seconds,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail={
+                "code": "scene_timeline_reanchor_failed",
+                "message": (
+                    "The fitted duration cannot allocate the stored scenes. "
+                    "The narration and all scene work were kept; regenerate the "
+                    "scenes or apply an explicit duration fit."
+                ),
+                "detail": str(exc),
+            }) from None
     await _record_voice_fit(db, project_id, script_version, attempts_used, attempts_used, llm_calls,
                             float(payload.get("duration") or 0), actions)
     project_set = {"selected_voiceover_asset_id": payload["id"], "updated_at": _now()}
