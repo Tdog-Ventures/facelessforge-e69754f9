@@ -1,6 +1,6 @@
 """Pydantic models for request/response schemas."""
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Literal
+from typing import List, Optional, Literal
 from pydantic import BaseModel, EmailStr, Field, ConfigDict
 # ---------- Auth ----------
 class RegisterRequest(BaseModel):
@@ -22,15 +22,6 @@ class ForgotPasswordRequest(BaseModel):
 class ResetPasswordRequest(BaseModel):
     token: str = Field(min_length=16, max_length=200)
     new_password: str = Field(min_length=6, max_length=200)
-
-
-class UserPublic(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str
-    name: str
-    email: EmailStr
-    role: str
-    created_at: datetime
 
 
 # ---------- Project ----------
@@ -120,64 +111,6 @@ class Project(BaseModel):
     platforms: List[str] = []
     created_at: datetime
     updated_at: datetime
-
-
-# ---------- Script / Scene / Metadata (output payloads) ----------
-class ScriptOut(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str
-    project_id: str
-    hook_option_one: str
-    hook_option_two: str
-    hook_option_three: str
-    selected_hook: str
-    full_script: str
-    retention_beats: List[str]
-    cta_block: str
-    word_count: int
-    estimated_duration: int
-    created_at: datetime
-    updated_at: datetime
-
-
-class SceneOut(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str
-    project_id: str
-    scene_number: int
-    start_time: int
-    end_time: int
-    narration_text: str
-    visual_direction: str
-    asset_type: str
-    search_terms: List[str]
-    image_prompt: str
-    caption_text: str
-    status: str
-
-
-class MetadataOut(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str
-    project_id: str
-    title_options: List[str]
-    selected_title: str
-    description: str
-    tags: List[str]
-    hashtags: List[str]
-    chapters: List[dict]
-    pinned_comment: str
-
-
-class ThumbnailConcept(BaseModel):
-    thumbnail_title_text: str
-    visual_composition: str
-    emotion_angle: str
-    background_idea: str
-    subject_focal_point: str
-    colour_direction: str
-    click_trigger: str
-    image_prompt: str
 
 
 # ---------- Script editing ----------
@@ -291,145 +224,6 @@ class RenderStartRequest(BaseModel):
     aspect_ratio: Optional[str] = None  # 9:16|1:1|16:9 override at render time
 
 
-class ReleaseReviewRequest(BaseModel):
-    """Human visual sign-off after watching the finished client ad."""
-    scene_reviews: List[Dict[str, Any]] = Field(min_length=1)
-    approved: bool
-    notes: Optional[str] = Field(default=None, max_length=2000)
-
-
 # ---------- Share ----------
 class ShareUpdate(BaseModel):
     title_override: Optional[str] = Field(default=None, max_length=200)
-
-# --- Billing models (Paddle) ---
-"""Billing models - Paddle subscription & credit transactions."""
-from datetime import datetime, timezone
-from typing import Optional
-from pydantic import BaseModel, Field
-
-
-def _now():
-    return datetime.now(timezone.utc)
-
-
-class Subscription(BaseModel):
-    user_id: str
-    paddle_customer_id: Optional[str] = None
-    paddle_subscription_id: Optional[str] = None
-    paddle_price_id: Optional[str] = None
-    plan: str = Field(default="free", description="free/starter/creator/pro/agency")
-    status: str = Field(default="active", description="active/canceled/past_due/inactive")
-    credits_monthly: int = 30
-    credits_remaining: int = 30
-    current_period_end: Optional[datetime] = None
-    created_at: datetime = Field(default_factory=_now)
-    updated_at: datetime = Field(default_factory=_now)
-
-    class Config:
-        extra = "allow"
-
-
-class CreditTransaction(BaseModel):
-    user_id: str
-    amount: int  # positive credit, negative debit
-    reason: str = Field(description="e.g. purchase starter, auto-attach scene 02, monthly reset")
-    created_at: datetime = Field(default_factory=_now)
-
-    class Config:
-        extra = "allow"
-
-
-# --- Release Contract (v6.2) ---
-class DisclosureDecision(BaseModel):
-    contains_synthetic_media: bool = False
-    is_realistic_alteration: bool = False
-    is_altered: bool = False
-    rationale: str = Field(default="", max_length=1000)
-
-
-class ReleaseManifest(BaseModel):
-    tenant_id: str
-    channel_id: Optional[str] = None
-    project_id: str
-    job_id: str
-    video_hash: str  # sha256:ffprobe file
-    thumbnail_hash: Optional[str] = None
-    metadata_hash: Optional[str] = None
-    duration: float
-    disclosure_decision: DisclosureDecision = Field(default_factory=DisclosureDecision)
-    qa_version: str = "v1"
-    policy_version: str = "2026-09-10"
-    approver: Optional[str] = None
-    created_at: datetime = Field(default_factory=_now)
-
-
-class QAReport(BaseModel):
-    job_id: str
-    project_id: str
-    version: str = "v1"
-    checks: List[dict] = Field(default_factory=list)
-    blocked: List[str] = Field(default_factory=list)
-    created_at: datetime = Field(default_factory=_now)
-
-
-class Approval(BaseModel):
-    project_id: str
-    job_id: str
-    video_hash: str
-    manifest_hash: str
-    approver_id: str
-    approval_time: datetime = Field(default_factory=_now)
-    expiry: Optional[datetime] = None
-
-
-class RightsRecord(BaseModel):
-    project_id: str
-    asset_id: str
-    source: Optional[str] = None
-    licence: Optional[str] = None
-    licence_url: Optional[str] = None
-    usage: Optional[str] = None
-    sha256: Optional[str] = None
-    original_page_url: Optional[str] = None
-    ownership_declaration: Optional[str] = None
-    retrieval_time: Optional[datetime] = None
-    claim: Optional[str] = None
-
-
-class ClaimRecord(BaseModel):
-    project_id: str
-    claim_id: str = Field(default_factory=lambda: __import__("uuid").uuid4().hex[:8])
-    exact_wording: str
-    source_url: Optional[str] = None
-    publisher: Optional[str] = None
-    source_date: Optional[datetime] = None
-    retrieval_time: Optional[datetime] = None
-    excerpt: Optional[str] = None
-    region: Optional[str] = None
-    factual_status: Optional[str] = None  # firsthand, attributed, measured, inference
-    contradiction_notes: Optional[str] = None
-    reviewer: Optional[str] = None
-    script_location: Optional[str] = None
-
-
-class IntakePacket(BaseModel):
-    project_id: str
-    tenant_id: Optional[str] = None
-    logo: Optional[str] = None  # base64 or URL
-    colours: Optional[List[str]] = None
-    service_descriptions: Optional[str] = None
-    candidate_images: Optional[List[dict]] = None  # [{url, original_url, ownership_declaration, intended_use, consent}]
-    version: int = 1
-    created_at: datetime = Field(default_factory=_now)
-
-
-class PublishIntent(BaseModel):
-    release_id: str
-    channel_id: str
-    project_id: str
-    job_id: str
-    status: str = "pending"  # pending, uploading, processing, published, failed
-    session_ref: Optional[str] = None
-    created_at: datetime = Field(default_factory=_now)
-    updated_at: datetime = Field(default_factory=_now)

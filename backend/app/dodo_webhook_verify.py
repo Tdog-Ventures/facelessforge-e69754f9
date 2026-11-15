@@ -194,36 +194,3 @@ def verify_signature(payload: bytes, headers: Dict[str, str], secret: Optional[s
             _verify_standard_webhooks(payload, norm_headers, secret)
             return
         raise WebhookVerificationError(str(e))
-
-
-def check_and_mark_webhook(redis_client, webhook_id: str, ttl_seconds: int = 86400) -> bool:
-    """
-    Idempotency helper using Redis SET NX.
-    Returns True if webhook_id was newly marked (should process), False if already seen (skip).
-    Uses Redis key dodo:webhooks:processed:<id> with TTL.
-    Falls back to SISMEMBER if redis_client doesn't support SET NX.
-    """
-    if not webhook_id:
-        return True
-    try:
-        # Try SET NX with TTL (atomic)
-        # redis-py: set(name, value, nx=True, ex=ttl)
-        result = redis_client.set(f"dodo:webhooks:processed:{webhook_id}", "1", nx=True, ex=ttl_seconds)
-        if result is True or result == True:  # type: ignore
-            # Also maintain legacy set for backward compat
-            try:
-                redis_client.sadd("dodo:webhooks:processed", webhook_id)
-            except Exception:
-                pass
-            return True
-        else:
-            return False
-    except Exception:
-        # Fallback to SISMEMBER / SADD pattern
-        try:
-            if redis_client.sismember("dodo:webhooks:processed", webhook_id):
-                return False
-            redis_client.sadd("dodo:webhooks:processed", webhook_id)
-            return True
-        except Exception:
-            return True

@@ -667,30 +667,6 @@ async def create_transaction(body: CreateTransactionRequest, user=Depends(get_cu
         txn_id = f"txn_mock_fallback_{uuid.uuid4().hex[:8]}"
         return {"transaction_id": txn_id, "checkout_url": f"/billing/success?transaction_id={txn_id}&plan={body.plan}", "mock": True, "warning": str(e)[:200]}
 
-# Credit helpers used by routes
-async def get_credits(tenant_id: str) -> int:
-    from .db import get_db
-    db = get_db()
-    doc = await db.ff_credits.find_one({"tenant_id": tenant_id}, {"_id": 0})
-    return int(doc.get("credits") or 0) if doc else 0
-
-async def consume_credit(tenant_id: str) -> bool:
-    from .db import get_db
-    db = get_db()
-    doc = await db.ff_credits.find_one({"tenant_id": tenant_id}, {"_id": 0})
-    if not doc or int(doc.get("credits") or 0) <= 0:
-        return False
-    await db.ff_credits.update_one({"tenant_id": tenant_id}, {"$inc": {"credits": -1}, "$set": {"updated_at": _now()}})
-    # mirror to redis
-    try:
-        import redis.asyncio as aioredis
-        url = os.environ.get("REDIS_URL") or "redis://127.0.0.1:6379"
-        r = aioredis.from_url(url, decode_responses=True)
-        await r.decr(f"ff:tenant:{tenant_id}:credits")
-        await r.close()
-    except: pass
-    return True
-
 @router.get("/motion-proof")
 async def motion_proof():
     # Expose motion 29.5 proof for journalctl
