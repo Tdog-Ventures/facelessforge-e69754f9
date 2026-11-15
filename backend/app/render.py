@@ -1043,19 +1043,72 @@ def _audio_suffix_for(asset: dict) -> str:
     return ".wav"
 
 
+def _has_storage_key(asset: dict) -> bool:
+    key = asset.get("storage_key") if isinstance(asset, dict) else None
+    return isinstance(key, str) and bool(key.strip())
+
+
+async def _materialize_stored_object(asset: dict, dest: Path, *, max_bytes: int) -> bool:
+    """Copy an asset onto ``dest`` by ``storage_key``.
+
+    The URL saved on the asset is a presigned R2/S3 URL. It expires (default
+    24h) while the object remains. Read through the storage client so a render
+    does not depend on that URL. Returns False when there is no key or the
+    object cannot be read; callers then use a local file or the stored URL.
+    """
+    if not _has_storage_key(asset):
+        return False
+    store = get_storage()
+    download = getattr(store, "download_object", None)
+    if not callable(download):
+        return False
+    key = asset.get("storage_key")
+    try:
+        ok = await asyncio.to_thread(download, key, dest, max_bytes=max_bytes)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("stored object fetch failed for %s: %s", key, type(exc).__name__)
+        ok = False
+    if ok and dest.is_file() and dest.stat().st_size > 0:
+        return True
+    try:
+        dest.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return False
+
+
 async def _ensure_audio_local(asset: dict, work_dir: Path, name: str) -> Optional[Path]:
-    """Return a local Path to the asset's audio file, downloading from remote
-    storage (R2/S3) if needed. Returns None if no usable source."""
+    """Return a local Path to the asset's audio file.
+
+    Order: an on-disk file_path inside the storage root, then the object
+    stored under storage_key, then the saved URL (stock or a still-valid
+    presigned URL). Returns None if no usable source.
+    """
     local = _local_path_for_asset(asset)
     if local:
         return local
+    suffix = _audio_suffix_for(asset)
+    out = work_dir / f"{name}{suffix}"
+    if await _materialize_stored_object(asset, out, max_bytes=80 * 1024 * 1024):
+        logger.info("audio loaded from storage_key %s", asset.get("storage_key"))
+        return out
     url = asset.get("preview_url") or asset.get("download_url")
     if not url:
         return None
-    suffix = _audio_suffix_for(asset)
-    out = work_dir / f"{name}{suffix}"
     ok = await _download_to(url, out, max_bytes=80 * 1024 * 1024, allow_audio=True)
     return out if ok else None
+
+
+def _write_thumbnail_png(src: Path, out: Path) -> bool:
+    """Resize ``src`` to the render frame and save it as PNG. False if not an image."""
+    try:
+        img = Image.open(src).convert("RGB")
+        img = img.resize((WIDTH, HEIGHT), Image.LANCZOS)
+        img.save(out, format="PNG")
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Thumbnail image load failed (%s)", type(exc).__name__)
+        return False
 
 
 async def _resolve_thumbnail(asset: dict, project: dict, work_dir: Path) -> Path:
@@ -1069,26 +1122,28 @@ async def _resolve_thumbnail(asset: dict, project: dict, work_dir: Path) -> Path
     out = work_dir / "intro_fallback.png"
     local = _local_path_for_asset(asset)
     if local and local.suffix.lower() in (".png", ".jpg", ".jpeg"):
-        try:
-            img = Image.open(local).convert("RGB")
-            img = img.resize((WIDTH, HEIGHT), Image.LANCZOS)
-            img.save(out, format="PNG")
+        if _write_thumbnail_png(local, out):
             return out
-        except Exception as e:
-            logger.warning("Thumbnail PIL load failed (%s) — using caption frame", e)
-    elif asset.get("download_url") or asset.get("preview_url"):
-        url = asset.get("download_url") or asset.get("preview_url")
-        tmp = work_dir / "intro_dl.bin"
-        ok = await _download_to(url, tmp, max_bytes=20 * 1024 * 1024)
-        if ok:
+        logger.warning("Thumbnail PIL load failed — using caption frame")
+    else:
+        stored = work_dir / "intro_stored.bin"
+        if await _materialize_stored_object(asset, stored, max_bytes=20 * 1024 * 1024):
             try:
-                img = Image.open(tmp).convert("RGB")
-                img = img.resize((WIDTH, HEIGHT), Image.LANCZOS)
-                img.save(out, format="PNG")
-                tmp.unlink(missing_ok=True)
-                return out
-            except Exception:
-                tmp.unlink(missing_ok=True)
+                if _write_thumbnail_png(stored, out):
+                    logger.info("thumbnail loaded from storage_key %s", asset.get("storage_key"))
+                    return out
+            finally:
+                stored.unlink(missing_ok=True)
+        url = asset.get("download_url") or asset.get("preview_url")
+        if url:
+            tmp = work_dir / "intro_dl.bin"
+            ok = await _download_to(url, tmp, max_bytes=20 * 1024 * 1024)
+            if ok:
+                try:
+                    if _write_thumbnail_png(tmp, out):
+                        return out
+                finally:
+                    tmp.unlink(missing_ok=True)
     # Fallback caption frame
     title = (asset.get("brief_snapshot") or {}).get("thumbnail_title_text") or project.get("name") or "FacelessForge"
     return _pil_caption_frame(
@@ -1199,6 +1254,27 @@ class AttachedFootageUnavailable(RuntimeError):
     """Every attached candidate failed and a stock retry was not wanted."""
 
 
+_STORED_VISUAL_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".mp4", ".mov", ".webm"}
+
+
+async def _fetch_stored_visual(asset: dict, out_dir: Path, idx: int) -> Optional[Path]:
+    """Download a client/generated visual from object storage by storage_key.
+
+    Provider stock keeps using its own URL. Only our objects (uploads,
+    generated thumbnails used as footage) have a storage_key, and the URL
+    stored next to it expires.
+    """
+    key = str(asset.get("storage_key") or "")
+    suffix = Path(key.split("?", 1)[0]).suffix.lower()
+    if suffix not in _STORED_VISUAL_SUFFIXES:
+        return None
+    digest = hashlib.sha256(key.encode()).hexdigest()[:24]
+    target = out_dir / f"scene_{idx:03d}_obj_{digest}{suffix}"
+    if await _materialize_stored_object(asset, target, max_bytes=MAX_VIDEO_DOWNLOAD_BYTES):
+        return target
+    return None
+
+
 async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
                                  project: dict, work_dir: Path, idx: int,
                                  used_ext_ids: Optional[set] = None,
@@ -1238,7 +1314,6 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
             continue
         url = a.get("download_url") or a.get("preview_url") or a.get("source_url")
         local = _local_path_for_asset(a)
-        ext = (Path(local).suffix.lower() if local else "")
         ext_id = _asset_dedupe_id(a, url, local)
         if ext_id and str(ext_id) in used_ext_ids:
             logger.info(
@@ -1246,6 +1321,11 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
                 idx + 1, ext_id,
             )
             continue
+        if local is None and _has_storage_key(a):
+            fetched = await _fetch_stored_visual(a, out_dir, idx)
+            if fetched is not None:
+                local = fetched
+        ext = (Path(local).suffix.lower() if local else "")
         # ── Local static images: return as 'image' for Ken Burns (not skip) ──
         if local and ext in (".png", ".jpg", ".jpeg", ".webp"):
             logger.info("scene=%02d FOOTAGE_SELECT type=local_image ext_id=%s path=%s",

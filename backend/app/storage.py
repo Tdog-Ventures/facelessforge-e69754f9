@@ -14,6 +14,8 @@ Public API (used by render/tts/thumbnail_images):
     info = store.save_file(local_path, key, content_type)
     # info = {"url": str, "preview_path": Optional[str], "key": str,
     #         "file_path": Optional[Path], "remote": bool}
+    store.download_object(key, dest_path)   # read by storage_key; ignores saved URLs
+    resolve_asset_url(asset)                # fresh browser URL from storage_key
 
 Hard rules:
   * The frontend NEVER receives an internal /app/... path. Public payloads must
@@ -42,6 +44,21 @@ _REDACT_PATTERNS = (
     "AKIA", "ASIA", "aws_secret", "AWS_SECRET", "STORAGE_SECRET",
     "STORAGE_ACCESS", "X-Amz-Signature", "Signature=",
 )
+
+
+def clean_storage_key(key: object) -> Optional[str]:
+    """Return a relative object key, or None when it could escape the bucket/root.
+
+    Leading slashes are stripped. Empty segments, ``.`` and ``..`` are rejected
+    so a stored key cannot be used as a path traversal.
+    """
+    if not isinstance(key, str):
+        return None
+    clean = key.strip().replace("\\", "/").lstrip("/")
+    parts = clean.split("/") if clean else []
+    if not clean or any(part in ("", ".", "..") for part in parts):
+        return None
+    return clean
 
 
 def _safe_error(exc: BaseException, max_len: int = 240) -> str:
@@ -74,6 +91,10 @@ class StorageBackend:
 
     def delete(self, *, key: Optional[str] = None, url: Optional[str] = None) -> bool:
         raise NotImplementedError
+
+    def download_object(self, key: str, dest: Path, *, max_bytes: Optional[int] = None) -> bool:
+        """Copy ``key`` onto ``dest``. False when the object cannot be read."""
+        return False
 
     def healthcheck(self) -> dict:
         raise NotImplementedError
@@ -117,6 +138,30 @@ class LocalStorage(StorageBackend):
         abs_base = os.environ.get("FRONTEND_URL", "").rstrip("/")
         url = f"{abs_base}{rel}" if abs_base else rel
         return SaveResult(url=url, preview_path=rel, key=key, file_path=target, remote=False)
+
+    def download_object(self, key: str, dest: Path, *, max_bytes: Optional[int] = None) -> bool:
+        clean = clean_storage_key(key)
+        if not clean:
+            return False
+        src = self.root / clean
+        try:
+            # Reject symlink escapes. resolve() follows links, so a link is not
+            # equal to the path we were asked to read.
+            if src.resolve() != src or not src.is_file():
+                return False
+            size = src.stat().st_size
+        except OSError:
+            return False
+        if size <= 0 or (max_bytes is not None and size > max_bytes):
+            return False
+        try:
+            if dest.resolve() == src:
+                return True
+        except OSError:
+            return False
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest)
+        return dest.is_file() and dest.stat().st_size > 0
 
     def delete(self, *, key: Optional[str] = None, url: Optional[str] = None) -> bool:
         if key:
@@ -278,6 +323,47 @@ class S3Storage(StorageBackend):
             pass
         return SaveResult(url=url, preview_path=None, key=key, file_path=None, remote=True)
 
+    def download_object(self, key: str, dest: Path, *, max_bytes: Optional[int] = None) -> bool:
+        """Download by key. Does not use a previously signed URL."""
+        clean = clean_storage_key(key)
+        if not clean:
+            return False
+        try:
+            client = self._client_or_raise()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("object download unavailable for %s: %s", clean, _safe_error(exc))
+            return False
+        if max_bytes is not None:
+            try:
+                head = client.head_object(Bucket=self.bucket, Key=clean)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("object head failed for %s: %s", clean, _safe_error(exc))
+                return False
+            length = head.get("ContentLength") if hasattr(head, "get") else None
+            try:
+                if length is not None and int(length) > max_bytes:
+                    logger.warning("object %s exceeds %s bytes", clean, max_bytes)
+                    return False
+            except (TypeError, ValueError):
+                return False
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        partial = dest.parent / (dest.name + ".part")
+        try:
+            client.download_file(self.bucket, clean, str(partial))
+            size = partial.stat().st_size if partial.is_file() else 0
+            if size <= 0 or (max_bytes is not None and size > max_bytes):
+                partial.unlink(missing_ok=True)
+                return False
+            partial.replace(dest)
+            return dest.is_file() and dest.stat().st_size > 0
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("object download failed for %s: %s", clean, _safe_error(exc))
+            try:
+                partial.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return False
+
     def delete(self, *, key: Optional[str] = None, url: Optional[str] = None) -> bool:
         try:
             client = self._client_or_raise()
@@ -392,6 +478,36 @@ def get_storage() -> StorageBackend:
         if _BACKEND is None:
             _BACKEND = _build_backend()
     return _BACKEND
+
+
+def resolve_asset_url(asset: Optional[dict]) -> Optional[str]:
+    """Return a browser URL that works right now for a stored asset.
+
+    Object-storage preview URLs are presigned when the file is saved and expire
+    after STORAGE_SIGNED_URL_TTL (default 86400 seconds). A record that still
+    has ``storage_key`` is signed again here. Local files keep their stable
+    ``/api/static`` path. Stock and other external assets have no storage key,
+    so the stored URL is returned unchanged. This does not modify ``asset``.
+    """
+    if not asset:
+        return None
+    backend = get_storage()
+    key = clean_storage_key(asset.get("storage_key"))
+    if key and getattr(backend, "mode", None) == "object" and hasattr(backend, "get_presigned_url"):
+        try:
+            return backend.get_presigned_url(key)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("asset url refresh failed for %s: %s", key, _safe_error(exc))
+    if getattr(backend, "mode", None) == "local":
+        for field in ("preview_path", "preview_url", "url"):
+            value = asset.get(field)
+            if isinstance(value, str) and value.startswith("/api/static/"):
+                return value
+    for field in ("preview_url", "url", "download_url"):
+        value = asset.get(field)
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 def resolve_delivery_url(job: Optional[dict]) -> Optional[str]:

@@ -41,7 +41,7 @@ from ..scoring import quality_score, quality_label, compute_project_status, scen
 from ..grounding import CLIENT_VISUAL_TYPES
 from ..timing import build_timing_status, narration_fits_budget, suggest_fitted_duration
 from ..grounding import commercial_project_errors
-from ..storage import resolve_delivery_url
+from ..storage import resolve_asset_url, resolve_delivery_url
 from .. import generation as gen
 from .. import stock as stock_service
 from .. import thumbnail_images as thumb_images
@@ -178,6 +178,24 @@ def _ser(doc: dict) -> dict:
         if isinstance(v, datetime):
             doc[k] = v.isoformat()
     return doc
+
+
+def _asset_payload(asset: dict | None) -> dict | None:
+    """Serialize an asset with a preview URL that works right now.
+
+    Voiceovers, thumbnails, music and client uploads stored in R2 keep a
+    presigned URL on the document. That URL expires. Replace it in the
+    response from ``storage_key`` and leave the stored document alone.
+    """
+    if not asset:
+        return asset
+    payload = _ser(asset)
+    fresh = resolve_asset_url(asset)
+    if fresh:
+        payload["preview_url"] = fresh
+        if payload.get("url"):
+            payload["url"] = fresh
+    return payload
 
 
 def _render_job_payload(job: dict | None) -> dict | None:
@@ -421,9 +439,9 @@ async def _attach_project_view(db, project: dict) -> dict:
         "script": _ser(script) if script else None,
         "scenes": sorted([_ser(s) for s in scenes], key=lambda s: s.get("scene_number", 0)),
         "metadata": _ser(metadata) if metadata else None,
-        "assets": [_ser(a) for a in assets],
+        "assets": [_asset_payload(a) for a in assets],
         "render_job": _render_job_payload(render_job),
-        "music_asset": _ser(selected_music) if selected_music else None,
+        "music_asset": _asset_payload(selected_music) if selected_music else None,
         "share": _share_payload(project),
         "timing": timing,
     }
@@ -1671,7 +1689,7 @@ async def update_asset_status(project_id: str, asset_id: str, body: AssetStatusU
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Asset not found")
     asset = await db.assets.find_one({"id": asset_id, "project_id": project_id}, {"_id": 0})
-    return _ser(asset)
+    return _asset_payload(asset)
 
 
 # ============================ STOCK / PEXELS ============================
@@ -4184,6 +4202,13 @@ async def get_thumbnail(asset_id: str, request: Request, user=Depends(get_curren
         ct = "image/png" if ext==".png" else "image/jpeg" if ext in (".jpg",".jpeg") else "image/svg+xml" if ext==".svg" else "image/png"
         return FileResponse(str(served), media_type=ct, headers={"Content-Disposition": f'inline; filename="{asset_id}{ext}"'})
     url = asset.get("preview_url")
+    # A storage_key outside the canonical thumbnail path must not be signed.
+    # The stored preview URL, if any, is the same fallback as before.
+    key = asset.get("storage_key")
+    if isinstance(key, str) and key in allowed_keys:
+        fresh = resolve_asset_url(asset)
+        if fresh:
+            url = fresh
     if url:
         return Response(status_code=302, headers={"Location": url})
     fallback = Path(__file__).parent.parent / "static" / "thumbs" / "fallback.png"
@@ -4490,7 +4515,7 @@ async def export_package_zip(project_id: str, user=Depends(get_current_user)):
                         "model": v.get("model"),
                         "mock": v.get("mock"),
                         "status": v.get("status"),
-                        "preview_url": v.get("preview_url"),
+                        "preview_url": resolve_asset_url(v) or v.get("preview_url"),
                         "preview_path": v.get("preview_path"),
                         "text_excerpt": v.get("text_excerpt"),
                         "is_full_script": v.get("scene_id") is None,
@@ -4875,9 +4900,9 @@ async def public_share(token: str):
             {"name": t.get("name"), "brief": t.get("brief")}
             for t in thumbnails if t.get("brief")
         ],
-        "selected_thumbnail_url": selected_thumb.get("preview_url") if selected_thumb else None,
+        "selected_thumbnail_url": resolve_asset_url(selected_thumb) if selected_thumb else None,
         "selected_voiceover": ({
-            "preview_url": selected_voice.get("preview_url"),
+            "preview_url": resolve_asset_url(selected_voice),
             "duration": selected_voice.get("duration"),
             "voice_style": selected_voice.get("voice_style"),
         } if selected_voice else None),
