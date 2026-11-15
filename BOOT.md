@@ -79,7 +79,7 @@ Do not describe the pipeline as working end to end until the launch gates in sec
 
 ## 5. SITE, SIGNUPS AND BILLING
 
-- Landing-page sources: `frontend/src/pages/LandingPage.jsx`, `LegalLayout.jsx`, `PrivacyPage.jsx` and `TermsPage.jsx`. Build with `npm ci --legacy-peer-deps` and `npm run build` in `frontend/`, copy `frontend/build/.` to `backend/static/frontend/`, then rebuild only after the active-render check is zero.
+- Landing-page sources: `frontend/src/pages/LandingPage.jsx`, `LegalLayout.jsx`, `PrivacyPage.jsx` and `TermsPage.jsx`. Build with `yarn build` in `frontend/`, copy `frontend/build/.` to `backend/static/frontend/`, then rebuild only after the active-render check is zero.
 - The public and local frontends both served `static/js/main.ad1bf6bb.js` during the 2026-10-04 verification.
 - `frontend/public/hero-render.mp4` was previously judged weak and should be replaced only with a genuine captioned render.
 - The YouTube section indentation remains a layout issue unless a fresh check proves otherwise.
