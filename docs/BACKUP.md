@@ -9,7 +9,7 @@
 | **Host env (primary)** | `/opt/facelessforge/deploy/backend/.env` (640 root:www-data, `SECRET_KEY`, `JWT_SECRET`, `ELEVENLABS_API_KEY`, `PEXELS_API_KEY`, `STORAGE_*`, `PADDLE_*`, `DODO_*`, `OLLAMA_*`) | Systemd `EnvironmentFile` — lose it = lose `SECRET_KEY`/`JWT_SECRET` rotate, all JWT invalid, Paddle `LIVE` price IDs lost | 30d |
 | **Docker env** | `/opt/facelessforge/deploy/.env.facelessforge` (diff: `MONGO_URL=mongodb://facelessforge-mongo:27017`, `NEXTAUTH_*`, `STORAGE_*` duplicate) | `docker-compose.facelessforge.yml:15 env_file` — Docker mounts renders/audio volumes | 30d |
 | **Caddy TLS** | `/etc/caddy/certs/ethinx.solutions.crt/.key` + `/etc/letsencrypt/cloudflare.ini` | DNS-01 `acme.sh --dns dns_cf` — Cloudflare token | 90d |
-| **Frontend build** | `/opt/facelessforge/deploy/frontend/build/` + `/opt/facelessforge/releases/.../frontend/build/` + `backend/static/frontend/` | `main.370e5cc9.js` — lose it = `/ph` 404 until next `yarn build` | 7d |
+| **Frontend build** | `/opt/facelessforge/deploy/frontend/build/` + `/opt/facelessforge/releases/.../frontend/build/` + `backend/static/frontend/` | `main.370e5cc9.js` — lose it = `/ph` 404 until next `npm run build` | 7d |
 | **Mongo** | `mongodump --uri="mongodb://localhost:27017/facelessforge" --out=/var/backups/mongo/{date}` | `projects`, `scripts`, `scenes`, `assets` (77 thumbnail_concept migrated 2026-09-09), `render_jobs`, `users`, `waitlist`, `subscriptions`, `ff_credits` | 30d daily + 90d weekly |
 | **Postgres** (if used) | `pg_dump -Fc -h 127.0.0.1 -U postgres facelessforge > /var/backups/pg/{date}.dump` | Alternative tenant store (currently Mongo primary) | 30d |
 | **Redis tenant credits** (finite, not `ff_credits`) | `redis-cli --rdb /var/backups/redis/dump.rdb && cp /var/lib/redis/dump.rdb /var/backups/redis/` + `redis-cli --raw HGETALL "tenant:{id}"` audit list `tenant:*:billing_audit` | `Dodo/PayPal` grant `hincrby tenant:{tenant_id} credits` — lose it = double-spend / lost credits | 7d (RDB) + audit `LPUSH` capped 999, `EXPIRE audit:transaction:{id} 2592000` |
@@ -59,12 +59,12 @@ chmod +x /usr/local/bin/facelessforge-backup.sh
 * **Mongo loss:** `mongorestore --uri="mongodb://localhost:27017/facelessforge" /var/backups/facelessforge/mongo/{date}/facelessforge --drop`.
 * **Redis loss (credits):** `redis-cli --pipe < /var/backups/facelessforge/redis/dump-{date}.rdb` or `redis-cli FLUSHDB && for h in tenant:*; do HSET...` from `keys-*.txt` audit `tenant:*:billing_audit` LPUSH.
 * **R2 loss:** R2 is versioned; if bucket deleted, `aws s3 sync /var/backups/r2-mirror s3://facelessforge-prod --endpoint-url ...`.
-* **Frontend build loss:** `cd /opt/facelessforge/deploy/frontend && yarn run build && cp -r build/* backend/static/frontend/ && cp -r build/* releases/.../frontend/build/ && docker cp build/. facelessforge-app:/app/frontend/build/ && systemctl restart facelessforge`.
+* **Frontend build loss:** `cd /opt/facelessforge/deploy/frontend && npm ci --legacy-peer-deps && npm run build && cp -r build/* backend/static/frontend/ && cp -r build/* releases/.../frontend/build/ && docker cp build/. facelessforge-app:/app/frontend/build/ && systemctl restart facelessforge`.
 
 ## 4. What is NOT backed up (and why)
 
 * `/opt/facelessforge/deploy/backend/static/renders/*` (449M per project like `a0d4a4fc...` scenes) — ephemeral, source is R2; local is cache.
-* `frontend/node_modules` — reinstall via `yarn`.
+* `frontend/node_modules` — reinstall via `npm ci --legacy-peer-deps`.
 * Overlay `150G` docker layers — rebuild via `docker compose build`.
 
 ## 5. Verification (add to RUNBOOK §8)
