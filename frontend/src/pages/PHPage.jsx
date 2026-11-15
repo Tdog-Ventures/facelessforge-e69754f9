@@ -1,40 +1,7 @@
-import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { ArrowRight, Play, Sparkles, Clock, Video } from "lucide-react";
-import { api } from "../lib/api";
 
 export default function PHPage() {
-  const [demoVideo, setDemoVideo] = useState(null);
-  const [loadingVideo, setLoadingVideo] = useState(true);
-
-  useEffect(() => {
-    // Try to fetch latest PETS FIX YOUR BRAIN render via public share or fallback to hero
-    // For Product Hunt, show golden demo project autoplay muted
-    const fallback = "/hero-glitch.mp4";
-    let cancelled = false;
-    async function fetchDemo() {
-      try {
-        // Try to find a recent project with PETS in title via public API if available
-        // Fallback to known R2 URL from last successful E2E (presigned but we use static)
-        // We attempt to fetch via backend health then projects (requires auth, so will fail for anon -> use fallback)
-        // Instead, try to fetch via /api/static not needed - just use fallback hero which is golden demo
-        // If you have a specific R2 URL, replace here
-        const knownGolden = "/hero-glitch.mp4";
-        // Attempt to load a real render via unauthenticated public share if any exists
-        // We do not have public token, so use hero
-        if (!cancelled) {
-          setDemoVideo(knownGolden);
-        }
-      } catch {
-        if (!cancelled) setDemoVideo(fallback);
-      } finally {
-        if (!cancelled) setLoadingVideo(false);
-      }
-    }
-    fetchDemo();
-    return () => { cancelled = true; };
-  }, []);
-
   return (
     <div className="min-h-screen bg-[var(--ff-bg)] text-[var(--ff-text)]">
       <header className="flex items-center justify-between px-8 py-5 border-b border-[rgba(59,130,246,0.15)] bg-[var(--ff-bg)]/80 backdrop-blur">
@@ -69,26 +36,19 @@ export default function PHPage() {
         </div>
 
         <div className="mt-10 rounded-xl overflow-hidden border border-amber-500/20 bg-[var(--ff-surface)] aspect-video flex items-center justify-center relative" style={{ boxShadow: "0 0 40px rgba(245,158,11,0.12)" }}>
-          {!loadingVideo && demoVideo ? (
-            <video
-              data-testid="ph-golden-demo"
-              autoPlay
-              muted
-              loop
-              playsInline
-              poster="/fallback-thumb.png"
-              className="w-full h-full object-cover"
-              src={demoVideo}
-              onError={(e) => { e.currentTarget.poster = "/fallback-thumb.png"; }}
-            >
-              <source src={demoVideo} type="video/mp4" />
-            </video>
-          ) : (
-            <div className="flex flex-col items-center gap-3 text-[var(--ff-text-muted)]">
-              <Video size={32} className="text-amber-400" />
-              <span className="text-xs font-mono">Loading golden demo…</span>
-            </div>
-          )}
+          <video
+            data-testid="ph-golden-demo"
+            autoPlay
+            muted
+            loop
+            playsInline
+            poster="/fallback-thumb.png"
+            className="w-full h-full object-cover"
+            src="/hero-glitch.mp4"
+            onError={(e) => { e.currentTarget.poster = "/fallback-thumb.png"; }}
+          >
+            <source src="/hero-glitch.mp4" type="video/mp4" />
+          </video>
           <div className="absolute inset-0 bg-gradient-to-t from-[var(--ff-bg)]/60 to-transparent pointer-events-none" />
           <div className="absolute bottom-6 left-6 right-6 flex items-center justify-between">
             <div className="flex gap-2">
