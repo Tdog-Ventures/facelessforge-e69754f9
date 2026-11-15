@@ -27,54 +27,49 @@ import aiohttp
 import numpy as np
 from PIL import Image
 
-# ---------------------------------------------------------------------------
-# Constitution constants (Section 6 — Verification)
-# ---------------------------------------------------------------------------
 MAX_DURATION_DIFF = 2.0          # legacy fallback when no project target is supplied
 EXPECTED_DURATION_TOLERANCE = 0.25
-SILENCE_NOISE_DB = -35           # check b: silencedetect threshold
-SILENCE_MIN_DURATION = 2.0      # check b: minimum silence gap to flag
+SILENCE_NOISE_DB = -35
+SILENCE_MIN_DURATION = 2.0
 SILENCE_SKIP_PCT = 0.05          # check b: legacy fallback when no intro contract
 SILENCE_INTRO_TOLERANCE = 0.1    # check b: encoder rounding on the intro boundary
-VOL_SEGMENT_SEC = 10.0           # check c: per-10s volume check
-MAX_VOL_DIFF_DB = 12.0           # check c: max segment-to-segment diff
+VOL_SEGMENT_SEC = 10.0
+MAX_VOL_DIFF_DB = 12.0
 MIN_VOL_SEGMENT_SEC = 2.0        # check c: ignore trailing slivers shorter than this
 # check d: scene-change threshold. 0.3 (the classic "strong cut" heuristic)
 # under-detects real cuts in low-texture b-roll (e.g. uniform-sky aviation
 # footage scores 0.10-0.22 at hard cuts between distinct sources), failing
 # otherwise-correct renders. 0.15 still rejects static/caption-card videos
 # (scores ~0) while accepting genuine cuts.
-SCENE_THRESHOLD = 0.15           # check d: scene-change threshold
-MIN_CUTS_PER_8S = 1.0            # check d: ≥1 cut per 8s average
-CAPTION_BOTTOM_PCT = 0.15        # check e: bottom strip % for caption check
-CAPTION_SAMPLE_SEC = 5.0         # check e: sample one frame every N seconds
-CAPTION_VAR_MIN = 30.0           # check e: min variance for text presence
-EDGE_CHECK_WIDTH = 200           # check f: left/right column width (px)
-EDGE_VAR_MAX = 10.0              # check f: max variance → pillarbox suspected
-BLACK_BAR_LUM_MAX = 24.0         # check f: max mean luminance (0-255) of a bar —
-                                 # distinguishes true black letterbox/pillarbox
-                                 # bars from the (non-black) blurred background
-                                 # fill used by the render pipeline
+SCENE_THRESHOLD = 0.15
+MIN_CUTS_PER_8S = 1.0
+CAPTION_BOTTOM_PCT = 0.15
+CAPTION_SAMPLE_SEC = 5.0
+CAPTION_VAR_MIN = 30.0
+EDGE_CHECK_WIDTH = 200
+EDGE_VAR_MAX = 10.0
+BLACK_BAR_LUM_MAX = 24.0
+# distinguishes true black letterbox/pillarbox
+# bars from the (non-black) blurred background
+# fill used by the render pipeline
+
 CENTER_BRIGHT_LUM_MIN = 40.0     # check f: a flat dark edge strip is only a bar
                                  # when the frame centre is actually bright.
                                  # Full-frame fades-to-black / black leaders
                                  # have dark centres and must NOT fail.
-LOUDNORM_I_TARGET = -16.0        # check g: target integrated loudness
-                                 # (must match the render pipeline's two-pass
-                                 # mux target `loudnorm=I=-16:TP=-1.5:LRA=11`;
-                                 # constitution §6g drifted to -14.0 vs the
-                                 # production mix — aligned here)
-LOUDNORM_TOLERANCE = 1.0         # check g: acceptable ±1 LUFS
-LOUDNORM_TP = -1.5               # check g: true peak
-LOUDNORM_LRA = 11                # check g: loudness range
+LOUDNORM_I_TARGET = -16.0
+# (must match the render pipeline's two-pass
+# mux target `loudnorm=I=-16:TP=-1.5:LRA=11`;
+# constitution §6g drifted to -14.0 vs the
+# production mix — aligned here)
+
+LOUDNORM_TOLERANCE = 1.0
+LOUDNORM_TP = -1.5
+LOUDNORM_LRA = 11
 
 FFPROBE_BIN = os.getenv("FFPROBE_PATH", "ffprobe")
 FFMPEG_BIN = os.getenv("FFMPEG_PATH", "ffmpeg")
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 async def _run_cmd(*cmd: str, timeout: int = 300) -> tuple[str, str, int]:
     """Run a subprocess, return (stdout, stderr, returncode)."""
@@ -129,7 +124,7 @@ async def ffprobe_duration(path: str) -> float:
     stdout, stderr, rc = await _run_cmd(
         FFPROBE_BIN,
         "-v", "error",
-        "-select_streams", "a:0",  # audio stream for narration; video for rendered
+        "-select_streams", "a:0",
         "-show_entries", "format=duration",
         "-of", "default=noprint_wrappers=1:nokey=1",
         path,
@@ -206,10 +201,6 @@ def _parse_volumedetect_mean(stderr_text: str) -> Optional[float]:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Check a: Timing — |video_duration − total_narration_duration| ≤ 2s
-# ---------------------------------------------------------------------------
-
 async def check_a_timing(
     video_path: str,
     narration_path: str,
@@ -238,10 +229,6 @@ async def check_a_timing(
         "threshold_s": threshold,
     }
 
-
-# ---------------------------------------------------------------------------
-# Check b: Silence gaps — silencedetect -35dB d=2, zero gaps outside intro
-# ---------------------------------------------------------------------------
 
 async def check_b_silence_gaps(
     video_path: str,
@@ -304,14 +291,10 @@ async def check_b_silence_gaps(
         "skip_before_s": round(allowed_leading_end, 2),
         "gaps_total": len(gaps),
         "gaps_offending": len(offending),
-        "gaps_detail": offending[:10],  # cap detail
+        "gaps_detail": offending[:10],
         "passed": passed,
     }
 
-
-# ---------------------------------------------------------------------------
-# Check c: Volume consistency — volumedetect per 10s, max diff ≤12dB
-# ---------------------------------------------------------------------------
 
 async def check_c_volume_consistency(video_path: str) -> dict[str, Any]:
     """
@@ -387,10 +370,6 @@ async def check_c_volume_consistency(video_path: str) -> dict[str, Any]:
     }
 
 
-# ---------------------------------------------------------------------------
-# Check d: Shot-change rate — select='gt(scene,<SCENE_THRESHOLD>)' count ≥1 per 8s average
-# ---------------------------------------------------------------------------
-
 async def check_d_shot_change_rate(video_path: str) -> dict[str, Any]:
     """
     Constitution §6d:
@@ -421,10 +400,6 @@ async def check_d_shot_change_rate(video_path: str) -> dict[str, Any]:
         "passed": passed,
     }
 
-
-# ---------------------------------------------------------------------------
-# Check e: Captions present — extract frame per 10s, bottom-strip variance check
-# ---------------------------------------------------------------------------
 
 async def _extract_frame(video_path: str, timestamp: float, out_path: Path) -> None:
     stdout, stderr, rc = await _run_cmd(
@@ -495,7 +470,6 @@ async def check_e_captions_present(video_path: str, expect_captions: Optional[bo
             if frame_path.exists():
                 frame_path.unlink(missing_ok=True)
 
-    # Clean up
     if temp_dir.exists():
         shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -505,7 +479,7 @@ async def check_e_captions_present(video_path: str, expect_captions: Optional[bo
     if expect_captions is None:
         passed = fraction >= 0.5  # legacy: majority show caption variance
     elif expect_captions:
-        passed = fraction >= 0.5  # subtitles burned -> captions must be present
+        passed = fraction >= 0.5
     else:
         # Subtitles were NOT burned: the bottom-strip variance heuristic cannot
         # reliably distinguish "no captions" from busy b-roll (blurred fills,
@@ -523,10 +497,6 @@ async def check_e_captions_present(video_path: str, expect_captions: Optional[bo
         "reason": None if (expect_captions or expect_captions is None) else "not applied (subtitles not burned)",
     }
 
-
-# ---------------------------------------------------------------------------
-# Check f: No pillarboxing — 3 frames per scene, left+right 200px not near-zero variance
-# ---------------------------------------------------------------------------
 
 async def check_f_no_pillarbox(video_path: str, scene_count: Optional[int] = None, aspect: Optional[str] = None) -> dict[str, Any]:
     """
@@ -596,8 +566,6 @@ async def check_f_no_pillarbox(video_path: str, scene_count: Optional[int] = Non
                 # Letterbox bars come in pairs from aspect conversion — a
                 # single dark edge with a bright opposite edge is content
                 # (e.g. dark night sky over a bright street), not a bar.
-                # Incident 2026-10-11: a 200px near-black top band over bright
-                # content failed an entire 35s render (edge_failures=1).
                 edge_dark = top_dark and bot_dark
                 # A bar needs bright content behind it — a fully dark frame is
                 # a fade/leader, not letterboxing.
@@ -620,7 +588,6 @@ async def check_f_no_pillarbox(video_path: str, scene_count: Optional[int] = Non
                     "flat_edges": flat_edges,
                 })
             else:
-                # Reject if landscape video itself is narrower than 1280px (Constitution: landscape only)
                 if width and width < 1280:
                     per_frame.append({"timestamp": ts, "width": width, "note": "width < 1280 — rejected per footage curation rules"})
                     continue
@@ -680,10 +647,6 @@ async def check_f_no_pillarbox(video_path: str, scene_count: Optional[int] = Non
     }
 
 
-# ---------------------------------------------------------------------------
-# Check g: loudnorm pass — integrated loudness within [-13, -15] LUFS
-# ---------------------------------------------------------------------------
-
 async def check_g_loudnorm(video_path: str) -> dict[str, Any]:
     """
     Constitution §6g:
@@ -720,10 +683,6 @@ async def check_g_loudnorm(video_path: str) -> dict[str, Any]:
         "passed": passed,
     }
 
-
-# ---------------------------------------------------------------------------
-# Check h: Compile report table
-# ---------------------------------------------------------------------------
 
 def check_h_compile_report(results: list[dict[str, Any]]) -> dict[str, Any]:
     """
@@ -772,10 +731,6 @@ def _extract_key_metric(result: dict[str, Any]) -> str:
     return ""
 
 
-# ---------------------------------------------------------------------------
-# Master orchestrator
-# ---------------------------------------------------------------------------
-
 async def verify_render(
     url: str,
     narration_path: Optional[str] = None,
@@ -810,7 +765,6 @@ async def verify_render(
         - "report": the compiled table (check h)
         - "video_temp_path": local path used (if cleanup=False)
     """
-    # Constitution: verify on SERVED URL, not local file bypass — but support local fallback for dev
     is_remote = url.startswith("http://") or url.startswith("https://")
     temp_video = Path(tempfile.gettempdir()) / f"ff_verify_{int(time.time() * 1000)}_video.mp4"
     video_path = None
@@ -836,7 +790,6 @@ async def verify_render(
                 "report": {},
             }
     else:
-        # url is actually a local path
         if Path(url).exists():
             video_path = url
             temp_video = Path(url)
@@ -851,7 +804,6 @@ async def verify_render(
     checks = []
 
     try:
-        # a — timing (only if narration provided)
         if narration_path and Path(narration_path).exists():
             try:
                 checks.append(await check_a_timing(video_path, narration_path, expected_duration))
@@ -864,7 +816,6 @@ async def verify_render(
                     "diff_s": None,
                 })
         else:
-            # No narration — skip timing check, mark as passed with note
             checks.append({
                 "check": "a",
                 "name": "timing",
@@ -874,25 +825,18 @@ async def verify_render(
                 "diff_s": 0,
             })
 
-        # b — silence gaps (intro-aware)
         checks.append(await check_b_silence_gaps(video_path, intro_seconds=intro_seconds))
 
-        # c — volume consistency
         checks.append(await check_c_volume_consistency(video_path))
 
-        # d — shot change rate
         checks.append(await check_d_shot_change_rate(video_path))
 
-        # e — captions present/absent (per burn decision)
         checks.append(await check_e_captions_present(video_path, expect_captions=expect_captions))
 
-        # f — no pillarbox/letterbox (aspect-aware)
         checks.append(await check_f_no_pillarbox(video_path, scene_count=scene_count, aspect=aspect))
 
-        # g — loudnorm
         checks.append(await check_g_loudnorm(video_path))
 
-        # h — compile report
         report = check_h_compile_report(checks)
         checks.append(report)
 
@@ -920,10 +864,6 @@ async def verify_render(
         "video_temp_path": None if cleanup else str(temp_video),
     }
 
-
-# ---------------------------------------------------------------------------
-# Standalone CLI helper (for local testing / CI integration)
-# ---------------------------------------------------------------------------
 
 async def _cli() -> None:
     import argparse

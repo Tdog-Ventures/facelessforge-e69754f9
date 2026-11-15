@@ -59,7 +59,6 @@ class RateLimitError(Exception):
     """
 
 
-# ── Pexels 429 backoff gate (exponential, module-wide) ─────────────────────
 _PEXELS_BACKOFF_UNTIL = 0.0
 _PEXELS_BACKOFF_RETRIES = 0
 _PEXELS_BACKOFF_BASE = 2.0
@@ -95,8 +94,6 @@ def _pexels_reset_backoff() -> None:
     _PEXELS_BACKOFF_UNTIL = 0.0
     _PEXELS_BACKOFF_RETRIES = 0
 
-# ── FIX: Visual mismatch blocklist + text-date filter ───────────────────
-# ── FIX 3: semantic Pexels queries — block abstract/legal/literal leaks
 PEXELS_ABSTRACT_BLOCKLIST = {
     "judgment","judgement","gap","abstract","legal","literal","gavel","boxes",
     "moving","concept","idea","notion","theory","mindset","paradigm",
@@ -129,11 +126,9 @@ def _is_blocklisted(item: dict) -> bool:
         if w.lower() in combined:
             logger.info("BLOCKLIST_FILTER reject ext_id=%s reason=blocklist_word=%s title=%r tags=%s", item.get("external_id"), w, title[:60], tags[:2])
             return True
-    # shorts proxy
     if SHORTS_RE.search(combined):
         logger.info("BLOCKLIST_FILTER reject ext_id=%s reason=shorts_proxy tags=%s title=%r", item.get("external_id"), tags[:2], title[:60])
         return True
-    # date text 4-9.9.2026 etc in title/tags
     raw = " ".join([str(t) for t in tags] + [title])
     if DATE_TEXT_RE.search(raw):
         logger.info("BLOCKLIST_FILTER reject ext_id=%s reason=date_text_4-9.9.2026 raw=%r", item.get("external_id"), raw[:80])
@@ -157,13 +152,11 @@ def _dedupe_and_filter_items(items: list[dict]) -> list[dict]:
             continue
         if _is_blocklisted(it):
             continue
-        # also dedupe by preview_url within this batch
         k = it.get("preview_url") or ext
         if k and k in seen_urls:
             continue
         seen_urls.add(k)
         out.append(it)
-        # track for future calls (keep last 10)
         if ext:
             if ext not in _LAST_ASSET_IDS:
                 _LAST_ASSET_IDS_ORDER.append(ext)
@@ -175,8 +168,7 @@ def _dedupe_and_filter_items(items: list[dict]) -> list[dict]:
 
 MediaType = Literal["both", "videos", "photos"]
 
-# ── Constitution §4.1: Minimum acceptable dimensions ──────────────────────
-MIN_VIDEO_WIDTH = 1280  # Reject files narrower than 1280px
+MIN_VIDEO_WIDTH = 1280
 
 
 def _use_mock() -> bool:
@@ -212,8 +204,6 @@ def is_mock_mode_aggregated() -> bool:
     return _should_use_mock_aggregated()
 
 
-# ── Relevance scoring ─────────────────────────────────────────────────────
-
 def score_relevance(candidate: dict, query_terms: list[str]) -> int:
     """Score a candidate's relevance based on query term overlap in URL/slug.
 
@@ -241,8 +231,6 @@ def score_relevance(candidate: dict, query_terms: list[str]) -> int:
                 score += 1
     return score
 
-
-# ── Mock generator ────────────────────────────────────────────────────────
 
 _MOCK_PHOTOGRAPHERS = [
     "Ada Klein", "Bram Voss", "Chen Rowe", "Dara Okafor", "Elio Marsh",
@@ -290,8 +278,6 @@ def _mock_results(query: str, media_type: MediaType, per_page: int) -> list[dict
     return results
 
 
-# ── Real Pexels adapter ───────────────────────────────────────────────────
-
 def _normalise_pexels_photo(p: dict, query: str) -> dict:
     src = p.get("src") or {}
     return {
@@ -332,9 +318,7 @@ def _normalise_pexels_video(v: dict, query: str) -> Optional[dict]:
         )
         return None
 
-    # Pick a reasonable thumbnail
     preview = v.get("image")
-    # Pick best mp4 file: try uhd → hd → sd → ld → any mp4 → first file
     download = None
     files = list(v.get("video_files") or [])
     mp4_files = [f for f in files if (f.get("file_type") == "video/mp4")]
@@ -347,7 +331,6 @@ def _normalise_pexels_video(v: dict, query: str) -> Optional[dict]:
     if not download and mp4_files:
         download = next((f.get("link") for f in mp4_files if f.get("link")), None)
     if not download and files:
-        # last resort: take ANY file with a link
         download = next((f.get("link") for f in files if f.get("link")), None)
     user = v.get("user") or {}
     return {
@@ -427,7 +410,6 @@ async def _search_pexels(
     FIX 3: query is pre-filtered for abstract/legal/literal words.
     FIX 4: supports page param for pagination (per_page=40).
     """
-    # FIX 3: semantic filter — strip abstract words before API call
     query = _strip_pexels_abstract(query)
     key = os.environ.get("PEXELS_API_KEY", "").strip()
     base = os.environ.get("PEXELS_API_BASE_URL", "https://api.pexels.com").rstrip("/")
@@ -440,7 +422,6 @@ async def _search_pexels(
     await _pexels_wait_backoff()
 
     async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
-        # ── Photos ───────────────────────────────────────────────────────
         if media_type in ("both", "photos"):
             params = {"query": query, "per_page": per_page, "page": page}
             if orientation in ("landscape", "portrait", "square"):
@@ -456,8 +437,6 @@ async def _search_pexels(
             for p in (data.get("photos") or []):
                 out.append(_normalise_pexels_photo(p, query))
 
-        # ── Videos ───────────────────────────────────────────────────────
-        # Constitution §4.1: ALWAYS force landscape for video searches
         if media_type in ("both", "videos"):
             video_params = {"query": query, "per_page": per_page, "page": page}
             min_dur = int(os.environ.get("PEXELS_MIN_VIDEO_DURATION", "10"))
@@ -486,7 +465,6 @@ async def _search_pexels(
                 query[:60], per_page, page, len(raw_videos), kept,
             )
 
-    # FIX: blocklist + dedupe (last 10) filter
     out = _dedupe_and_filter_items(out)
     logger.info("BLOCKLIST post-filter query=%r remaining=%d", query[:60], len(out))
     return out
@@ -513,9 +491,7 @@ async def _search_pexels_paginated(query: str, media_type: MediaType, *, min_res
                 seen[eid] = it
         if len(seen) >= min_results:
             break
-    # If still short, try 2 backup queries with rephrased terms
     if len(seen) < min_results:
-        # backup: drop last word / add cinematic variant
         base_words = query.split()
         backups = []
         if len(base_words) >= 2:
@@ -542,8 +518,6 @@ async def _search_pexels_paginated(query: str, media_type: MediaType, *, min_res
                     break
     return list(seen.values())
 
-# ── Pixabay adapters ─────────────────────────────────────────────────────
-
 def _normalise_pixabay_image(hit: dict, query: str) -> dict:
     return {
         "source": "pixabay",
@@ -565,7 +539,6 @@ def _normalise_pixabay_image(hit: dict, query: str) -> dict:
 def _normalise_pixabay_video(hit: dict, query: str) -> Optional[dict]:
     # Pixabay video hit contains videos.{large,medium,small,tiny}
     videos = hit.get("videos") or {}
-    # Prefer large -> medium -> small
     best = None
     for size in ["large", "medium", "small", "tiny"]:
         v = videos.get(size)
@@ -631,7 +604,6 @@ async def _search_pixabay(query: str, media_type: MediaType, per_page: int) -> l
                 raise RuntimeError("pixabay_rate_limited")
             r.raise_for_status()
             data = r.json()
-            # Filter portrait etc., then slice to requested per_page to guarantee 12 when possible
             valid = []
             for hit in (data.get("hits") or []):
                 norm = _normalise_pixabay_video(hit, query)
@@ -642,8 +614,6 @@ async def _search_pixabay(query: str, media_type: MediaType, per_page: int) -> l
             out.extend(valid[:per_page])
     out = _dedupe_and_filter_items(out)
     return out
-
-# ── Unsplash adapters ────────────────────────────────────────────────────
 
 def _normalise_unsplash_photo(p: dict, query: str) -> dict:
     urls = p.get("urls") or {}
@@ -686,8 +656,6 @@ async def _search_unsplash(query: str, per_page: int) -> list[dict]:
         out = _dedupe_and_filter_items(out)
         return out
 
-# ── Unified dispatcher ────────────────────────────────────────────────────
-
 async def search_stock_with_source(query: str, source: str, media_type: MediaType, per_page: int = 12) -> dict:
     """Dispatch to correct provider based on source param.
 
@@ -701,7 +669,6 @@ async def search_stock_with_source(query: str, source: str, media_type: MediaTyp
     source = (source or "pexels").strip().lower()
     if not query:
         return {"source": source if source in ("pexels","pixabay","unsplash") else "mock", "results": [], "mock": True, "query": ""}
-    # Normalize media_type
     if media_type not in ("both", "videos", "photos"):
         media_type = "both"
     # Unsplash only supports images
@@ -722,10 +689,8 @@ async def search_stock_with_source(query: str, source: str, media_type: MediaTyp
                 results.sort(key=lambda c: score_relevance(c, query_terms), reverse=True)
             results = _dedupe_and_filter_items(results)
             return {"source": "unsplash", "results": results, "mock": False, "query": query}
-        else:  # pexels default
-            # Use existing search_stock path which handles mock fallback internally
+        else:
             res = await search_stock(query, media_type, per_page)
-            # Override source to pexels if not mock
             if not res.get("mock"):
                 res["source"] = "pexels"
             return res
@@ -741,8 +706,6 @@ async def search_stock_with_source(query: str, source: str, media_type: MediaTyp
     except httpx.HTTPError as e:
         logger.warning("%s HTTP error %s — mock fallback", source, e)
         return {"source": "mock", "results": _mock_results(query, media_type, per_page), "mock": True, "query": query, "warning": f"{source} unavailable — mock results"}
-
-# ── Aggregated multi-source search ───────────────────────────────────────
 
 async def search_stock_aggregated(
     query: str,
@@ -779,7 +742,6 @@ async def search_stock_aggregated(
             "warning": "No stock API keys configured — showing deterministic mock results.",
         }
 
-    # Determine enabled providers
     providers: list[str] = []
     if os.environ.get("PEXELS_API_KEY", "").strip():
         providers.append("pexels")
@@ -797,7 +759,6 @@ async def search_stock_aggregated(
             "warning": "No stock API keys configured — showing deterministic mock results.",
         }
 
-    # Build tasks per provider; each gets per_page to allow merging then slice
     tasks = []
     task_sources: list[str] = []
     for src in providers:
@@ -832,9 +793,7 @@ async def search_stock_aggregated(
                 logger.warning("search_stock_aggregated %s HTTP error query=%r: %s", src, query[:60], res)
                 warnings.append(src)
             continue
-        # res is list[dict]
         if isinstance(res, list) and res:
-            # Already normalised, ensure source field correct
             results_by_source.append(res)
             successful_sources.append(src)
         elif isinstance(res, list):
@@ -842,7 +801,6 @@ async def search_stock_aggregated(
             successful_sources.append(src)
 
     if not results_by_source or all(len(lst) == 0 for lst in results_by_source):
-        # All providers returned empty — fallback to mock with warning if appropriate
         logger.warning("search_stock_aggregated all providers empty query=%r, falling back to mock", query[:60])
         return {
             "source": "mock",
@@ -852,7 +810,6 @@ async def search_stock_aggregated(
             "warning": "All stock providers returned no results — showing mock results.",
         }
 
-    # Score relevance per provider already? Ensure scoring across merged? We'll keep interleaving then score overall
     # Interleave round-robin to ensure mix representation up to per_page
     merged: list[dict] = []
     max_len = max(len(lst) for lst in results_by_source) if results_by_source else 0
@@ -863,18 +820,14 @@ async def search_stock_aggregated(
         if len(merged) >= per_page:
             break
 
-    # If still under per_page (e.g., one provider had few results), fill remaining sequentially
     if len(merged) < per_page:
         for lst in results_by_source:
             for item in lst:
                 if item not in merged and len(merged) < per_page:
                     merged.append(item)
 
-    # FIX: blocklist + last10 dedupe
     merged = _dedupe_and_filter_items(merged)
 
-    # Optional: sort by relevance overall? Keep interleaved order to preserve mix; but apply relevance as secondary sort within each provider already.
-    # Determine source label
     if len(successful_sources) == 1:
         agg_source = successful_sources[0]
     else:
@@ -883,11 +836,8 @@ async def search_stock_aggregated(
     out: dict = {"source": agg_source, "results": merged[:per_page], "mock": False, "query": query}
     if warnings:
         out["warning"] = f"Some providers unavailable ({', '.join(warnings)}) — showing partial results."
-    # If all keys missing case already handled, but add warning if aggregated used mock-like? Not needed.
     return out
 
-
-# ── Public ──────────────────────────────────────────────────────────────────
 
 async def search_stock_videos(query: str, per_page: int = 30) -> list[dict]:
     """Video-only Pexels search for cinematic b-roll. FIX 4: paginated, min 20 unique.
@@ -911,7 +861,6 @@ async def search_stock_videos(query: str, per_page: int = 30) -> list[dict]:
     else:
         query = _strip_pexels_abstract(query)
     try:
-        # FIX 4: paginated fetch guarantees >=20 unique when available
         results = await _search_pexels_paginated(query, "videos", min_results=20, per_page=40)
         if len(results) < 20:
             # per_page fallback kept for backward-compat path
@@ -973,7 +922,6 @@ async def search_stock(
             "query": query,
         }
 
-    # Deterministic by default; optional LLM enrichment is explicitly opt-in.
     if not _use_mock() and (len(query.split())>2 or any(w in query.lower() for w in PEXELS_ABSTRACT_BLOCKLIST)):
         try:
             sem=await semantic_pexels_query(query)
@@ -983,16 +931,12 @@ async def search_stock(
     else:
         query=_strip_pexels_abstract(query)
     try:
-        # FIX 4: use paginated search when caller wants >=20
         if per_page >= 20:
             results = await _search_pexels_paginated(query, media_type, min_results=20, per_page=40)
-            # trim/pad to per_page but keep at least 20
             results = results[:max(per_page,20)]
         else:
             results = await _search_pexels(query, media_type, per_page, orientation=orientation)
 
-        # Constitution §4.1: Score and sort results by relevance so the most
-        # semantically matching clips surface first.
         query_terms = [t.lower() for t in query.split() if len(t) > 2]
         if query_terms:
             results.sort(key=lambda c: score_relevance(c, query_terms), reverse=True)
