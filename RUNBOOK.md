@@ -11,7 +11,7 @@ Run the commands below from the deploy checkout (the directory that contains `do
    docker compose -f docker-compose.facelessforge.yml <command>
    ```
 
-2. **Never use `--force-recreate` on `facelessforge-mongo`.** Recreate the app with `--no-deps`:
+2. **Never use `--force-recreate` on `facelessforge-mongo`.** Recreate the app with `--no-deps` only when no render is running (`BOOT.md` hard rule 5):
    ```bash
    docker compose -f docker-compose.facelessforge.yml up -d --force-recreate --no-deps facelessforge-app
    ```
@@ -20,7 +20,7 @@ Run the commands below from the deploy checkout (the directory that contains `do
 
 4. **Secret rotation:** after changing that env file, recreate the app with `--no-deps`.
 
-5. **Code rollback:** do not use `git reset --hard`.
+5. **Code rollback:** do not use `git reset --hard`. Rebuild only when no render is running (`BOOT.md` hard rule 5).
    ```bash
    git log --oneline -5
    git revert <bad-commit-sha>
