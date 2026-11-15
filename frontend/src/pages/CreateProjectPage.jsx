@@ -16,7 +16,7 @@ const TONES = ["calm-authoritative", "curious-expert", "cinematic", "energetic",
 const VOICE_STYLES = ["neutral male narrator", "neutral female narrator", "deep male narrator", "warm female narrator", "young male narrator"];
 const VISUAL_STYLES = ["cinematic b-roll", "moody minimal", "motion graphic heavy", "archival + painterly", "anime-inspired", "stock + text cards"];
 const MONETISATION = ["Grow channel to 50k subs", "Sell my product", "Build authority", "ads", "ads + affiliate", "affiliate", "digital product", "sponsorship"];
-const CTAS = ["Visit website", "Subscribe", "Buy product", "subscribe", "join newsletter", "visit website", "buy product", "book call"];
+const CTAS = ["Visit website", "Subscribe", "Buy product", "Join newsletter", "Book a call"];
 
 const DURATIONS = [5, 15, 30, 60, 120, 300, 600, 1800, 3600];
 
