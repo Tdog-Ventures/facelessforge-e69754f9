@@ -10,9 +10,6 @@ logger = logging.getLogger("facelessforge.tts")
 STATIC_ROOT = Path(__file__).parent.parent / "static" / "audio"
 STATIC_ROOT.mkdir(parents=True, exist_ok=True)
 DEFAULT_CLONED_ID = os.environ.get("ELEVENLABS_VOICE_ID", "f1cJr1nonQ70HmW0yRhF").strip() or "f1cJr1nonQ70HmW0yRhF"
-# Task compliance: payload voiceStyle resolver -> Bella fallback
-_TASK_VOICE_RESOLVER = "voice_id = VOICE_MAP.get(payload.get('voiceStyle') if isinstance(payload,dict) else getattr(payload,'voiceStyle','female-narrator'), 'EXAVITQu4vr4xnSDxMaL')"
-# payload resolver (task spec): voice_id = VOICE_MAP.get(payload.get('voiceStyle') if isinstance(payload,dict) else getattr(payload,'voiceStyle','female-narrator'), 'EXAVITQu4vr4xnSDxMaL')
 VOICE_MAP = {'narrator':'21m00Tcm4TlvDq8ikWAM','female-narrator':'EXAVITQu4vr4xnSDxMaL','female':'EXAVITQu4vr4xnSDxMaL','energetic':'pNInz6obpgDQGcFmaJgB','documentary':'ErXwobaYiN019PkySvjV','calm':'MF3mGyEYCl7XYWbV9V6O','dramatic':'VR6AewLTigWG4xSOukaG','corporate':'onwK4e9ZLuTAKqWWBvbd'}
 # Extended VOICE_MAP with preset env overrides (keeps lowercase hyphen keys above, adds uppercase preset keys)
 VOICE_MAP.update({
@@ -111,13 +108,6 @@ def sanitize_for_tts(text: str) -> str:
     text = re.sub(r'[*#_`]{1,3}', '', text)
     return re.sub(r'\n{2,}', '\n', text).strip()
 
-def tts_text_with_phoneme(text: str) -> str:
-    """Optional SSML helper: wrap E-thinks with IPA phoneme for ElevenLabs SSML.
-    Use only if model supports SSML; otherwise return plain normalized text."""
-    normalized = normalize_for_tts(text)
-    # Provide phoneme fallback as comment - caller can choose to use SSML
-    # ElevenLabs supports <phoneme alphabet=\"ipa\" ph=\"iː θɪŋks\">E-thinks</phoneme>
-    return normalized
 def _elevenlabs_key() -> str:
     return os.environ.get("ELEVENLABS_API_KEY", "").strip()
 def _voice_id() -> str:
@@ -128,11 +118,9 @@ def _normalize_preset(value: Optional[str]) -> str:
     return "_".join(cleaned.strip().upper().replace("-", " ").split())
 def _voice_id_for(voice_style: Optional[str]) -> str:
     if voice_style:
-        # Direct hyphen/lowercase lookup for task compliance (female-narrator -> Bella)
         low = voice_style.strip().lower()
         if low in VOICE_MAP:
             return VOICE_MAP[low]
-        # Payload-style resolver per task spec
         voice_id = VOICE_MAP.get(voice_style, VOICE_MAP.get(low, None))
         if voice_id:
             return voice_id
@@ -262,15 +250,3 @@ async def generate_voiceover(text: str, voice_style: str = "narrator", tone: str
         raise RuntimeError(
             "ElevenLabs voiceover generation failed; verify the API key, quota, and selected voice."
         ) from exc
-def generate_tts_audio(text: str, voice_style: Optional[str] = None, tone: Optional[str] = None, model_id: str = "eleven_multilingual_v2") -> bytes:
-    import asyncio
-    async def _run(): return await _elevenlabs_tts(text, voice_style or "narrator", voice_id=_voice_id_for(voice_style), tone=tone)
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool: return pool.submit(lambda: asyncio.run(_run())).result()
-        else: return loop.run_until_complete(_run())
-    except: return asyncio.run(_run())
-def synthesize_speech(*args, **kwargs): return generate_tts_audio(*args, **kwargs)
-def tts_generate(*args, **kwargs): return generate_tts_audio(*args, **kwargs)

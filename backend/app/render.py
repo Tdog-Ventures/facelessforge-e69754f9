@@ -1,5 +1,4 @@
 from __future__ import annotations
-from .visual_guard import get_search_terms, render_title_safe, allocate_scenes
 
 """CHANGELOG
 ==========

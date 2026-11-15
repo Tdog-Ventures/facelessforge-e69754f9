@@ -431,13 +431,3 @@ def storage_status() -> dict:
                            "thumbnails, and audio do NOT survive a pod rebuild. "
                            "Set STORAGE_MODE=object and configure a bucket.")
     return info
-
-
-def make_url(local_relative_path: str) -> Tuple[str, Optional[str]]:
-    """Helper for callers that already wrote a file under static/...
-    Returns (absolute_url, preview_path). Local mode returns the existing
-    /api/static/... URL pair; object mode is unsupported here (callers must
-    use save_file)."""
-    rel = local_relative_path if local_relative_path.startswith("/") else f"/{local_relative_path}"
-    abs_base = os.environ.get("FRONTEND_URL", "").rstrip("/")
-    return (f"{abs_base}{rel}" if abs_base else rel, rel)
