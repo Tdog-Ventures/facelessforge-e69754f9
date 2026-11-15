@@ -1,34 +1,30 @@
 # FacelessForge Deploy Runbook
 
+Deploy is `docker-compose.facelessforge.yml`: host `127.0.0.1:7001` to container `8080`, entrypoint `uvicorn main:app` (`Dockerfile`). Compose `env_file` is `/opt/facelessforge/deploy/.env.facelessforge`.
+
+Run the commands below from the deploy checkout (the directory that contains `docker-compose.facelessforge.yml`).
+
 ## Critical Rules
 
-1. **Always use the correct compose file:**
+1. **Always pass the compose file:**
    ```bash
-   docker compose -f /opt/facelessforge/deploy/docker-compose.facelessforge.yml <command>
-   ```
-   Never run bare `docker compose` in this directory.
-
-2. **Never use `--force-recreate` on mongo.** Use `--no-deps` when recreating the app:
-   ```bash
-   docker compose -f /opt/facelessforge/deploy/docker-compose.facelessforge.yml up -d --force-recreate --no-deps facelessforge-app
+   docker compose -f docker-compose.facelessforge.yml <command>
    ```
 
-3. **Env file:** The stack reads `/opt/facelessforge/deploy/.env.facelessforge` (not `.env`). Update secrets there.
-
-4. **Secret rotation:** After changing `.env.facelessforge`, recreate the app with `--no-deps`.
-
-5. **Rollback:** If app is unhealthy after recreate, restore `.env.facelessforge.pre-fix` and recreate app only.
-
-6. **Code rollback (scoped, preserves later work):** never use `git reset --hard`.
+2. **Never use `--force-recreate` on `facelessforge-mongo`.** Recreate the app with `--no-deps`:
    ```bash
-   cd /opt/facelessforge/deploy
-   git log --oneline -5                       # identify the bad commit
-   git revert <bad-commit-sha>                # newest first if several
+   docker compose -f docker-compose.facelessforge.yml up -d --force-recreate --no-deps facelessforge-app
+   ```
+
+3. **Env file:** the stack reads the compose `env_file`, `/opt/facelessforge/deploy/.env.facelessforge`.
+
+4. **Secret rotation:** after changing that env file, recreate the app with `--no-deps`.
+
+5. **Code rollback:** do not use `git reset --hard`.
+   ```bash
+   git log --oneline -5
+   git revert <bad-commit-sha>
    docker compose -f docker-compose.facelessforge.yml up -d --build --no-deps facelessforge-app
    docker inspect facelessforge-app --format '{{.State.Health.Status}}'
    curl -s http://127.0.0.1:7001/api/health
    ```
-   File-level priors for recent slices live under `/root/ffbackups/<timestamp>-<slice>/`
-   (each with `changed-files.txt`, `PRIOR_SHA.txt`, `rollback.txt`). Confirm zero
-   active renders in the last 90 minutes before any rebuild (see SWARM_STATE.md).
-

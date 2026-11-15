@@ -43,15 +43,15 @@ The [Wealth Mode Mentality](https://youtube.com) channel grew from 300 to 66,000
 | Assembly | ffmpeg — 1920×1080 H.264 + AAC |
 | Storage | Cloudflare R2 — videos.ethinx.solutions CDN |
 | Upload | YouTube Data API v3 |
-| Scheduler | Hetzner VPS cron — 10AM UTC daily |
-| Hosting | Google Cloud Run (australia-southeast1) |
+| Scheduler | In-app job `forge_daily_0900`, 09:00 Australia/Adelaide (`backend/app/workers/forge_loop.py`) |
+| Hosting | Docker Compose `docker-compose.facelessforge.yml` — host `127.0.0.1:7001` to container `8080`, `uvicorn main:app` |
 
 ---
 
 ## Pipeline Flow
 
 ```
-Topic Queue (/root/topics.txt)
+Topic queue
       │
       ▼
 Script Generation (DeepSeek)
@@ -90,7 +90,7 @@ Topic removed from queue → next topic queued
 ## Infrastructure
 
 - **GCP Project:** ethinx-prime (australia-southeast1)
-- **Hetzner VPS:** 91.99.162.243 — render engine, cron scheduler
+- **Hetzner VPS:** 91.99.162.243 — Docker Compose host (`docker-compose.facelessforge.yml`)
 - **GCS Bucket:** facelessforge-videos
 - **CDN:** videos.ethinx.solutions (Cloudflare R2)
 - **YouTube Channel:** @Tdog-u8l
@@ -99,27 +99,12 @@ Topic removed from queue → next topic queued
 
 ## Topic Queue
 
-Topics live at `/root/topics.txt` on the Hetzner server. One topic per line. The scheduler picks the next topic each day and removes it after successful upload.
-
-Current queue capacity: 55+ topics (approx 55 days of daily uploads).
-
 Example topics:
 ```
 The $40 Air Mattress Side Hustle That Became a $100B+ Travel Empire
 The Broken Payments Problem That Created Stripe's $100B+ Infrastructure
 How a $12 Annoyance Turned Into Uber's $80B+ Global Logistics Network
 ```
-
----
-
-## Daily Scheduler
-
-```bash
-# Cron — runs at 10AM UTC daily
-0 10 * * * /root/run_pipeline.sh >> /root/ethinx_pipeline.log 2>&1
-```
-
-**Flow:** Pick topic → render → poll status → download MP4 → upload to YouTube → remove topic → log result
 
 ---
 
@@ -157,4 +142,4 @@ Unfairly dismissed. Moved into a camper trailer. Ran off a generator. Built an A
 
 ---
 
-*Confidential — ETHINX Solutions | Updated: June 2026*# Here are your Instructions
+*Confidential — ETHINX Solutions | Updated: June 2026*
