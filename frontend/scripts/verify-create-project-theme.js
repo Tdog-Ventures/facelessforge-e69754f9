@@ -229,18 +229,18 @@ function startServer() {
       const errColor = blend(parseColor(getComputedStyle(errEl).color), cardBg);
 
       const allButtons = Array.from(document.querySelectorAll('[data-testid="create-project-form"] button'));
-      const selectedPill = allButtons.find((b) => b.textContent.trim() === "300s");
-      const unselectedPill = allButtons.find((b) => b.textContent.trim() === "60s");
       const submitBtn = document.querySelector('[data-testid="create-project-submit"]');
       const cancelBtn = allButtons.find((b) => b.textContent.trim() === "Cancel");
 
-      const selPillBg = effectiveBg(selectedPill);
-      const selPillText = blend(parseColor(getComputedStyle(selectedPill).color), selPillBg);
-      const selPillBorder = blend(parseColor(getComputedStyle(selectedPill).borderColor), cardBg);
-
-      const unselPillBg = effectiveBg(unselectedPill);
-      const unselPillText = blend(parseColor(getComputedStyle(unselectedPill).color), unselPillBg);
-      const unselPillBorder = blend(parseColor(getComputedStyle(unselectedPill).borderColor), cardBg);
+      // Duration is a slider plus a readout, not the old 60s/300s chips.
+      const lengthReadout = document.querySelector('[data-testid="length-readout"]');
+      const lengthScale = Array.from(document.querySelectorAll('[data-testid="create-project-form"] span')).find(
+        (s) => s.textContent.trim() === "5 seconds",
+      );
+      const readoutBg = effectiveBg(lengthReadout);
+      const readoutText = blend(parseColor(getComputedStyle(lengthReadout).color), readoutBg);
+      const scaleBg = effectiveBg(lengthScale);
+      const scaleText = blend(parseColor(getComputedStyle(lengthScale).color), scaleBg);
 
       const submitBg = effectiveBg(submitBtn);
       const submitText = blend(parseColor(getComputedStyle(submitBtn).color), submitBg);
@@ -273,9 +273,8 @@ function startServer() {
           placeholderVsBg: contrast(phColor, inputBg),
           selectTextVsBg: contrast(selectText, selectBg),
           errorVsCard: contrast(errColor, cardBg),
-          selectedPillTextVsBg: contrast(selPillText, selPillBg),
-          selectedPillBorderVsCard: contrast(selPillBorder, cardBg),
-          unselectedPillTextVsBg: contrast(unselPillText, unselPillBg),
+          lengthReadoutVsCard: contrast(readoutText, readoutBg),
+          lengthScaleVsCard: contrast(scaleText, scaleBg),
           inputBorderVsCard: contrast(inputBorder, cardBg),
           selectBorderVsCard: contrast(selectBorder, cardBg),
           focusOutlineVsCard: contrast(inputFocusOutline, cardBg),
@@ -354,9 +353,8 @@ function startServer() {
     check("placeholderVsBg", c.placeholderVsBg, 4.5);
     check("selectTextVsBg", c.selectTextVsBg, 4.5);
     check("errorVsCard", c.errorVsCard, 4.5);
-    check("selectedPillTextVsBg", c.selectedPillTextVsBg, 4.5);
-    check("selectedPillBorderVsCard", c.selectedPillBorderVsCard, 3.0);
-    check("unselectedPillTextVsBg", c.unselectedPillTextVsBg, 4.5);
+    check("lengthReadoutVsCard", c.lengthReadoutVsCard, 4.5);
+    check("lengthScaleVsCard", c.lengthScaleVsCard, 4.5);
     check("inputBorderVsCard", c.inputBorderVsCard, 3.0);
     check("selectBorderVsCard", c.selectBorderVsCard, 3.0);
     check("focusOutlineVsCard", c.focusOutlineVsCard, 3.0);
