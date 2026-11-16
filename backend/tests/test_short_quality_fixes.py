@@ -63,7 +63,7 @@ async def test_deterministic_stock_query_runs_before_optional_llm(monkeypatch, t
     async def fail_if_llm_is_called(*_args, **_kwargs):
         raise AssertionError("optional LLM must not delay a usable deterministic stock query")
 
-    async def fake_search_stock_videos(_query, per_page):
+    async def fake_search_stock_videos(_query, per_page, **_kwargs):
         assert per_page == 30
         return [{
             "external_id": "clip-1",

@@ -194,18 +194,21 @@ def test_no_footage_is_the_only_failure(monkeypatch):
     assert db.assets.docs == []
 
 
-def test_preflight_accepts_holds_that_cover_the_scene():
+def test_preflight_rejects_holds_that_are_the_same_few_clips():
     project = {"id": PID, "target_duration": 29, "selected_voiceover_asset_id": "v1", "selected_thumbnail_asset_id": "t1"}
     scenes = [{"id": "scene-1", "scene_number": 1, "duration": 28.8, "start_time": 0, "end_time": 28.8}]
     assets = [
         {"id": "t1", "asset_type": "generated_thumbnail"},
         {"id": "v1", "asset_type": "voiceover_audio", "duration": 28.8, "status": "selected"},
-        {"id": "a", "asset_type": "stock_video", "scene_id": "scene-1", "source": "pexels", "duration": 14.4, "status": "attached"},
-        {"id": "b", "asset_type": "stock_video", "scene_id": "scene-1", "source": "pexels", "duration": 14.4, "status": "attached"},
+        {"id": "a", "asset_type": "stock_video", "scene_id": "scene-1", "source": "pexels",
+         "external_id": "a", "download_url": "https://stock.example/a.mp4", "duration": 14.4, "status": "attached"},
+        {"id": "b", "asset_type": "stock_video", "scene_id": "scene-1", "source": "pexels",
+         "external_id": "b", "download_url": "https://stock.example/b.mp4", "duration": 14.4, "status": "attached"},
     ]
     check = validate_prerequisites(project, {"full_script": "eggs " * 40}, scenes, {"id": "m"}, assets)
     pacing = next(item for item in check["checklist"] if item["key"] == "scene_assets")
-    assert pacing["ok"] is True
+    assert pacing["ok"] is False
+    assert "Scene 1 has 2 of 8 required distinct clips" in pacing["hint"]
 
 
 def test_short_video_and_still_are_looped_for_a_longer_hold():
