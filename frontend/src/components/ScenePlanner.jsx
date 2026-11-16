@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { toast } from "sonner";
 import { Sparkles, Loader2, Download, Search, X as XIcon, Wand2, CreditCard, Zap, Film } from "lucide-react";
 import { api, formatApiError, API, UNBOUNDED_TIMEOUT } from "../lib/api";
+import { checkRenderConflict, listRenderJobs, reconnectRender, shouldReconnectRender } from "../lib/renderJobs";
 import { formatDuration, sceneBudgetLabel } from "../lib/format";
 import StockAssetModal from "./StockAssetModal";
 import { useConfirm } from "./ConfirmDialog";
@@ -10,7 +11,7 @@ import { useNavigate } from "react-router-dom";
 import { createDodoCheckout, DODO_PRODUCT_IDS } from "../lib/dodo";
 import { beginAssetAttachment, finishAssetAttachment, pendingAssetAttachment } from "../lib/assetAttachmentOperation";
 
-export default function ScenePlanner({ projectId, scenes, canEdit, onChange, hasScript, attachedAssets = [], project }) {
+export default function ScenePlanner({ projectId, scenes, canEdit, onChange, onRenderRecovered, hasScript, attachedAssets = [], project }) {
   const [generating, setGenerating] = useState(false);
   const [autoAttaching, setAutoAttaching] = useState(false);
   const [pendingAttachment, setPendingAttachment] = useState(null);
@@ -20,6 +21,8 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
   const [exhaustedInfo, setExhaustedInfo] = useState(null);
   const [showPricingModal, setShowPricingModal] = useState(false);
   const [fullRenderLoading, setFullRenderLoading] = useState(false);
+  const [renderUnconfirmed, setRenderUnconfirmed] = useState(false);
+  const [renderError, setRenderError] = useState("");
   const [directing, setDirecting] = useState(false);
   const [innerProject, setInnerProject] = useState(project || null);
   const confirm = useConfirm();
@@ -117,26 +120,64 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
 
   const fullRender = async () => {
     setFullRenderLoading(true);
+    setRenderError("");
     try {
-      await api.post(`/render/full/${projectId}`, {}, { timeout: 60000 });
-      toast.success("Render queued");
-    } catch (e) {
-      const timedOut = e?.code === "ECONNABORTED" || !e?.response;
-      if (timedOut || e?.response?.status === 409) {
-        toast.error("Render was not confirmed", {
-          description: "Check Render & Export before trying again. A timed-out request may already be queued.",
-        });
-        return;
-      }
-      if (e?.response?.status !== 404) {
-        toast.error("Render failed", { description: formatApiError(e.response?.data?.detail) || e.message });
-        return;
-      }
+      const previousJobs = await listRenderJobs(projectId);
       try {
-        await api.post(`/projects/${projectId}/render/start`, {}, { timeout: 60000 });
+        const options = { timeout: 60000 };
+        await api.post(`/render/full/${projectId}`, {}, options).catch((error) => {
+          if (error.response?.status !== 404) throw error;
+          return api.post(`/projects/${projectId}/render/start`, {}, options);
+        });
         toast.success("Render queued");
-      } catch (e2) {
-        toast.error("Render failed", { description: formatApiError(e2.response?.data?.detail) || e2.message });
+        setRenderUnconfirmed(false);
+      } catch (error) {
+        if (error.response?.status === 409) {
+          let found = null;
+          try {
+            found = await checkRenderConflict(projectId, previousJobs);
+          } catch {
+            found = null;
+          }
+          if (found?.job) {
+            setRenderUnconfirmed(false);
+            toast.success("Reconnected to render", { id: "full-render", description: `Current status: ${found.job.status}.` });
+            onRenderRecovered?.();
+          } else {
+            const message = formatApiError(error.response?.data?.detail);
+            setRenderUnconfirmed(false);
+            setRenderError(message);
+            toast.error(message, { id: "full-render" });
+          }
+          return;
+        }
+        if (!shouldReconnectRender(error)) throw error;
+        toast.loading("Reconnecting to the render…", { id: "full-render" });
+        const recovered = await reconnectRender(projectId, previousJobs);
+        if (recovered) {
+          toast.success("Reconnected to render", { id: "full-render", description: `Current status: ${recovered.job.status}.` });
+          onRenderRecovered?.();
+        } else {
+          setRenderUnconfirmed(true);
+          toast.warning("Render start is unconfirmed", {
+            id: "full-render",
+            description: "Check Render & Export for the job before trying again.",
+          });
+        }
+      }
+    } catch (error) {
+      const detail = error.response?.data?.detail;
+      const issues = detail && typeof detail === "object" && Array.isArray(detail.issues) ? detail.issues : [];
+      const footage = issues.filter((item) => String(item).includes("required distinct clips"));
+      const message = footage.join(" ")
+        || (issues.length ? issues.join(" · ") : "")
+        || formatApiError(detail)
+        || error.message;
+      if (footage.length) {
+        setRenderError(message);
+        toast.error(message);
+      } else {
+        toast.error("Could not confirm render", { description: message });
       }
     } finally {
       setFullRenderLoading(false);
@@ -308,12 +349,16 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, has
         {canEdit && project?.production_mode !== "commercial_ad" && (
           <button
             data-testid="full-render-btn"
-            onClick={fullRender}
-            disabled={fullRenderLoading}
+            onClick={renderUnconfirmed ? onRenderRecovered : fullRender}
+            disabled={fullRenderLoading || (renderUnconfirmed && !onRenderRecovered)}
             className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-bold text-sm px-4 py-3 rounded-md hover:from-blue-500 hover:to-indigo-500 disabled:opacity-50 shadow-lg"
           >
-            {fullRenderLoading ? <Loader2 size={14} className="animate-spin" /> : <Film size={16} />} FULL RENDER - START TO FINISH
+            {fullRenderLoading ? <Loader2 size={14} className="animate-spin" /> : <Film size={16} />}
+            {renderUnconfirmed ? "CHECK RENDER STATUS" : "FULL RENDER - START TO FINISH"}
           </button>
+        )}
+        {renderError && (
+          <p data-testid="full-render-error" className="text-sm text-[#FF3366]">{renderError}</p>
         )}
         <BillingBar />
         {canEdit && scenes.length > 0 && project?.production_mode !== "commercial_ad" && (

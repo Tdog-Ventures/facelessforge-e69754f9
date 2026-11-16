@@ -1,8 +1,12 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Play, Loader2, Film } from "lucide-react";
 import { api, formatApiError, API } from "../lib/api";
 import { RENDER_CREDIT_COST } from "../lib/credits";
+import {
+  ACTIVE_RENDER_STATES as ACTIVE_STATES, checkRenderConflict, listRenderJobs, normalizeRenderJob,
+  reconnectRender, shouldReconnectRender,
+} from "../lib/renderJobs";
 import PrereqChecklist from "./render/PrereqChecklist";
 import RenderPreviewCards from "./render/RenderPreviewCards";
 import JobStatusCard from "./render/JobStatusCard";
@@ -11,16 +15,11 @@ import JobHistory from "./render/JobHistory";
 import VoiceStylePicker from "./voiceover/VoiceStylePicker";
 import MusicPanel from "./MusicPanel";
 
-const ACTIVE_STATES = new Set(["queued", "validating", "preparing_assets", "rendering", "verifying"]);
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 // Only completed jobs deserve the full status card (they show the player +
 // download). In-progress jobs also show it. Cancelled / failed get a calm
 // banner instead (see LastTerminalNotice) and live in the history list.
 const PROMOTABLE = new Set([...ACTIVE_STATES, "completed"]);
-const normalizeJob = (job) => job
-  ? { ...job, status: String(job.status || "").toLowerCase() }
-  : job;
-
 function usablePreflight(data) {
   return Boolean(data)
     && typeof data === "object"
@@ -40,6 +39,7 @@ export default function RenderPanel({
   const [jobs, setJobs] = useState([]);
   const [activeJob, setActiveJob] = useState(null);
   const [starting, setStarting] = useState(false);
+  const [startError, setStartError] = useState(null);
   const [cancelling, setCancelling] = useState(false);
   const [fitting, setFitting] = useState(false);
   const [creditState, setCreditState] = useState({ status: "loading", remaining: 0, unmetered: false });
@@ -47,7 +47,6 @@ export default function RenderPanel({
   const [burnSubtitles, setBurnSubtitles] = useState(false);
   // was: aspect_ratio: "9:16"
   const [aspect, setAspect] = useState(project?.aspect_ratio || "9:16");
-  const pollRef = useRef(null);
 
   useEffect(() => {
     if (project?.voice_style || project?.voice_id) setVoiceStyle(project.voice_style || project.voice_id);
@@ -76,98 +75,92 @@ export default function RenderPanel({
   };
 
   const refreshAll = async () => {
-    const creditsPromise = loadCredits();
-    try {
     setJobsWarning(null);
-    let preflightData = null;
-    try {
-      const pf = await api.get(`/projects/${projectId}/render/preflight`, { timeout: 15000 });
-      preflightData = pf.data;
-    } catch (err) {
-      const status = err.response?.status;
-      const message = formatApiError(err.response?.data?.detail) || err.message || "Failed to load render data";
-      setLoadError(status ? `${message} (HTTP ${status})` : message);
-      setPreflightStale(true);
-      return;
-    }
-    if (!usablePreflight(preflightData)) {
-      setLoadError("Render preflight returned an unusable response.");
-      setPreflightStale(true);
-      return;
-    }
-    setPreflight(preflightData);
-    setPreflightStale(false);
-    setLoadError(null);
-    try {
-      const jl = await api.get(`/projects/${projectId}/render/jobs`, { timeout: 15000 });
-      const rows = Array.isArray(jl.data) ? jl.data : null;
-      if (!rows) {
-        setJobsWarning("Render history response was not a list.");
-        return;
+    const refreshReadiness = async () => {
+      try {
+        const { data } = await api.get(`/projects/${projectId}/render/preflight`, { timeout: 15000 });
+        if (!usablePreflight(data)) throw new Error("Render preflight returned an unusable response.");
+        setPreflight(data);
+        setPreflightStale(false);
+        setLoadError(null);
+      } catch (err) {
+        const status = err.response?.status;
+        const message = err.response?.data?.detail ? formatApiError(err.response.data.detail) : err.message;
+        setLoadError(status ? `${message} (HTTP ${status})` : message);
+        setPreflightStale(true);
       }
-      const normalizedJobs = rows.map(normalizeJob);
-      setJobs(normalizedJobs);
-      const active = normalizedJobs.find((j) => ACTIVE_STATES.has(j.status));
-      const latest = normalizedJobs[0] || null;
-      // Only show the in-detail JobStatusCard for active or completed jobs.
-      // Cancelled / failed jobs surface as a calm banner via LastTerminalNotice
-      // and remain accessible in the JobHistory list below.
-      setActiveJob(active || (latest && PROMOTABLE.has(latest.status) ? latest : null));
-      setJobsKnown(true);
-    } catch (err) {
-      const status = err.response?.status;
-      const message = formatApiError(err.response?.data?.detail) || err.message || "Failed to load render history";
-      // Keep the last known job so a history blip does not hide a running render
-      // or enable Start while that job is still going.
-      setJobsWarning(status ? `${message} (HTTP ${status})` : message);
-    }
-    } finally {
-      await creditsPromise;
-    }
+    };
+    const refreshJobs = async () => {
+      try {
+        const history = await listRenderJobs(projectId);
+        setJobs(history);
+        const active = history.find((job) => ACTIVE_STATES.has(job.status));
+        const latest = history[0];
+        setActiveJob(active || (PROMOTABLE.has(latest?.status) ? latest : null));
+        setJobsKnown(true);
+      } catch (err) {
+        const status = err.response?.status;
+        const message = err.response?.data?.detail ? formatApiError(err.response.data.detail) : err.message;
+        // Preserve the status card when the history request fails.
+        setJobsKnown(false);
+        setJobsWarning(`Render history did not load. ${status ? `${message} (HTTP ${status})` : message}`);
+      }
+    };
+    await Promise.all([refreshReadiness(), refreshJobs(), loadCredits()]);
   };
 
   useEffect(() => {
     refreshAll();
-    return () => clearInterval(pollRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 
-  // Poll while a job is active
+  // Keep status reads short and sequential so a slow gateway cannot pile up requests.
+  const activeJobId = ACTIVE_STATES.has(activeJob?.status) ? activeJob.id : null;
   useEffect(() => {
-    clearInterval(pollRef.current);
-    if (!activeJob || !ACTIVE_STATES.has(String(activeJob.status || "").toLowerCase())) return;
-    pollRef.current = setInterval(async () => {
+    if (!activeJobId) return;
+    let stopped = false;
+    let timer;
+    const poll = async () => {
       try {
-        const { data } = await api.get(`/projects/${projectId}/render/jobs/${activeJob.id}`);
-        const normalizedJob = normalizeJob(data);
-        if (TERMINAL.has(normalizedJob.status)) {
-          clearInterval(pollRef.current);
-          // Only keep the active card for completed (player + download).
-          // Cancelled/failed drop out so LastTerminalNotice + history take over.
-          setActiveJob(PROMOTABLE.has(normalizedJob.status) ? normalizedJob : null);
-          const [pf, jl, full] = await Promise.all([
-            api.get(`/projects/${projectId}/render/preflight`),
-            api.get(`/projects/${projectId}/render/jobs`),
-            api.get(`/projects/${projectId}`),
-          ]);
-          setPreflight(pf.data);
-          setJobs((jl.data || []).map(normalizeJob));
-          onChange(full.data);
-          if (normalizedJob.status === "completed") {
+        const { data } = await api.get(`/projects/${projectId}/render/jobs/${activeJobId}`, { timeout: 10000 });
+        if (stopped) return;
+        const job = normalizeRenderJob(data);
+        if (TERMINAL.has(job.status)) {
+          setJobs((history) => [job, ...history.filter((item) => item.id !== job.id)]);
+          setActiveJob(PROMOTABLE.has(job.status) ? job : null);
+          if (job.status === "completed") {
             toast.success("Render complete", { description: "MP4 ready below." });
-          } else if (normalizedJob.status === "failed") {
-            toast.error("Render failed", { description: normalizedJob.error_message || "Unknown error" });
-          } else if (normalizedJob.status === "cancelled") {
+          } else if (job.status === "failed") {
+            toast.error("Render failed", { description: job.error_message || "Unknown error" });
+          } else {
             toast("Render cancelled");
           }
-        } else {
-          setActiveJob(normalizedJob);
+          void refreshAll();
+          void refreshProject();
+          return;
         }
-      } catch {/* silent retry */}
-    }, 2500);
-    return () => clearInterval(pollRef.current);
+        setActiveJob(job);
+      } catch {
+        // Continue polling the same job after a transient connection error.
+      }
+      if (!stopped) timer = setTimeout(poll, 2500);
+    };
+    timer = setTimeout(poll, 2500);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeJob?.id, activeJob?.status]);
+  }, [projectId, activeJobId]);
+
+  const refreshProject = async () => {
+    try {
+      const { data } = await api.get(`/projects/${projectId}`, { timeout: 15000 });
+      onChange(data);
+    } catch {
+      // The status card can show the completed job without this refresh.
+    }
+  };
 
   const getAudioDuration = (url) => new Promise((resolve) => {
     if (!url) return resolve(0);
@@ -182,6 +175,18 @@ export default function RenderPanel({
   const creditsAllow = creditState.status === "ready"
     && (creditState.unmetered || creditState.remaining >= RENDER_CREDIT_COST);
 
+  const showRecoveredJob = async (recovered) => {
+    const { job, jobs: recoveredJobs } = recovered;
+    setJobs(recoveredJobs);
+    setActiveJob(PROMOTABLE.has(job.status) ? job : null);
+    setJobsKnown(true);
+    setJobsWarning(null);
+    setStartError(null);
+    toast.success("Reconnected to render", { description: `Current status: ${job.status}.` });
+    if (TERMINAL.has(job.status)) void refreshProject();
+    await loadCredits();
+  };
+
   const start = async () => {
     if (!creditsAllow) {
       const description = creditState.status === "ready"
@@ -191,6 +196,7 @@ export default function RenderPanel({
       return;
     }
     setStarting(true);
+    setStartError(null);
     // Pre-render validation: VO vs scenes total mismatch
     try {
       const voAssets = (assets || []).filter(a => a.asset_type === "voiceover_audio" && a.status !== "rejected");
@@ -231,13 +237,40 @@ export default function RenderPanel({
     }
     try {
       const { data } = await api.post(`/projects/${projectId}/render/start`, { voice_style: voiceStyle, voice_id: voiceStyle, burn_subtitles: burnSubtitles, aspect_ratio: aspect });
-      setActiveJob(normalizeJob(data));
+      const job = normalizeRenderJob(data);
+      setActiveJob(job);
+      setJobs((history) => [job, ...history.filter((item) => item.id !== job.id)]);
       toast.success("Render queued");
-      const jl = await api.get(`/projects/${projectId}/render/jobs`);
-      setJobs((jl.data || []).map(normalizeJob));
-      console.log("[Render] Queued", data);
       await loadCredits();
     } catch (err) {
+      if (err.response?.status === 409) {
+        try {
+          const found = await checkRenderConflict(projectId, jobs);
+          if (found?.job) {
+            await showRecoveredJob(found);
+            return;
+          }
+        } catch {
+          // One status read failed. The 409 detail is the refusal.
+        }
+        setJobsKnown(true);
+        setJobsWarning(null);
+        const message = formatApiError(err.response?.data?.detail);
+        setStartError(message);
+        toast.error(message);
+        return;
+      }
+      if (shouldReconnectRender(err)) {
+        setJobsKnown(false);
+        setJobsWarning("Reconnecting to check whether the render was queued…");
+        const recovered = await reconnectRender(projectId, jobs);
+        if (recovered) {
+          await showRecoveredJob(recovered);
+        } else {
+          setJobsWarning("Render start is unconfirmed. Check status before starting another render.");
+        }
+        return;
+      }
       const detail = err.response?.data?.detail;
       const msg = typeof detail === "object" ? JSON.stringify(detail) : String(detail || err.message);
       console.error("[Render] Start failed", err, detail, err.stack);
@@ -258,14 +291,18 @@ export default function RenderPanel({
       } else if (typeof detail === "object" && detail?.issues) {
         const footage = detail.issues.filter((item) => String(item).includes("required distinct clips"));
         if (footage.length) {
-          toast.error("Not enough footage", { description: footage.join(" ") });
+          const footageText = footage.join(" ");
+          setStartError(footageText);
+          toast.error("Not enough footage", { description: footageText });
         }
         const other = detail.issues.filter((item) => !String(item).includes("required distinct clips"));
         if (other.length) {
           toast.error("Cannot start render", { description: other.join(" · ") });
         }
-      } else if (err.response?.status === 409) {
-        toast.error("Render already running", { description: msg });
+        if (Array.isArray(detail.checklist)) {
+          setPreflight({ ok: false, issues: detail.issues, checklist: detail.checklist });
+          setPreflightStale(false);
+        }
       } else {
         toast.error("Start failed: something went wrong please try again", { description: formatApiError(detail) || err.message + ` | ${msg}` });
       }
@@ -293,33 +330,11 @@ export default function RenderPanel({
     }
   };
 
-  if (!preflight || (preflightStale && !usablePreflight(preflight))) {
-    if (loadError) {
-      return (
-        <div className="p-8 space-y-3" data-testid="render-load-error">
-          <p className="text-sm text-[var(--ff-text)]">Could not load render state.</p>
-          <p className="font-mono text-xs text-[var(--ff-text-muted)]">{loadError}</p>
-          <button
-            type="button"
-            data-testid="render-retry"
-            onClick={refreshAll}
-            className="font-mono text-[10px] uppercase tracking-widest border border-[var(--ff-input-border)] px-3 py-2 text-[var(--ff-text)] hover:border-[#00E5FF] hover:text-[#00E5FF]"
-          >
-            Retry
-          </button>
-        </div>
-      );
-    }
-    return (
-      <div className="p-8 text-sm text-[var(--ff-text-muted)] font-mono">Loading render state…</div>
-    );
-  }
-
   const creditsAllowNow = creditState.status === "ready"
     && (creditState.unmetered || creditState.remaining >= RENDER_CREDIT_COST);
-  const canRender = preflight.ok && !preflightStale && jobsKnown && !ACTIVE_STATES.has(String(activeJob?.status || "").toLowerCase() || "") && creditsAllowNow;
-  const footageItem = (preflight.checklist || []).find((item) => item.key === "scene_assets" && item.ok === false);
-  const footageMessage = footageItem?.hint || (preflight.issues || []).filter((item) => String(item).includes("required distinct clips")).join(" ");
+  const canRender = preflight?.ok && !preflightStale && jobsKnown && !ACTIVE_STATES.has(String(activeJob?.status || "").toLowerCase() || "") && creditsAllowNow;
+  const footageItem = (preflight?.checklist || []).find((item) => item.key === "scene_assets" && item.ok === false);
+  const footageMessage = footageItem?.hint || (preflight?.issues || []).filter((item) => String(item).includes("required distinct clips")).join(" ");
   const completed = String(activeJob?.status || "").toLowerCase() === "completed";
   const inProgress = activeJob && ACTIVE_STATES.has(String(activeJob.status || "").toLowerCase());
   const creditStop = inProgress
@@ -338,6 +353,47 @@ export default function RenderPanel({
   const selectedVoice = (assets || []).find(
     (a) => a.id === project.selected_voiceover_asset_id && a.asset_type === "voiceover_audio"
   );
+
+  const jobCard = activeJob && (
+    <JobStatusCard
+      job={activeJob}
+      project={project}
+      selectedThumbnail={selectedThumbnail}
+      canEdit={canEdit}
+      cancelling={cancelling}
+      starting={starting}
+      onCancel={cancel}
+      onRetry={start}
+      retryDisabled={!canRender}
+      downloadUrl={`${API}/projects/${projectId}/render/jobs/${activeJob.id}/download`}
+    />
+  );
+
+  if (!preflight || (preflightStale && !usablePreflight(preflight))) {
+    if (loadError) {
+      return (
+        <div className="p-8 space-y-3" data-testid="render-load-error">
+          {jobCard}
+          <p className="text-sm text-[var(--ff-text)]">Could not load render readiness.</p>
+          <p className="font-mono text-xs text-[var(--ff-text-muted)]">{loadError}</p>
+          <button
+            type="button"
+            data-testid="render-retry"
+            onClick={refreshAll}
+            className="font-mono text-[10px] uppercase tracking-widest border border-[var(--ff-input-border)] px-3 py-2 text-[var(--ff-text)] hover:border-[#00E5FF] hover:text-[#00E5FF]"
+          >
+            Retry
+          </button>
+        </div>
+      );
+    }
+    return (
+      <div className="space-y-3">
+        {jobCard}
+        <p className="p-8 text-sm text-[var(--ff-text-muted)] font-mono">Loading render readiness…</p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -373,8 +429,8 @@ export default function RenderPanel({
       )}
       {jobsWarning && (
         <div className="border border-amber-500/40 bg-amber-500/10 text-amber-200 text-sm px-4 py-3 rounded-sm" data-testid="render-jobs-warning">
-          Render history did not load. {jobsWarning}
-          <button type="button" onClick={refreshAll} className="ml-3 underline">Retry</button>
+          {jobsWarning}
+          <button type="button" onClick={refreshAll} disabled={starting} className="ml-3 underline">Check status</button>
         </div>
       )}
       {footageMessage && (
@@ -459,22 +515,10 @@ export default function RenderPanel({
       <RenderPreviewCards
         selectedThumbnail={selectedThumbnail}
         selectedVoice={selectedVoice}
+        aspect={aspect}
       />
 
-      {activeJob && (
-        <JobStatusCard
-          job={activeJob}
-          project={project}
-          selectedThumbnail={selectedThumbnail}
-          canEdit={canEdit}
-          cancelling={cancelling}
-          starting={starting}
-          onCancel={cancel}
-          onRetry={start}
-          retryDisabled={!creditsAllowNow}
-          downloadUrl={`${API}/projects/${projectId}/render/jobs/${activeJob.id}/download`}
-        />
-      )}
+      {jobCard}
 
       {!activeJob && jobs[0] && (String(jobs[0].status || "").toLowerCase() === "cancelled" || String(jobs[0].status || "").toLowerCase() === "failed") && (
         <LastTerminalNotice
@@ -482,11 +526,14 @@ export default function RenderPanel({
           canEdit={canEdit}
           starting={starting}
           onRetry={start}
-          retryDisabled={!creditsAllowNow}
+          retryDisabled={!canRender}
         />
       )}
 
       {/* Action bar */}
+      {startError && (
+        <p data-testid="render-start-error" className="text-sm text-[#FF3366]">{startError}</p>
+      )}
       {creditStop && (
         <p
           data-testid="render-credit-stop"

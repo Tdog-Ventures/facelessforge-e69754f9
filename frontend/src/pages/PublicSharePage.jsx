@@ -4,6 +4,7 @@ import axios from "axios";
 import { Copy, Check, ArrowRight } from "lucide-react";
 import { toast, Toaster } from "sonner";
 import StatusBadge from "../components/StatusBadge";
+import RenderVideo from "../components/render/RenderVideo";
 import { qualityColor, qualityLabel } from "../lib/format";
 import { API } from "../lib/api";
 
@@ -155,14 +156,11 @@ export default function PublicSharePage() {
           {selected_thumbnail_url && (
             <div className="mb-10 border border-[var(--ff-border)] rounded-sm overflow-hidden bg-[var(--ff-surface)]" data-testid="share-hero-thumbnail">
               {final_video?.url ? (
-                <video
+                <RenderVideo
                   data-testid="share-final-video"
-                  controls
                   poster={selected_thumbnail_url}
                   src={final_video.url}
-                  preload="metadata"
-                  className="w-full block"
-                  style={{ aspectRatio: "16 / 9", objectFit: "cover" }}
+                  aspect={final_video.aspect_ratio || "16:9"}
                 />
               ) : (
                 <img

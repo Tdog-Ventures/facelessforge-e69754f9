@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../lib/api";
+import RenderVideo from "./render/RenderVideo";
 import { toast } from "sonner";
 
-export default function ApprovalPanel({ projectId, jobId }) {
+export default function ApprovalPanel({ projectId, jobId, aspect }) {
   const [manifest, setManifest] = useState(null);
   const [watch, setWatch] = useState({ currentTime: 0, duration: 0, completed: false });
   const [hash, setHash] = useState(null);
@@ -40,7 +41,7 @@ export default function ApprovalPanel({ projectId, jobId }) {
       <div className="font-mono text-[10px] uppercase tracking-widest text-[var(--ff-text-muted)]">Exact-version Approval</div>
       <div className="text-xs font-mono break-all">video_hash: {manifest.video_hash}</div>
       <div className="text-xs font-mono break-all">manifest_hash: {hash?.checks ? JSON.stringify(hash).slice(0,60) : "..."}</div>
-      <video src={manifest.video_hash ? `/api/projects/${projectId}/download` : ""} controls onTimeUpdate={handleWatch} className="w-full aspect-video bg-black" />
+      <RenderVideo src={manifest.video_hash ? `/api/projects/${projectId}/download` : undefined} aspect={aspect} onTimeUpdate={handleWatch} />
       <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={watch.completed} readOnly /> I watched entire video ({Math.round(watch.currentTime)}s / {Math.round(watch.duration)}s)</label>
       <button onClick={approve} disabled={!watch.completed} className="w-full bg-blue-600 text-white text-xs font-mono uppercase tracking-widest px-3 py-2 rounded-sm disabled:opacity-50">Approve exact version</button>
       {!watch.completed && <div className="text-[10px] text-amber-400">Approve disabled until watched</div>}

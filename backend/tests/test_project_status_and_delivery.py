@@ -184,6 +184,44 @@ async def test_public_share_refreshes_video_and_download_urls(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_public_share_uses_project_aspect_for_portrait(monkeypatch):
+    project = {
+        "id": "project-1",
+        "user_id": "user-1",
+        "name": "Project One",
+        "niche": "testing",
+        "status": "COMPLETED",
+        "share_enabled": True,
+        "share_token": "share-token-1",
+        "aspect_ratio": "9:16",
+    }
+    final = {
+        "id": "job-1",
+        "project_id": "project-1",
+        "status": "completed",
+        "aspect_ratio": "9:16",
+        "output_storage_key": "renders/project-1/job-1.mp4",
+        "output_url": "expired://signed-url",
+    }
+
+    class FakeDB:
+        projects = _FakeCollection(project)
+        metadata_packages = _FakeCollection()
+        assets = _FakeCollection()
+        render_jobs = _FakeCollection(final)
+        provider_settings = _FakeCollection()
+
+    monkeypatch.setattr(api_routes, "get_db", lambda: FakeDB())
+    monkeypatch.setattr(api_routes, "resolve_delivery_url", lambda _job, **_kwargs: "fresh://signed-url")
+
+    payload = await api_routes.public_share("share-token-1")
+
+    assert payload["final_video"]["aspect_ratio"] == "9:16"
+    assert payload["final_video"]["width"] == 1080
+    assert payload["final_video"]["height"] == 1920
+
+
+@pytest.mark.asyncio
 async def test_export_package_refreshes_render_manifest_url(monkeypatch):
     project = {
         "id": "project-1",
@@ -219,6 +257,18 @@ async def test_export_package_refreshes_render_manifest_url(monkeypatch):
         manifest = json.loads(package.read("render.json"))
 
     assert manifest["url"] == "fresh://signed-url"
+    assert manifest["width"] == 1920 and manifest["height"] == 1080
+
+    final["aspect_ratio"] = "9:16"
+    project["aspect_ratio"] = "9:16"
+    response = await api_routes.export_package_zip(
+        "project-1", user={"id": "user-1", "role": "creator"}
+    )
+    body = b"".join([chunk async for chunk in response.body_iterator])
+    with zipfile.ZipFile(io.BytesIO(body)) as package:
+        portrait = json.loads(package.read("render.json"))
+    assert portrait["aspect_ratio"] == "9:16"
+    assert portrait["width"] == 1080 and portrait["height"] == 1920
 
 
 @pytest.mark.asyncio

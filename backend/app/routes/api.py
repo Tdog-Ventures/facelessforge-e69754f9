@@ -217,6 +217,18 @@ def _render_job_payload(job: dict | None) -> dict | None:
     return payload
 
 
+def _output_frame(project: dict | None, job: dict | None) -> dict:
+    """Pixel size for a finished render. The job's aspect wins, then the project's.
+
+    Missing both stays 16:9 so older landscape exports keep their recorded size.
+    """
+    aspect = (job or {}).get("aspect_ratio") or (project or {}).get("aspect_ratio")
+    if aspect not in ("9:16", "1:1", "16:9"):
+        aspect = "16:9"
+    width, height = render_service.get_dims(aspect)
+    return {"aspect_ratio": aspect, "width": width, "height": height}
+
+
 def _download_filename(project: dict | None) -> str:
     """Build a friendly, header-safe MP4 filename from the project name."""
     raw = (project or {}).get("name") or "facelessforge"
@@ -4647,8 +4659,7 @@ async def export_package_zip(project_id: str, user=Depends(get_current_user)):
                 "url": latest_payload.get("output_url"),
                 "completed_at": (latest.get("completed_at").isoformat()
                     if isinstance(latest.get("completed_at"), datetime) else latest.get("completed_at")),
-                "width": 1920,
-                "height": 1080,
+                **_output_frame(project, latest),
                 "fps": 30,
                 "video_codec": "h264",
                 "audio_codec": "aac",
@@ -5018,8 +5029,7 @@ async def public_share(token: str):
         "final_video": ({
             "url": final_render_payload.get("output_url"),
             "duration": final_render.get("duration"),
-            "width": 1920,
-            "height": 1080,
+            **_output_frame(project, final_render),
             "download_url": final_render_payload.get("output_url"),
             "gcs_mirror": final_render_payload.get("output_url"),
             "r2_mirror": final_render_payload.get("output_url"),

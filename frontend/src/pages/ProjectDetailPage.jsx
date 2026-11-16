@@ -11,6 +11,7 @@ import ScenePlanner from "../components/ScenePlanner";
 import MetadataPanel from "../components/MetadataPanel";
 import ThumbnailPanel from "../components/ThumbnailPanel";
 import RenderPanel from "../components/RenderPanel";
+import RenderVideo from "../components/render/RenderVideo";
 import SharePanel from "../components/SharePanel";
 import VoiceoverPanel from "../components/VoiceoverPanel";
 import IntakePacket from "../components/IntakePacket";
@@ -253,12 +254,10 @@ export default function ProjectDetailPage() {
                   <div className="font-mono text-[10px] uppercase tracking-widest text-[#00FF66]">
                     Final video · ready
                   </div>
-                  <video
-                    controls
+                  <RenderVideo
                     src={`${API}/projects/${project.id}/render/jobs/${render_job.id}/download`}
+                    aspect={render_job.aspect_ratio || project.aspect_ratio}
                     poster={assets.find(a => a.id === project.selected_thumbnail_asset_id)?.preview_url}
-                    preload="metadata"
-                    className="w-full rounded-sm border border-[rgba(59,130,246,0.15)] bg-black aspect-video"
                   />
                 </div>
               )}
@@ -276,7 +275,7 @@ export default function ProjectDetailPage() {
             <ScriptPanel projectId={project.id} script={script} canEdit={canEdit} onChange={setView} />
           )}
           {tab === "scenes" && (
-            <ScenePlanner projectId={project.id} project={project} scenes={scenes} canEdit={canEdit} onChange={setView} hasScript={!!script} attachedAssets={assets} />
+            <ScenePlanner projectId={project.id} project={project} scenes={scenes} canEdit={canEdit} onChange={setView} onRenderRecovered={() => setTab("render")} hasScript={!!script} attachedAssets={assets} />
           )}
           {tab === "metadata" && (
             <MetadataPanel
@@ -330,7 +329,7 @@ export default function ProjectDetailPage() {
           {tab === "claims" && <ClaimLedger projectId={project.id} />}
           {tab === "rights" && <RightsRegistry projectId={project.id} />}
           {tab === "compliance" && <ComplianceChecklist projectId={project.id} />}
-          {tab === "approval" && <ApprovalPanel projectId={project.id} jobId={render_job?.id} />}
+          {tab === "approval" && <ApprovalPanel projectId={project.id} jobId={render_job?.id} aspect={render_job?.aspect_ratio || project.aspect_ratio} />}
           {tab === "receipt" && <ProductionReceipt projectId={project.id} />}
         </div>
       </div>

@@ -2,6 +2,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import ScenePlanner from "./ScenePlanner";
 import { api } from "../lib/api";
+import { toast } from "sonner";
 import { pendingAssetAttachment } from "../lib/assetAttachmentOperation";
 
 const mockConfirm = jest.fn();
@@ -20,7 +21,7 @@ jest.mock("sonner", () => ({ toast: {
 
 const project = { id: "p1", production_mode: "editorial", target_duration: 30 };
 const props = {
-  projectId: "p1", project, canEdit: true, hasScript: true, onChange: jest.fn(),
+  projectId: "p1", project, canEdit: true, hasScript: true, onChange: jest.fn(), onRenderRecovered: jest.fn(),
   scenes: [{ id: "s1", scene_number: 1, narration_text: "Approved narration", end_time: 27.5 }],
   attachedAssets: [{ id: "original", scene_id: "s1", asset_type: "stock_video" }],
 };
@@ -104,4 +105,96 @@ test("unavailable retry storage prevents a chargeable request", async () => {
   await mount();
   await click();
   expect(api.post).not.toHaveBeenCalled();
+});
+
+test("full render reconnects after a Cloudflare 524 and opens Render & Export", async () => {
+  let jobReads = 0;
+  api.get.mockImplementation(async (path) => ({
+    data: path === "/billing/credits" ? { remaining: balance }
+      : ++jobReads === 1 ? [] : [{ id: "job", status: "rendering" }],
+  }));
+  api.post.mockRejectedValue({ response: { status: 524 } });
+
+  await mount();
+  await act(async () => { element.querySelector('[data-testid="full-render-btn"]').click(); });
+
+  expect(api.post).toHaveBeenCalledTimes(1);
+  expect(api.post.mock.calls[0][0]).toBe("/render/full/p1");
+  expect(props.onRenderRecovered).toHaveBeenCalledTimes(1);
+});
+
+const REFUSAL = "The project is being updated or another render is being released; retry shortly.";
+
+function renderJobReads() {
+  return api.get.mock.calls.filter(([path]) => String(path).includes("/render/jobs"));
+}
+
+test("full render resumes when a 409 still has an active job", async () => {
+  let jobReads = 0;
+  api.get.mockImplementation(async (path) => {
+    if (path === "/billing/credits") return { data: { remaining: balance } };
+    if (String(path).includes("/render/jobs")) {
+      jobReads += 1;
+      return { data: jobReads === 1 ? [] : [{ id: "job", status: "queued" }] };
+    }
+    return { data: { project, assets: [] } };
+  });
+  api.post.mockRejectedValue({ response: { status: 409, data: { detail: "A render is already in progress for this project." } } });
+
+  await mount();
+  await act(async () => { element.querySelector('[data-testid="full-render-btn"]').click(); });
+
+  expect(api.post).toHaveBeenCalledTimes(1);
+  expect(renderJobReads()).toHaveLength(2);
+  expect(props.onRenderRecovered).toHaveBeenCalledTimes(1);
+  expect(element.querySelector('[data-testid="full-render-btn"]').disabled).toBe(false);
+  expect(element.querySelector('[data-testid="full-render-btn"]').textContent).toContain("FULL RENDER");
+  expect(element.querySelector('[data-testid="full-render-error"]')).toBeNull();
+});
+
+test("full render shows a 409 refusal immediately and can be started again", async () => {
+  api.get.mockImplementation(async (path) => {
+    if (path === "/billing/credits") return { data: { remaining: balance } };
+    if (String(path).includes("/render/jobs")) return { data: [] };
+    return { data: { project, assets: [] } };
+  });
+  api.post.mockRejectedValue({ response: { status: 409, data: { detail: REFUSAL } } });
+
+  await mount();
+  const button = element.querySelector('[data-testid="full-render-btn"]');
+  await act(async () => { button.click(); });
+
+  expect(api.post).toHaveBeenCalledTimes(1);
+  expect(renderJobReads()).toHaveLength(2);
+  expect(props.onRenderRecovered).not.toHaveBeenCalled();
+  expect(toast.error).toHaveBeenCalledWith(REFUSAL, expect.objectContaining({ id: "full-render" }));
+  expect(element.querySelector('[data-testid="full-render-error"]').textContent).toBe(REFUSAL);
+  expect(button.disabled).toBe(false);
+  expect(button.textContent).toContain("FULL RENDER");
+  expect(button.textContent).not.toContain("CHECK RENDER STATUS");
+});
+
+test("full render shows a 400 footage refusal without reconnecting", async () => {
+  const sentence = "Scene 2 has 1 of 8 required distinct clips - run Find footage for scene 2.";
+  api.get.mockImplementation(async (path) => {
+    if (path === "/billing/credits") return { data: { remaining: balance } };
+    if (String(path).includes("/render/jobs")) return { data: [] };
+    return { data: { project, assets: [] } };
+  });
+  api.post.mockRejectedValue({
+    response: { status: 400, data: { detail: { message: "Prerequisites not met", issues: [sentence] } } },
+  });
+
+  await mount();
+  const button = element.querySelector('[data-testid="full-render-btn"]');
+  await act(async () => { button.click(); });
+
+  expect(api.post).toHaveBeenCalledTimes(1);
+  expect(renderJobReads()).toHaveLength(1);
+  expect(props.onRenderRecovered).not.toHaveBeenCalled();
+  expect(toast.error).toHaveBeenCalledWith(sentence);
+  expect(element.querySelector('[data-testid="full-render-error"]').textContent).toBe(sentence);
+  expect(button.disabled).toBe(false);
+  expect(button.textContent).toContain("FULL RENDER");
+  expect(button.textContent).not.toContain("CHECK RENDER STATUS");
 });

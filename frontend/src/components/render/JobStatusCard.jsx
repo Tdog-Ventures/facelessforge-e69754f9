@@ -1,4 +1,5 @@
 import React from "react";
+import RenderVideo from "./RenderVideo";
 import {
   Loader2, AlertCircle, CheckCircle2, Download, RefreshCw, Square as StopIcon,
 } from "lucide-react";
@@ -33,7 +34,6 @@ export default function JobStatusCard({
   // Label and player follow the render's real aspect (default 9:16), not a fixed 16:9.
   const aspect = job.aspect_ratio || project?.aspect_ratio || "9:16";
   const dims = { "16:9": "1920×1080", "1:1": "1080×1080" }[aspect] || "1080×1920";
-  const playerAspect = { "16:9": "16 / 9", "1:1": "1 / 1" }[aspect] || "9 / 16";
 
   return (
     <div
@@ -94,14 +94,11 @@ export default function JobStatusCard({
 
       {completed && deliveryUrl && (
         <div data-testid="render-output" className="space-y-3 pt-2">
-          <video
+          <RenderVideo
             data-testid="render-video-player"
-            controls
             src={deliveryUrl}
-            preload="metadata"
+            aspect={aspect}
             poster={selectedThumbnail?.preview_url}
-            className="w-full rounded-sm border border-[var(--ff-border)] bg-black"
-            style={{ aspectRatio: playerAspect, maxHeight: "70vh", objectFit: "contain" }}
           />
           <div className="flex flex-wrap items-center gap-2 font-mono text-[10px] text-[var(--ff-text-muted)] uppercase tracking-widest">
             <span data-testid="render-dims">{dims}</span>
