@@ -23,11 +23,11 @@ async function mount() {
     root.render(
       <RenderPanel
         projectId="p1"
-        project={{ id: "p1", target_duration: 136, aspect_ratio: "16:9" }}
+        project={{ id: "p1", target_duration: 136, aspect_ratio: "16:9", selected_thumbnail_asset_id: "thumb" }}
         script={{ full_script: "hello" }}
         scenes={[]}
         metadata={{}}
-        assets={[]}
+        assets={[{ id: "thumb", asset_type: "generated_thumbnail", preview_url: "/wide-thumbnail.png" }]}
         canEdit
         onChange={() => {}}
       />,
@@ -159,4 +159,43 @@ test("a missing credit balance keeps the render button off", async () => {
     .toContain("Render stays off");
   await act(async () => { button.click(); });
   expect(api.post).not.toHaveBeenCalled();
+});
+
+test("a 524 reconnects to the queued job without sending a second start request", async () => {
+  const previous = { id: "old-job", status: "completed" };
+  let jobsReads = 0;
+  api.get.mockImplementation(async (path) => {
+    if (path === "/billing/credits") return { data: { remaining: 3 } };
+    if (path.endsWith("/render/jobs")) {
+      return { data: ++jobsReads === 1 ? [previous] : [
+        { id: "new-job", status: "rendering", progress: 42, current_step: "rendering" },
+        previous,
+      ] };
+    }
+    return { data: { ok: true, issues: [], checklist: [] } };
+  });
+  api.post.mockRejectedValue({ response: { status: 524 } });
+
+  await mount();
+  await act(async () => { element.querySelector("[data-testid='render-start-btn']").click(); });
+
+  expect(api.post).toHaveBeenCalledTimes(1);
+  expect(element.querySelector("[data-testid='render-job-rendering']").textContent).toContain("42%");
+  expect(element.querySelector("[data-testid='render-start-btn']").disabled).toBe(true);
+});
+
+test("a portrait render uses a narrow player and omits the landscape poster", async () => {
+  api.get.mockImplementation(async (path) => {
+    if (path === "/billing/credits") return { data: { remaining: 3 } };
+    if (path.endsWith("/render/jobs")) {
+      return { data: [{ id: "portrait", status: "completed", aspect_ratio: "9:16" }] };
+    }
+    return { data: { ok: true, issues: [], checklist: [] } };
+  });
+
+  await mount();
+  const video = element.querySelector("[data-testid='render-video-player']");
+  expect(video.style.aspectRatio).toBe("9 / 16");
+  expect(video.style.maxWidth).toBe("39.375vh");
+  expect(video.getAttribute("poster")).toBeNull();
 });

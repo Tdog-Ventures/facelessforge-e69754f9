@@ -20,7 +20,7 @@ jest.mock("sonner", () => ({ toast: {
 
 const project = { id: "p1", production_mode: "editorial", target_duration: 30 };
 const props = {
-  projectId: "p1", project, canEdit: true, hasScript: true, onChange: jest.fn(),
+  projectId: "p1", project, canEdit: true, hasScript: true, onChange: jest.fn(), onRenderRecovered: jest.fn(),
   scenes: [{ id: "s1", scene_number: 1, narration_text: "Approved narration", end_time: 27.5 }],
   attachedAssets: [{ id: "original", scene_id: "s1", asset_type: "stock_video" }],
 };
@@ -104,4 +104,20 @@ test("unavailable retry storage prevents a chargeable request", async () => {
   await mount();
   await click();
   expect(api.post).not.toHaveBeenCalled();
+});
+
+test("full render reconnects after a Cloudflare 524 and opens Render & Export", async () => {
+  let jobReads = 0;
+  api.get.mockImplementation(async (path) => ({
+    data: path === "/billing/credits" ? { remaining: balance }
+      : ++jobReads === 1 ? [] : [{ id: "job", status: "rendering" }],
+  }));
+  api.post.mockRejectedValue({ response: { status: 524 } });
+
+  await mount();
+  await act(async () => { element.querySelector('[data-testid="full-render-btn"]').click(); });
+
+  expect(api.post).toHaveBeenCalledTimes(1);
+  expect(api.post.mock.calls[0][0]).toBe("/render/full/p1");
+  expect(props.onRenderRecovered).toHaveBeenCalledTimes(1);
 });

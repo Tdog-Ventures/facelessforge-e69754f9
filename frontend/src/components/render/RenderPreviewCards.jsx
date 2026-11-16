@@ -1,4 +1,5 @@
 import React from "react";
+import { videoRatio } from "./RenderVideo";
 
 function fmtSec(s) {
   if (!s && s !== 0) return "—";
@@ -7,7 +8,7 @@ function fmtSec(s) {
   return m > 0 ? `${m}m ${String(r).padStart(2, "0")}s` : `${r}s`;
 }
 
-export default function RenderPreviewCards({ selectedThumbnail, selectedVoice }) {
+export default function RenderPreviewCards({ selectedThumbnail, selectedVoice, aspect }) {
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
       <div className="border border-[var(--ff-border)] bg-[var(--ff-surface)] rounded-sm overflow-hidden">
@@ -19,7 +20,8 @@ export default function RenderPreviewCards({ selectedThumbnail, selectedVoice })
             src={selectedThumbnail.preview_url}
             alt="thumbnail"
             data-testid="render-preview-thumbnail"
-            className="w-full aspect-video object-cover"
+            className="block mx-auto object-cover"
+            style={{ aspectRatio: String(videoRatio(aspect)), width: "100%", maxWidth: `${40 * videoRatio(aspect)}vh` }}
           />
         ) : (
           <div className="aspect-video flex items-center justify-center text-[var(--ff-text-muted)] font-mono text-xs">
