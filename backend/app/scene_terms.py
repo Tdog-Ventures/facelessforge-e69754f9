@@ -7,7 +7,13 @@ Fixes:
 - Stops leaking script words like "might", "obsolete", "coming", "year", "small", "businesses", "drowning", "imagine", "software", "shift", "machine", "impact", "simulate" as single-word queries
 - Video preferred first order
 """
+import math
 import re
+
+# One judged frame-batch per search term before the next term gets a turn.
+PER_TERM_JUDGE_BUDGET = 8
+# The scene judge cap is this many frames for every clip the floor requires.
+JUDGE_FRAMES_PER_REQUIRED_CLIP = 6
 
 # Expanded stopwords to block abstract/modal/temporal leaks and single-word script dregs
 _STOP = set(
@@ -61,42 +67,153 @@ def holds_cover(scene_duration: float, clips: list) -> bool:
     return covered + 0.05 >= duration
 
 
-def broaden_stock_queries(scene: dict, project: dict, primary: str = "") -> list[str]:
-    """Specific scene query first, then shorter nouns, the topic, then a generic.
+def min_distinct_clips(duration: float) -> int:
+    """Hard floor of distinct clips for a scene.
 
-    Cooking topics end on kitchen footage. Other topics end on the niche,
-    then a broad everyday query. Repeated phrases are dropped.
+    The search still targets about one shot every 3 seconds. This floor is
+    one distinct clip per 4 seconds and is never below 3. A 28-second scene
+    therefore needs 8 different clips. Reused, borrowed, and Ken Burns
+    repeats fill time. They never count toward this number.
     """
-    queries: list[str] = []
+    try:
+        seconds = float(duration or 0)
+    except (TypeError, ValueError):
+        seconds = 0.0
+    if not math.isfinite(seconds) or seconds <= 0:
+        return 3
+    return max(3, math.ceil(seconds / 4))
 
-    def add(value, max_words: int = 5) -> None:
+
+def clips_to_find(duration: float) -> int:
+    """How many distinct clips to look for: one about every 3 seconds, at least the floor."""
+    try:
+        seconds = float(duration or 0)
+    except (TypeError, ValueError):
+        seconds = 0.0
+    if not math.isfinite(seconds) or seconds <= 0:
+        return min_distinct_clips(0)
+    return max(min_distinct_clips(seconds), math.ceil(seconds / 3))
+
+
+def scene_judge_cap(duration: float, *, configured_cap: int = 0) -> int:
+    """Judge budget for one scene. It grows with the distinct-clip floor."""
+    scaled = min_distinct_clips(duration) * JUDGE_FRAMES_PER_REQUIRED_CLIP
+    try:
+        configured = int(configured_cap or 0)
+    except (TypeError, ValueError):
+        configured = 0
+    return max(scaled, configured, 12)
+
+
+def footage_shortfall_message(scene_number, have: int, required: int) -> str:
+    """The sentence render preflight and render/start show for a short scene."""
+    label = scene_number if scene_number not in (None, "") else "?"
+    return (
+        f"Scene {label} has {have} of {required} required distinct clips "
+        f"- run Find footage for scene {label}."
+    )
+
+
+_FETCHABLE_FIELDS = ("download_url", "preview_url", "source_url", "file_path", "storage_key")
+_OWN_VISUAL_TYPES = {"stock_image", "stock_video"}
+
+
+def clip_is_downloadable(asset: dict) -> bool:
+    """A scene's own stock clip that can actually be fetched. Mocks never count."""
+    if not isinstance(asset, dict):
+        return False
+    if asset.get("status") == "rejected" or asset.get("mock"):
+        return False
+    if str(asset.get("source") or "").lower() in {"mock", "mock_tts"}:
+        return False
+    kind = str(asset.get("asset_type") or asset.get("media_type") or "")
+    if kind not in _OWN_VISUAL_TYPES:
+        return False
+    return any(str(asset.get(key) or "").strip() for key in _FETCHABLE_FIELDS)
+
+
+def distinct_downloadable_clips(clips, *, scene_id: str | None = None) -> int:
+    """Count distinct own clips. Repeats of the same provider id count once.
+
+    Pass ``scene_id`` to ignore borrowed clips that belong to another scene.
+    """
+    seen: set[str] = set()
+    for clip in clips or []:
+        if not isinstance(clip, dict) or not clip_is_downloadable(clip):
+            continue
+        if scene_id is not None and str(clip.get("scene_id") or "") != str(scene_id):
+            continue
+        identity = str(
+            clip.get("external_id")
+            or clip.get("download_url")
+            or clip.get("preview_url")
+            or clip.get("file_path")
+            or clip.get("storage_key")
+            or clip.get("id")
+            or ""
+        ).strip()
+        if not identity or identity in seen:
+            continue
+        seen.add(identity)
+    return len(seen)
+
+
+def stock_query_tiers(scene: dict, project: dict, primary: str = "") -> list[list[str]]:
+    """Escalation tiers, each one round-robin'd before the next starts.
+
+    1. The scene's own search terms (and the primary / visual-direction query).
+    2. Nouns taken from the narration.
+    3. The project topic.
+    4. Generic niche b-roll. Cooking topics end on kitchen footage.
+    """
+    scene_terms: list[str] = []
+    narration_terms: list[str] = []
+    topic_terms: list[str] = []
+    generic_terms: list[str] = []
+    seen: set[str] = set()
+
+    def add(bucket: list[str], value, max_words: int = 5) -> None:
         term = compact_stock_query(value, max_words=max_words)
-        if term and term.casefold() not in {item.casefold() for item in queries}:
-            queries.append(term)
+        if term and term.casefold() not in seen:
+            seen.add(term.casefold())
+            bucket.append(term)
 
-    add(primary)
+    add(scene_terms, primary)
     terms = scene.get("search_terms") or []
     if isinstance(terms, str):
         terms = [terms]
     for term in terms:
-        add(term)
-    add(scene.get("visual_direction") or "")
+        add(scene_terms, term)
+    add(scene_terms, scene.get("visual_direction") or "")
     narration = str(scene.get("narration_text") or "")
-    add(narration, 4)
-    add(narration, 2)
+    add(narration_terms, narration, 4)
+    add(narration_terms, narration, 2)
     topic = str((project or {}).get("topic") or "")
-    add(topic, 4)
-    add(topic, 2)
+    add(topic_terms, topic, 4)
+    add(topic_terms, topic, 2)
     niche = str((project or {}).get("niche") or "")
-    add(niche, 3)
+    add(topic_terms, niche, 3)
     blob = f"{topic} {niche} {narration} {scene.get('visual_direction') or ''}".lower()
     if re.search(r"\b(eggs?|cook\w*|kitchen|recipes?|food|fr(?:y|ied|ying)|boil\w*)\b", blob):
-        add("eggs cooking")
-        add("kitchen cooking")
+        add(generic_terms, "eggs cooking")
+        add(generic_terms, "kitchen cooking")
     elif niche:
-        add(niche, 2)
+        add(generic_terms, niche, 2)
     else:
-        add("everyday life")
+        add(generic_terms, "everyday life")
+    return [tier for tier in (scene_terms, narration_terms, topic_terms, generic_terms) if tier]
+
+
+def broaden_stock_queries(scene: dict, project: dict, primary: str = "") -> list[str]:
+    """Specific scene query first, then shorter nouns, the topic, then a generic.
+
+    Cooking topics end on kitchen footage. Other topics end on the niche,
+    then a broad everyday query. Repeated phrases are dropped. This is the
+    flat form of ``stock_query_tiers``.
+    """
+    queries: list[str] = []
+    for tier in stock_query_tiers(scene, project, primary):
+        queries.extend(tier)
     return queries
 
 

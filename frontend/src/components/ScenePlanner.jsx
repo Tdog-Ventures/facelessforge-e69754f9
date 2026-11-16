@@ -166,9 +166,19 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, onR
         }
       }
     } catch (error) {
-      toast.error("Could not confirm render", {
-        description: formatApiError(error.response?.data?.detail) || error.message,
-      });
+      const detail = error.response?.data?.detail;
+      const issues = detail && typeof detail === "object" && Array.isArray(detail.issues) ? detail.issues : [];
+      const footage = issues.filter((item) => String(item).includes("required distinct clips"));
+      const message = footage.join(" ")
+        || (issues.length ? issues.join(" · ") : "")
+        || formatApiError(detail)
+        || error.message;
+      if (footage.length) {
+        setRenderError(message);
+        toast.error(message);
+      } else {
+        toast.error("Could not confirm render", { description: message });
+      }
     } finally {
       setFullRenderLoading(false);
     }

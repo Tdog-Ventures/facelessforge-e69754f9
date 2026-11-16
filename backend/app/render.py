@@ -580,22 +580,11 @@ def validate_prerequisites(project: dict, script: dict | None,
         # Older rows have no hold and still pass when there are enough 3-second
         # clips. A short file or a still is looped for that hold at encode time
         # (-stream_loop -1 for video, -loop 1 for an image). Mock clips never count.
-        from .scene_terms import holds_cover
-        valid = [a for a in scene_assets if str(a.get("source") or "").lower() != "mock"
-                 and a.get("status") != "rejected"]
+        from .scene_terms import (
+            distinct_downloadable_clips, footage_shortfall_message, min_distinct_clips,
+        )
         scenes_by_id = {scene.get("id"): scene for scene in scenes if scene.get("id")}
         needs = dict(scenes_by_id)
-        # Visual Director: aim for one distinct picture every 3 seconds.
-        ideal_by_scene = {
-            sid: max(1, math.ceil(float(scene.get("duration") or 30) / 3))
-            for sid, scene in scenes_by_id.items()
-        }
-        counts: dict[str, int] = {}
-        clips_by_scene: dict[str, list] = {}
-        for asset in valid:
-            sid = asset.get("scene_id")
-            counts[sid] = counts.get(sid, 0) + 1
-            clips_by_scene.setdefault(sid, []).append(asset)
         # A stale or empty director plan must not waive the stock requirement.
         planned: dict[str, list] = {}
         director = project.get("visual_director") or {}
@@ -607,50 +596,34 @@ def validate_prerequisites(project: dict, script: dict | None,
                 ) or {}
             except DirectorError:
                 planned = {}
-        uncovered = []
-        missing = 0
-        total_required = sum(ideal_by_scene.values())
-        # Neighbours in play order, for the reuse rule below.
-        ordered_ids = [s.get("id") for s in sorted(
-            scenes, key=lambda item: item.get("scene_number", 0)) if s.get("id")]
-        for sid, scene in needs.items():
-            duration = float(scene.get("duration") or 30)
-            ideal = ideal_by_scene[sid]
-            have = counts.get(sid, 0)
-            clips = clips_by_scene.get(sid, [])
-            shots = planned.get(sid) or []
-            if shots and have < ideal:
-                have += min(ideal - have, len(shots))
-            # PR #33: footage whose stored holds cover the scene duration stays
-            # covered with fewer cuts. The Visual Director's 3-second target is
-            # the other accepted path. Both are preserved.
-            if holds_cover(duration, clips) or have >= ideal:
-                continue
-            # Option 1 (reuse): the render fills the plan by reusing this
-            # scene's own clips (up to 3 uses each, new trim + zoom/pan) and
-            # then adjacent scenes' clips once each. Word alignment moves scene
-            # durations after a render, so a hold-based pass can flip to a
-            # fail; reuse capacity does not depend on the exact duration.
-            own_have = counts.get(sid, 0)
-            pos = ordered_ids.index(sid) if sid in ordered_ids else -1
-            neighbour_counts = [
-                counts.get(ordered_ids[k], 0)
-                for k in (pos - 1, pos + 1) if 0 <= k < len(ordered_ids)
-            ] if pos >= 0 else []
-            if scene_can_fill_by_reuse(own_have, neighbour_counts, ideal):
-                continue
-            uncovered.append(sid)
-            missing += max(0, ideal - max(have, reuse_capacity(own_have, sum(neighbour_counts))))
         # Fail closed: a scene without an id cannot be coverage-checked, so
         # render-readiness is not granted. bool(needs) keeps legacy projects
         # from being waved through with unverifiable footage.
-        _add("scene_assets", "Scene visuals meet 3-second pacing",
-             bool(needs) and not uncovered,
-             f"{len(needs) - len(uncovered)}/{len(needs)} scenes covered; "
-             f"{missing}/{total_required} visual segments still missing (3-second target); "
-             f"{len(uncovered)} scenes need footage. "
-             "Run auto-attach. A scene's clips are reused (new trim and zoom/pan) "
-             "so at least one on-topic clip per scene is usually enough.")
+        shortfalls: list[str] = []
+        if needs:
+            for scene in sorted(needs.values(), key=lambda item: item.get("scene_number") or 0):
+                sid = scene.get("id")
+                required = min_distinct_clips(float(scene.get("duration") or 30))
+                have = distinct_downloadable_clips(scene_assets, scene_id=sid)
+                shots = planned.get(sid) or []
+                # Director shots are this scene's own pictures. Borrowed clips
+                # and Ken Burns repeats are not in this count.
+                if len(shots) > have:
+                    have = len(shots)
+                if have >= required:
+                    continue
+                shortfalls.append(footage_shortfall_message(scene.get("scene_number"), have, required))
+        _add(
+            "scene_assets",
+            "Scene visuals meet 3-second pacing",
+            bool(needs) and not shortfalls,
+            " ".join(shortfalls) if shortfalls else (
+                "Every scene has enough distinct, downloadable clips."
+                if needs else "Generate scenes with ids before rendering."
+            ),
+        )
+        if shortfalls:
+            issues.extend(shortfalls)
 
     return {
         "ok": all(c["ok"] for c in checklist),
@@ -958,9 +931,47 @@ def _pil_caption_frame(out_path: Path, *, title: str, subtitle: str = "",
     return out_path
 
 
-async def _download_to(url: str, out_path: Path, *, max_bytes: int,
-                       allow_audio: bool = False) -> bool:
-    """Best-effort download. Returns True on success, False on any failure."""
+# A stalled photo CDN used to trickle bytes for 5–7 minutes because the read
+# timeout reset on every chunk. One file gets this long, then one smaller retry.
+DOWNLOAD_DEADLINE_SECONDS = 30.0
+
+
+def _discard_partial(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _smaller_download_url(url: str) -> str:
+    """Ask an image CDN for a smaller rendition. Other URLs are unchanged."""
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    changed = False
+    for key in ("w", "width", "h", "height", "dpr"):
+        raw = query.get(key)
+        if raw is None:
+            continue
+        try:
+            size = int(float(raw))
+        except (TypeError, ValueError):
+            continue
+        query[key] = str(max(320, size // 2))
+        changed = True
+    path = parts.path.lower()
+    image_like = any(path.endswith(suffix) for suffix in (".jpg", ".jpeg", ".png", ".webp"))
+    image_like = image_like or "images.pexels.com" in parts.netloc or "images.unsplash.com" in parts.netloc
+    if not changed and image_like:
+        query["w"] = "640"
+        changed = True
+    if not changed:
+        return url
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+
+async def _download_once(url: str, out_path: Path, *, max_bytes: int, allow_audio: bool = False) -> bool:
+    """One attempt. Returns True on success, False on any failure."""
     try:
         timeout = httpx.Timeout(20.0, connect=10.0)
         from .public_http import public_stream
@@ -982,16 +993,39 @@ async def _download_to(url: str, out_path: Path, *, max_bytes: int,
                         total += len(chunk)
                         if total > max_bytes:
                             f.close()
-                            try:
-                                out_path.unlink(missing_ok=True)
-                            except Exception:
-                                pass
+                            _discard_partial(out_path)
                             return False
                         f.write(chunk)
         return out_path.exists() and out_path.stat().st_size > 0
+    except asyncio.CancelledError:
+        _discard_partial(out_path)
+        raise
     except Exception as e:  # noqa: BLE001
         logger.info("Download failed for %s: %s", url, e)
+        _discard_partial(out_path)
         return False
+
+
+async def _download_to(url: str, out_path: Path, *, max_bytes: int,
+                       allow_audio: bool = False) -> bool:
+    """Best-effort download. One overall deadline, then one smaller retry."""
+    attempts = (
+        (url, max_bytes),
+        (_smaller_download_url(url), max(256 * 1024, max_bytes // 4)),
+    )
+    for attempt_url, attempt_cap in attempts:
+        try:
+            ok = await asyncio.wait_for(
+                _download_once(attempt_url, out_path, max_bytes=attempt_cap, allow_audio=allow_audio),
+                timeout=DOWNLOAD_DEADLINE_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.info("Download exceeded %.0fs for %s", DOWNLOAD_DEADLINE_SECONDS, attempt_url)
+            _discard_partial(out_path)
+            ok = False
+        if ok:
+            return True
+    return False
 
 
 def _order_scene_candidates(candidates: list[dict]) -> list[dict]:
@@ -1421,6 +1455,7 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
         try:
             res = await stock_service.search_stock(
                 q, media_type="videos", per_page=20,
+                orientation="portrait" if (project or {}).get("aspect_ratio") == "9:16" else None,
             )
         except stock_service.RateLimitError as rle:
             logger.warning("scene=%02d FOOTAGE_RETRY_RATE_LIMITED query=%r (%s) — stopping retries",
@@ -1516,7 +1551,10 @@ async def _topup_scene_visuals(scene: dict, project: dict, work_dir: Path, idx: 
         logger.info("scene=%02d FOOTAGE_TOPUP query=%r have=%d need=%d",
                     idx + 1, q[:60], len(visuals), max_visuals)
         try:
-            results = await stock_service.search_stock_videos(q, per_page=30)
+            results = await stock_service.search_stock_videos(
+                q, per_page=30,
+                orientation="portrait" if (project or {}).get("aspect_ratio") == "9:16" else None,
+            )
         except stock_service.RateLimitError as rle:
             logger.warning("scene=%02d FOOTAGE_TOPUP_RATE_LIMITED query=%r — stopping Pexels for this scene (%s)",
                            idx + 1, q[:60], rle)
@@ -1651,6 +1689,30 @@ def _pick_borrowed_sources(scene_index: int, own_sources: list[list], own: int,
         if item not in exclude and item not in borrowed:
             borrowed.append(item)
     return borrowed
+
+
+def _require_downloaded_clip_floor(scene_visuals: list, own_counts: list) -> None:
+    """Fail the render when a scene downloaded fewer distinct clips than the floor.
+
+    Called after the scene's own files are on disk and before reuse padding.
+    Borrowed neighbours and Ken Burns repeats are not in ``own_counts``.
+    """
+    from .scene_terms import footage_shortfall_message, min_distinct_clips
+    messages: list[str] = []
+    for index, (visuals, scene) in enumerate(scene_visuals):
+        if index < len(own_counts) and own_counts[index] is None:
+            have = len({str(path) for path, _kind in visuals})
+        elif index < len(own_counts):
+            have = int(own_counts[index] or 0)
+        else:
+            have = len(visuals)
+        required = min_distinct_clips(float(scene.get("duration") or 0))
+        if have >= required:
+            continue
+        number = scene.get("scene_number") or (index + 1)
+        messages.append(footage_shortfall_message(number, have, required))
+    if messages:
+        raise RuntimeError(" ".join(messages))
 
 
 async def _fill_scenes_by_reuse(scene_visuals: list, own_counts: list, plan_by_idx: dict,
@@ -2918,6 +2980,11 @@ async def _run_render(job_id: str, project_id: str):
                                                        topup=False)
                 own_counts.append(len(visuals))
             scene_visuals.append((visuals, scene))
+
+        # Reuse and Ken Burns fill time only after every scene has its own
+        # distinct clips. A short download must fail in the open, not borrow.
+        if not commercial:
+            _require_downloaded_clip_floor(scene_visuals, own_counts)
 
         # Pass 2: reuse fills each plan; stock only when reuse cannot.
         await _fill_scenes_by_reuse(scene_visuals, own_counts, plan_by_idx, assets,

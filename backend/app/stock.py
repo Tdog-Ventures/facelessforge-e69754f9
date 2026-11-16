@@ -491,7 +491,7 @@ async def _search_pexels(
     logger.info("BLOCKLIST post-filter query=%r remaining=%d", query[:60], len(out))
     return out
 
-async def _search_pexels_paginated(query: str, media_type: MediaType, *, min_results: int = 20, per_page: int = 40) -> list[dict]:
+async def _search_pexels_paginated(query: str, media_type: MediaType, *, min_results: int = 20, per_page: int = 40, orientation: Optional[str] = None) -> list[dict]:
     """FIX 4: Paginate Pexels (page + per_page=40) until min_results unique clips.
     Tries page 1-3 with same query, then 2 backup semantic queries if still short.
 
@@ -502,7 +502,7 @@ async def _search_pexels_paginated(query: str, media_type: MediaType, *, min_res
     for pg in (1, 2, 3):
         await _pexels_wait_backoff()
         try:
-            batch = await _search_pexels(query, media_type, per_page, page=pg)
+            batch = await _search_pexels(query, media_type, per_page, orientation=orientation, page=pg)
         except RateLimitError:
             raise
         except Exception:
@@ -529,7 +529,7 @@ async def _search_pexels_paginated(query: str, media_type: MediaType, *, min_res
                 continue
             await _pexels_wait_backoff()
             try:
-                batch = await _search_pexels(bq, media_type, per_page, page=1)
+                batch = await _search_pexels(bq, media_type, per_page, orientation=orientation, page=1)
             except RateLimitError:
                 raise
             except Exception:
@@ -562,7 +562,7 @@ def _normalise_pixabay_image(hit: dict, query: str) -> dict:
         "query": query,
     }
 
-def _normalise_pixabay_video(hit: dict, query: str) -> Optional[dict]:
+def _normalise_pixabay_video(hit: dict, query: str, *, orientation: Optional[str] = None) -> Optional[dict]:
     # Pixabay video hit contains videos.{large,medium,small,tiny}
     videos = hit.get("videos") or {}
     # Prefer large -> medium -> small
@@ -576,7 +576,12 @@ def _normalise_pixabay_video(hit: dict, query: str) -> Optional[dict]:
         return None
     width = int(best.get("width") or 0)
     height = int(best.get("height") or 0)
-    if min(width, height) < 720 or max(width, height) < 1280:
+    # Portrait projects keep portrait and square clips. Landscape stays on the
+    # existing size gate, which is what horizontal b-roll already used.
+    if orientation == "portrait":
+        if height < width or min(width, height) < 480:
+            return None
+    elif min(width, height) < 720 or max(width, height) < 1280:
         return None
     return {
         "source": "pixabay",
@@ -595,7 +600,7 @@ def _normalise_pixabay_video(hit: dict, query: str) -> Optional[dict]:
         "query": query,
     }
 
-async def _search_pixabay(query: str, media_type: MediaType, per_page: int, *, page: int = 1) -> list[dict]:
+async def _search_pixabay(query: str, media_type: MediaType, per_page: int, *, page: int = 1, orientation: Optional[str] = None) -> list[dict]:
     key = os.environ.get("PIXABAY_API_KEY", "").strip()
     if not key:
         logger.info("Pixabay search skipped: no API key")
@@ -606,7 +611,8 @@ async def _search_pixabay(query: str, media_type: MediaType, per_page: int, *, p
     timeout = httpx.Timeout(10.0, connect=5.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         if media_type in ("both", "photos"):
-            params = {"key": key, "q": query, "image_type": "photo", "per_page": per_page, "page": page, "safesearch": "true", "orientation": "horizontal"}
+            photo_orientation = "vertical" if orientation == "portrait" else "horizontal"
+            params = {"key": key, "q": query, "image_type": "photo", "per_page": per_page, "page": page, "safesearch": "true", "orientation": photo_orientation}
             r = await client.get("https://pixabay.com/api/", params=params)
             if r.status_code == 401:
                 logger.warning("Pixabay photos auth failed (401) query=%r — mock fallback", query[:60])
@@ -635,7 +641,7 @@ async def _search_pixabay(query: str, media_type: MediaType, per_page: int, *, p
             # Filter portrait etc., then slice to requested per_page to guarantee 12 when possible
             valid = []
             for hit in (data.get("hits") or []):
-                norm = _normalise_pixabay_video(hit, query)
+                norm = _normalise_pixabay_video(hit, query, orientation=orientation)
                 if norm:
                     valid.append(norm)
                 if len(valid) >= per_page:
@@ -666,7 +672,7 @@ def _normalise_unsplash_photo(p: dict, query: str) -> dict:
         "query": query,
     }
 
-async def _search_unsplash(query: str, per_page: int, *, page: int = 1) -> list[dict]:
+async def _search_unsplash(query: str, per_page: int, *, page: int = 1, orientation: Optional[str] = None) -> list[dict]:
     key = os.environ.get("UNSPLASH_ACCESS_KEY", "").strip()
     if not key:
         logger.info("Unsplash search skipped: no API key")
@@ -676,7 +682,8 @@ async def _search_unsplash(query: str, per_page: int, *, page: int = 1) -> list[
     headers = {"Authorization": f"Client-ID {key}"}
     timeout = httpx.Timeout(10.0, connect=5.0)
     async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
-        params = {"query": query, "per_page": per_page, "page": page, "orientation": "landscape"}
+        photo_orientation = "portrait" if orientation == "portrait" else "squarish" if orientation == "square" else "landscape"
+        params = {"query": query, "per_page": per_page, "page": page, "orientation": photo_orientation}
         r = await client.get("https://api.unsplash.com/search/photos", params=params)
         if r.status_code == 429:
             raise RuntimeError("unsplash_rate_limited")
@@ -815,10 +822,10 @@ async def search_stock_aggregated(
             tasks.append(_search_pexels(query, mt, per_page, orientation=orientation, page=page))
             task_sources.append(src)
         elif src == "pixabay":
-            tasks.append(_search_pixabay(query, mt, per_page, page=page))
+            tasks.append(_search_pixabay(query, mt, per_page, page=page, orientation=orientation))
             task_sources.append(src)
         elif src == "unsplash":
-            tasks.append(_search_unsplash(query, per_page, page=page))
+            tasks.append(_search_unsplash(query, per_page, page=page, orientation=orientation))
             task_sources.append(src)
 
     gathered = await asyncio.gather(*tasks, return_exceptions=True)
@@ -859,23 +866,33 @@ async def search_stock_aggregated(
             "warning": "All stock providers returned no results — showing mock results.",
         }
 
-    # Score relevance per provider already? Ensure scoring across merged? We'll keep interleaving then score overall
-    # Interleave round-robin to ensure mix representation up to per_page
-    merged: list[dict] = []
-    max_len = max(len(lst) for lst in results_by_source) if results_by_source else 0
-    for i in range(max_len):
-        for lst in results_by_source:
-            if i < len(lst) and len(merged) < per_page:
-                merged.append(lst[i])
-        if len(merged) >= per_page:
-            break
+    # Photos and videos are merged separately. Pexels returns the whole photo
+    # page before any video, so a single per_page slice used to drop every
+    # video. Videos come first. Each media type keeps up to per_page results,
+    # so a full photo page can no longer erase the videos.
+    def _is_video(item: dict) -> bool:
+        kind = str(item.get("media_type") or item.get("asset_type") or "")
+        return "video" in kind
 
-    # If still under per_page (e.g., one provider had few results), fill remaining sequentially
-    if len(merged) < per_page:
-        for lst in results_by_source:
-            for item in lst:
-                if item not in merged and len(merged) < per_page:
-                    merged.append(item)
+    def _round_robin(groups: list[list[dict]]) -> list[dict]:
+        merged_group: list[dict] = []
+        if not groups:
+            return merged_group
+        longest = max(len(group) for group in groups)
+        for index in range(longest):
+            for group in groups:
+                if index < len(group):
+                    merged_group.append(group[index])
+        return merged_group
+
+    video_groups: list[list[dict]] = []
+    photo_groups: list[list[dict]] = []
+    for lst in results_by_source:
+        videos = [item for item in lst if _is_video(item)]
+        photos = [item for item in lst if not _is_video(item)]
+        video_groups.append(videos)
+        photo_groups.append(photos)
+    merged = _round_robin(video_groups)[:per_page] + _round_robin(photo_groups)[:per_page]
 
     # FIX: blocklist + last10 dedupe
     merged = _dedupe_and_filter_items(merged)
@@ -887,7 +904,7 @@ async def search_stock_aggregated(
     else:
         agg_source = "mixed"
 
-    out: dict = {"source": agg_source, "results": merged[:per_page], "mock": False, "query": query}
+    out: dict = {"source": agg_source, "results": merged, "mock": False, "query": query}
     if warnings:
         out["warning"] = f"Some providers unavailable ({', '.join(warnings)}) — showing partial results."
     # If all keys missing case already handled, but add warning if aggregated used mock-like? Not needed.
@@ -896,7 +913,7 @@ async def search_stock_aggregated(
 
 # ── Public ──────────────────────────────────────────────────────────────────
 
-async def search_stock_videos(query: str, per_page: int = 30) -> list[dict]:
+async def search_stock_videos(query: str, per_page: int = 30, *, orientation: Optional[str] = None) -> list[dict]:
     """Video-only Pexels search for cinematic b-roll. FIX 4: paginated, min 20 unique.
     FIX 3: query is LLM-semantic (strip abstract + LLM visual nouns)."""
     query = (query or "").strip()
@@ -919,10 +936,10 @@ async def search_stock_videos(query: str, per_page: int = 30) -> list[dict]:
         query = _strip_pexels_abstract(query)
     try:
         # FIX 4: paginated fetch guarantees >=20 unique when available
-        results = await _search_pexels_paginated(query, "videos", min_results=20, per_page=40)
+        results = await _search_pexels_paginated(query, "videos", min_results=20, per_page=40, orientation=orientation)
         if len(results) < 20:
             # per_page fallback kept for backward-compat path
-            fallback = await _search_pexels(query, "videos", min(per_page, 40))
+            fallback = await _search_pexels(query, "videos", min(per_page, 40), orientation=orientation)
             for it in fallback:
                 if it.get("external_id") not in {r.get("external_id") for r in results}:
                     results.append(it)
@@ -992,7 +1009,7 @@ async def search_stock(
     try:
         # FIX 4: use paginated search when caller wants >=20
         if per_page >= 20:
-            results = await _search_pexels_paginated(query, media_type, min_results=20, per_page=40)
+            results = await _search_pexels_paginated(query, media_type, min_results=20, per_page=40, orientation=orientation)
             # trim/pad to per_page but keep at least 20
             results = results[:max(per_page,20)]
         else:

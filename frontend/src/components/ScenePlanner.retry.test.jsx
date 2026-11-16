@@ -173,3 +173,28 @@ test("full render shows a 409 refusal immediately and can be started again", asy
   expect(button.textContent).toContain("FULL RENDER");
   expect(button.textContent).not.toContain("CHECK RENDER STATUS");
 });
+
+test("full render shows a 400 footage refusal without reconnecting", async () => {
+  const sentence = "Scene 2 has 1 of 8 required distinct clips - run Find footage for scene 2.";
+  api.get.mockImplementation(async (path) => {
+    if (path === "/billing/credits") return { data: { remaining: balance } };
+    if (String(path).includes("/render/jobs")) return { data: [] };
+    return { data: { project, assets: [] } };
+  });
+  api.post.mockRejectedValue({
+    response: { status: 400, data: { detail: { message: "Prerequisites not met", issues: [sentence] } } },
+  });
+
+  await mount();
+  const button = element.querySelector('[data-testid="full-render-btn"]');
+  await act(async () => { button.click(); });
+
+  expect(api.post).toHaveBeenCalledTimes(1);
+  expect(renderJobReads()).toHaveLength(1);
+  expect(props.onRenderRecovered).not.toHaveBeenCalled();
+  expect(toast.error).toHaveBeenCalledWith(sentence);
+  expect(element.querySelector('[data-testid="full-render-error"]').textContent).toBe(sentence);
+  expect(button.disabled).toBe(false);
+  expect(button.textContent).toContain("FULL RENDER");
+  expect(button.textContent).not.toContain("CHECK RENDER STATUS");
+});

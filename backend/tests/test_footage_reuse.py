@@ -206,22 +206,25 @@ def _egg_preflight(scene_assets):
         for _ in range(count):
             k += 1
             assets.append({"id": f"a{k}", "asset_type": "stock_image", "scene_id": sid,
-                           "source": "pexels", "duration": hold, "status": "attached"})
+                           "source": "pexels", "external_id": f"ext-{k}",
+                           "download_url": f"https://stock.example/{k}.jpg",
+                           "duration": hold, "status": "attached"})
     check = validate_prerequisites(project, {"full_script": "eggs " * 330}, scenes, {"id": "m"}, assets)
     return next(item for item in check["checklist"] if item["key"] == "scene_assets")
 
 
 def test_preflight_counts_reuse_after_word_alignment_moved_scene_durations():
-    # The egg project after render 7704a4c6: 3/5 scenes, 11/46 segments missing before.
+    # Scene 2's single photo, shown three times, is still one distinct clip.
     pacing = _egg_preflight([("s1", 3, 8.933), ("s2", 1, 26.767), ("s3", 8, 3.346),
                              ("s4", 7, 3.771), ("s5", 9, 3)])
-    assert pacing["ok"] is True, pacing
+    assert pacing["ok"] is False, pacing
+    assert "Scene 2 has 1 of 8 required distinct clips - run Find footage for scene 2." in pacing["hint"]
 
 
 def test_preflight_still_fails_a_scene_with_no_clip_of_its_own():
     pacing = _egg_preflight([("s1", 3, 8.933), ("s3", 8, 3.346), ("s4", 7, 3.771), ("s5", 9, 3)])
     assert pacing["ok"] is False
-    assert "4/5 scenes covered" in pacing["hint"]
+    assert "Scene 2 has 0 of 8 required distinct clips" in pacing["hint"]
 
 
 def _plan(*counts):

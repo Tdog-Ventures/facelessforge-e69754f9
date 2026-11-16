@@ -147,6 +147,33 @@ test("an unmetered balance can render with no credits left", async () => {
   expect(element.querySelector("[data-testid='render-credit-stop']")).toBeNull();
 });
 
+test("a footage shortfall is shown on the pre-render panel and blocks start", async () => {
+  const sentence = "Scene 2 has 1 of 8 required distinct clips - run Find footage for scene 2.";
+  api.get.mockImplementation(async (path) => {
+    const value = String(path);
+    if (value.includes("/billing/credits")) return { data: { remaining: 9, credits: 9, operator_unmetered: false } };
+    if (value.includes("/render/jobs")) return { data: [] };
+    return {
+      data: {
+        ok: false,
+        issues: ["Scene visuals meet 3-second pacing", sentence],
+        checklist: [{
+          key: "scene_assets",
+          label: "Scene visuals meet 3-second pacing",
+          ok: false,
+          hint: sentence,
+        }],
+      },
+    };
+  });
+  await mount();
+  const gate = element.querySelector("[data-testid='footage-gate']");
+  expect(gate.textContent).toContain("Scene 2 has 1 of 8 required distinct clips");
+  expect(gate.textContent).toContain("Find footage for scene 2");
+  expect(element.querySelector("[data-testid='render-start-btn']").disabled).toBe(true);
+  expect(element.querySelector("[data-testid='pre-scene_assets']").textContent).toContain(sentence);
+});
+
 test("a missing credit balance keeps the render button off", async () => {
   api.get.mockImplementation(async (path) => {
     if (String(path).includes("/billing/credits")) throw new Error("balance down");
@@ -249,4 +276,41 @@ test("a portrait render uses a narrow player and omits the landscape poster", as
   expect(video.style.aspectRatio).toBe("9 / 16");
   expect(video.style.maxWidth).toBe("39.375vh");
   expect(video.getAttribute("poster")).toBeNull();
+});
+
+test("a 400 footage refusal shows the named scene and does not reconnect", async () => {
+  const sentence = "Scene 2 has 1 of 8 required distinct clips - run Find footage for scene 2.";
+  api.get.mockImplementation(async (path) => {
+    if (path === "/billing/credits") return { data: { remaining: 3 } };
+    if (String(path).endsWith("/render/jobs")) return { data: [] };
+    return { data: { ok: true, issues: [], checklist: [] } };
+  });
+  api.post.mockRejectedValue({
+    response: {
+      status: 400,
+      data: {
+        detail: {
+          message: sentence,
+          issues: [sentence],
+          checklist: [{
+            key: "scene_assets",
+            label: "Scene visuals meet 3-second pacing",
+            ok: false,
+            hint: sentence,
+          }],
+        },
+      },
+    },
+  });
+
+  await mount();
+  await act(async () => { element.querySelector("[data-testid='render-start-btn']").click(); });
+
+  expect(api.post).toHaveBeenCalledTimes(1);
+  expect(jobReads()).toHaveLength(1);
+  expect(toast.error).toHaveBeenCalledWith("Not enough footage", expect.objectContaining({ description: sentence }));
+  expect(element.querySelector("[data-testid='footage-gate']").textContent).toContain(sentence);
+  expect(element.querySelector("[data-testid='render-start-btn']").disabled).toBe(true);
+  expect(element.textContent).not.toContain("Render start is unconfirmed");
+  expect(element.textContent).not.toContain("Reconnecting");
 });

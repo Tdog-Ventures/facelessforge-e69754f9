@@ -47,7 +47,11 @@ from .. import stock as stock_service
 from .. import thumbnail_images as thumb_images
 from ..asset_dedupe import filter_distinct_titles
 from ..asset_relevance import fallback_is_usable, relevant_candidates, select_footage_candidates
-from ..scene_terms import broaden_stock_queries, compact_stock_query, holds_cover, plan_hold_durations
+from ..scene_terms import (
+    PER_TERM_JUDGE_BUDGET, broaden_stock_queries, clips_to_find, compact_stock_query,
+    distinct_downloadable_clips, holds_cover, min_distinct_clips, plan_hold_durations,
+    scene_judge_cap, stock_query_tiers,
+)
 from .. import api_limits, asset_commit, project_lease
 from ..content_revision import revisions_match
 
@@ -2219,26 +2223,33 @@ async def _attach_scene_stock(db, *, lease, project, scene, replace_existing, us
     ).to_list(500)
     carried = [o for o in originals if op_id and o.get("attach_op") == op_id]
     duration = _get_scene_duration(scene)
-    needed = max(1, math.ceil(duration / 3))
+    floor = min_distinct_clips(duration)
+    # One distinct shot about every 3 seconds, and never under the floor.
+    needed = max(floor, math.ceil(duration / 3))
+    have = distinct_downloadable_clips(originals)
     blocked = {str(item) for item in (used_external_ids or set()) if item}
     for original in originals:
         if original.get("external_id"):
             blocked.add(str(original.get("external_id")))
-    needs_search = not (
-        (replace_existing and carried and len(carried) == len(originals))
-        or (not replace_existing and (holds_cover(duration, originals) or len(originals) >= needed))
+    carried_done = (
+        replace_existing and carried and len(carried) == len(originals)
+        and distinct_downloadable_clips(carried) >= floor and len(carried) >= len(originals)
     )
+    needs_search = not (carried_done or (not replace_existing and have >= needed))
+    # A long hold, a Ken Burns repeat, or a borrowed neighbour never satisfies the floor.
+    if holds_cover(duration, originals) and have < floor:
+        needs_search = True
     result, search_error = None, None
     if needs_search:
         limits = api_limits.current_limits()
         # Request volume is capped per scene; paid-call and spend caps are
         # enforced by the shared operation budget bound in auto_attach_assets.
         scene_budget = api_limits.OperationBudget(limits)
-        remaining = needed if replace_existing else max(1, needed - len(originals))
+        remaining = needed if replace_existing else max(1, needed - have)
         query = _auto_stock_query(project, scene, override=query_override)
         # One provider page is not a scene. Keep the clips already paid for,
         # skip frames this operation already rejected, and ask for the next page
-        # until the 3-second gap is filled or the search budget runs out.
+        # until the distinct-clip floor is met or every query tier is exhausted.
         known: set[str] = set()
         carried_rejections: list[dict] = []
         for asset in originals:
@@ -2261,24 +2272,19 @@ async def _attach_scene_stock(db, *, lease, project, scene, replace_existing, us
         # PR #33 broadens from the specific query to shorter nouns, the topic
         # and a generic fallback. Director/override queries enter via `query`
         # and scene.search_terms, so both feature sets keep their queries.
-        terms: list[str] = []
-        attempted_terms: set[str] = set()
-        for term in broaden_stock_queries(scene, project, query):
-            term = compact_stock_query(term)
-            if not term or term.casefold() in attempted_terms:
-                continue
-            attempted_terms.add(term.casefold())
-            terms.append(term)
+        # Round-robin every scene term (about 8 judged frames each) before
+        # escalating through broaden_stock_queries: narration, topic, generic.
+        tiers = stock_query_tiers(scene, project, query)
+        if not tiers:
+            flat = broaden_stock_queries(scene, project, query)
+            tiers = [flat] if flat else []
         orientation = "portrait" if project.get("aspect_ratio") == "9:16" else None
-        inspect_cap = min(limits.max_judged_candidates, max(12, remaining * 6))
+        inspect_cap = scene_judge_cap(duration, configured_cap=limits.max_judged_candidates)
         accepted_all: list[dict] = []
         rejected_all: list[dict] = []
-        pending: list[dict] = []
         spent = 0
         fetches = 0
         fetches_ok = 0
-        term_index = 0
-        page = 1
         rate_limited = False
 
         async def _renew_attach_lease() -> bool:
@@ -2286,79 +2292,145 @@ async def _attach_scene_stock(db, *, lease, project, scene, replace_existing, us
                 db, lease, ttl_seconds=project_lease.ASSET_LEASE_TTL_SECONDS,
             )
 
-        while len(accepted_all) < remaining and spent < inspect_cap and not rate_limited:
-            if not pending:
-                if term_index >= len(terms):
-                    break
-                if not scene_budget.take_request():
-                    break
-                if not await _renew_attach_lease():
-                    break
-                term = terms[term_index]
-                try:
-                    if hasattr(stock_service, "search_stock_aggregated"):
-                        found = await stock_service.search_stock_aggregated(
-                            query=term, media_type=media_type or "both", per_page=40,
-                            orientation=orientation, page=page,
-                        )
-                    elif page > 1:
-                        found = {"results": []}
-                    else:
-                        found = await stock_service.search_stock(term, "both", 40)
-                    fetches += 1
-                    fetches_ok += 1
-                except Exception as exc:  # noqa: BLE001
-                    search_error = exc
-                    fetches += 1
-                    message = str(exc).lower()
-                    if "rate" in message:
-                        rate_limited = True
-                    page += 1
-                    if page > limits.max_pages_per_query:
-                        term_index += 1
-                        page = 1
+        def _judged_identity(item: dict) -> str:
+            return str(item.get("external_id") or item.get("preview_url") or item.get("title") or "")
+
+        async def _fetch_page(cursor: dict) -> bool:
+            nonlocal fetches, fetches_ok, search_error, rate_limited
+            if cursor["done"] or cursor["page"] > limits.max_pages_per_query:
+                cursor["done"] = True
+                return False
+            if not scene_budget.take_request():
+                cursor["done"] = True
+                return False
+            if not await _renew_attach_lease():
+                cursor["done"] = True
+                return False
+            term = cursor["term"]
+            page = cursor["page"]
+            try:
+                if hasattr(stock_service, "search_stock_aggregated"):
+                    found = await stock_service.search_stock_aggregated(
+                        query=term, media_type=media_type or "both", per_page=40,
+                        orientation=orientation, page=page,
+                    )
+                elif page > 1:
+                    found = {"results": []}
+                else:
+                    found = await stock_service.search_stock(term, "both", 40)
+                fetches += 1
+                fetches_ok += 1
+            except Exception as exc:  # noqa: BLE001
+                search_error = exc
+                fetches += 1
+                if "rate" in str(exc).lower():
+                    rate_limited = True
+                    cursor["done"] = True
+                else:
+                    cursor["page"] += 1
+                    if cursor["page"] > limits.max_pages_per_query:
+                        cursor["done"] = True
+                return False
+            raw = [item for item in ((found or {}).get("results") or []) if isinstance(item, dict)]
+            if (found or {}).get("mock"):
+                raw = []
+            cursor["page"] += 1
+            if not raw:
+                cursor["done"] = True
+                return False
+            fresh = []
+            for item in raw:
+                if _stock_already_seen(item, known):
                     continue
-                raw = [item for item in ((found or {}).get("results") or []) if isinstance(item, dict)]
-                if (found or {}).get("mock"):
-                    raw = []
-                if not raw:
-                    term_index += 1
-                    page = 1
-                    continue
-                fresh = []
-                for item in raw:
-                    if _stock_already_seen(item, known):
+                _remember_stock(known, item)
+                fresh.append({**item, "matched_query": term, "_found_query": term})
+            if not fresh:
+                if cursor["page"] > limits.max_pages_per_query:
+                    cursor["done"] = True
+                return False
+            cursor["pending"].extend(fresh)
+            return True
+
+        for tier in tiers:
+            if len(accepted_all) >= remaining or spent >= inspect_cap or rate_limited:
+                break
+            cursors = [
+                {"term": term, "page": 1, "pending": [], "judged_pass": 0, "done": False}
+                for term in tier
+            ]
+            while len(accepted_all) < remaining and spent < inspect_cap and not rate_limited:
+                if not any(not cursor["done"] for cursor in cursors):
+                    break
+                moved = False
+                advanced = False
+                for cursor in cursors:
+                    if cursor["done"] or len(accepted_all) >= remaining or spent >= inspect_cap or rate_limited:
                         continue
-                    _remember_stock(known, item)
-                    fresh.append({**item, "matched_query": term, "_found_query": term})
-                page += 1
-                if page > limits.max_pages_per_query:
-                    term_index += 1
-                    page = 1
-                pending.extend(fresh)
-                if not pending:
+                    if cursor["judged_pass"] >= PER_TERM_JUDGE_BUDGET:
+                        continue
+                    if not cursor["pending"]:
+                        page_before = cursor["page"]
+                        await _fetch_page(cursor)
+                        if cursor["page"] != page_before:
+                            advanced = True
+                        if not cursor["pending"]:
+                            continue
+                    room = min(
+                        PER_TERM_JUDGE_BUDGET - cursor["judged_pass"],
+                        inspect_cap - spent,
+                        len(cursor["pending"]),
+                    )
+                    if room <= 0:
+                        continue
+                    batch = cursor["pending"][:room]
+                    cursor["pending"] = cursor["pending"][room:]
+                    still = remaining - len(accepted_all)
+                    accepted, rejected = await select_footage_candidates(
+                        batch, scene, cursor["term"], needed=still, renew=_renew_attach_lease,
+                    )
+                    judged_ids = {
+                        _judged_identity(item) for item in [*accepted, *rejected] if isinstance(item, dict)
+                    }
+                    unjudged = [
+                        item for item in batch
+                        if _judged_identity(item) not in judged_ids
+                    ]
+                    if not accepted and not rejected:
+                        # Nothing was classified. Drop the batch so a judge that
+                        # returns no rows cannot spin on the same frames.
+                        unjudged = []
+                    cursor["pending"] = unjudged + cursor["pending"]
+                    judged = 0
+                    for item in accepted:
+                        judged += 1
+                        if isinstance(item, dict):
+                            _remember_stock(known, item, title=True)
+                    for item in rejected:
+                        if not isinstance(item, dict):
+                            continue
+                        _remember_stock(known, item, title=True)
+                        if item.get("reject_reason") != "unusable":
+                            judged += 1
+                    if judged == 0 and batch and not unjudged:
+                        judged = len(batch)
+                    cursor["judged_pass"] += judged
+                    spent += judged
+                    accepted_all.extend(accepted)
+                    rejected_all.extend(rejected)
+                    moved = True
+                if moved or advanced:
                     continue
-            still = remaining - len(accepted_all)
-            judge_room = min(max(6, still * 4), inspect_cap - spent, len(pending))
-            batch = pending[:judge_room]
-            pending = pending[judge_room:]
-            accepted, rejected = await select_footage_candidates(
-                batch, scene, query, needed=still, renew=_renew_attach_lease,
-            )
-            accepted_all.extend(accepted)
-            rejected_all.extend(rejected)
-            judged = 0
-            for item in accepted:
-                judged += 1
-                if isinstance(item, dict):
-                    _remember_stock(known, item, title=True)
-            for item in rejected:
-                if not isinstance(item, dict):
-                    continue
-                _remember_stock(known, item, title=True)
-                if item.get("reject_reason") != "unusable":
-                    judged += 1
-            spent += judged
+                reopened = False
+                for cursor in cursors:
+                    if cursor["done"] or cursor["judged_pass"] < PER_TERM_JUDGE_BUDGET:
+                        continue
+                    if cursor["pending"] or cursor["page"] <= limits.max_pages_per_query:
+                        cursor["judged_pass"] = 0
+                        reopened = True
+                    else:
+                        cursor["done"] = True
+                if not reopened:
+                    break
         if fetches_ok:
             search_error = None
         if accepted_all or rejected_all or carried_rejections:
@@ -2396,7 +2468,8 @@ async def _attach_scene_stock_committing(
     project_id = project["id"]
     scene_id = str(scene.get("id") or scene.get("_id"))
     duration = _get_scene_duration(scene)
-    num_needed = max(1, math.ceil(duration / 3))
+    num_needed = clips_to_find(duration)
+    floor = min_distinct_clips(duration)
     outcome: dict = {
         "scene_id": scene_id, "status": "failed", "attached": 0, "charged": 0, "skipped": 0,
         "near_duplicates": 0, "details": [], "reason": None,
@@ -2443,9 +2516,10 @@ async def _attach_scene_stock_committing(
             visual_titles.append(str(doc.get("name") or ""))
             _detail("attached", asset_id=doc["id"], order=doc.get("order"), start_offset=doc.get("start_offset"))
         outcome.update(attached=len(carried), charged=charged_now)
-        # A finished replacement, or footage that already covers the scene, is not
-        # selected again. Stretch holds when the stored durations still fall short.
-        if replace_existing or holds_cover(duration, originals) or len(originals) >= num_needed:
+        # A finished replacement is not selected again. A top-up stops only when
+        # the scene already has enough distinct clips. A long hold does not.
+        enough_distinct = distinct_downloadable_clips(originals) >= num_needed
+        if replace_existing or enough_distinct:
             target = carried if replace_existing else originals
             if target and len(target) < num_needed and not holds_cover(duration, target):
                 await _retile_scene_holds(db, project_id, target, duration)
@@ -2460,14 +2534,15 @@ async def _attach_scene_stock_committing(
             return outcome
         carried_committed = True
     if originals and not replace_existing:
-        if holds_cover(duration, originals) or len(originals) >= num_needed:
+        owned = distinct_downloadable_clips(originals)
+        if owned >= num_needed:
             if carried_committed:
                 outcome["status"] = _coverage_status(len(originals), num_needed)
             else:
                 outcome.update(status="skipped", skipped=1)
                 _detail("skipped", reason="already_has_stock")
             return outcome
-        remaining = num_needed - len(originals)
+        remaining = max(1, num_needed - owned)
         start_order = len(originals)
         excluded = originals
     else:
@@ -2611,6 +2686,20 @@ async def _attach_scene_stock_committing(
         committed.append(doc)
 
     if committed and replace_existing and originals:
+        # Never shrink. The previous selection stays unless the new set is at
+        # least as large and meets the distinct-clip floor.
+        if len(committed) < len(originals) or len(committed) < floor:
+            await _rollback_scene_assets(db, project_id, committed, restore=[])
+            outcome.update(reason="replacement_below_minimum", attached=0, status=_coverage_status(len(originals), num_needed))
+            _detail(
+                "skipped", reason="replacement_below_minimum",
+                available=len(originals), required=floor, found=len(committed),
+            )
+            if used_external_ids is not None:
+                for clip in originals:
+                    if clip.get("external_id"):
+                        used_external_ids.add(str(clip["external_id"]))
+            return outcome
         # Originals go only now that the replacement is fully written. Delete by
         # captured id, never by scene, so another writer's rows are never removed.
         try:
@@ -2780,7 +2869,7 @@ async def _auto_attach_under_lease(db, lease, project_id: str, project: dict, bo
         total_needed = 0
         carried_asset_ids: list[str] = []
         for scene in scenes:
-            needed = max(1, math.ceil(_get_scene_duration(scene) / 3))
+            needed = clips_to_find(_get_scene_duration(scene))
             scene_id = str(scene.get("id") or scene.get("_id"))
             if (resumed.get(scene_id) or {}).get("status") in ("attached", "skipped", "partial"):
                 continue  # finished and charged by an earlier attempt of this same operation
@@ -3999,8 +4088,11 @@ async def render_start(project_id: str,
     assets = await db.assets.find({"project_id": project_id}, {"_id": 0}).to_list(500)
     check = render_service.validate_prerequisites(project, script, scenes, metadata, assets)
     if not check["ok"]:
+        footage_issues = [
+            item for item in check["issues"] if "required distinct clips" in str(item)
+        ]
         detail: dict = {
-            "message": "Render prerequisites not met",
+            "message": " ".join(footage_issues) if footage_issues else "Render prerequisites not met",
             "issues": check["issues"],
             "checklist": check["checklist"],
         }
