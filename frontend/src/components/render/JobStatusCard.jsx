@@ -27,6 +27,10 @@ export default function JobStatusCard({
   const completed = status === "completed";
   const inProgress = ACTIVE_STATES.has(status);
   const deliveryUrl = downloadUrl || job.delivery_url || job.output_url;
+  // Label and player follow the render's real aspect (default 9:16), not a fixed 16:9.
+  const aspect = job.aspect_ratio || project?.aspect_ratio || "9:16";
+  const dims = { "16:9": "1920×1080", "1:1": "1080×1080" }[aspect] || "1080×1920";
+  const playerAspect = { "16:9": "16 / 9", "1:1": "1 / 1" }[aspect] || "9 / 16";
 
   return (
     <div
@@ -93,10 +97,11 @@ export default function JobStatusCard({
             src={deliveryUrl}
             preload="metadata"
             poster={selectedThumbnail?.preview_url}
-            className="w-full rounded-sm border border-[var(--ff-border)] bg-black aspect-video"
+            className="w-full rounded-sm border border-[var(--ff-border)] bg-black"
+            style={{ aspectRatio: playerAspect, maxHeight: "70vh", objectFit: "contain" }}
           />
           <div className="flex flex-wrap items-center gap-2 font-mono text-[10px] text-[var(--ff-text-muted)] uppercase tracking-widest">
-            <span>1920×1080</span>
+            <span data-testid="render-dims">{dims}</span>
             <span>· 30 fps</span>
             <span>· H.264 / AAC</span>
             <span>· {fmtSec(job.duration)}</span>

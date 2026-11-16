@@ -74,6 +74,16 @@ from . import stock as stock_service
 from .grounding import CLIENT_VISUAL_TYPES, validate_commercial_grounding
 from .scoring import commercial_scorecard
 from . import project_lease
+from .footage_reuse import (
+    borrow_order,
+    ken_burns_direction,
+    own_sources_needed,
+    reuse_capacity,
+    reuse_offset,
+    scene_can_fill_by_reuse,
+    schedule_reuse,
+    video_reuse_motion,
+)
 from .content_revision import ContentRevisionError, require_consistent_content, scenes_match_revision
 try:
     from .verify import verify_render as _verify_render_constitution
@@ -600,6 +610,9 @@ def validate_prerequisites(project: dict, script: dict | None,
         uncovered = []
         missing = 0
         total_required = sum(ideal_by_scene.values())
+        # Neighbours in play order, for the reuse rule below.
+        ordered_ids = [s.get("id") for s in sorted(
+            scenes, key=lambda item: item.get("scene_number", 0)) if s.get("id")]
         for sid, scene in needs.items():
             duration = float(scene.get("duration") or 30)
             ideal = ideal_by_scene[sid]
@@ -613,8 +626,21 @@ def validate_prerequisites(project: dict, script: dict | None,
             # the other accepted path. Both are preserved.
             if holds_cover(duration, clips) or have >= ideal:
                 continue
+            # Option 1 (reuse): the render fills the plan by reusing this
+            # scene's own clips (up to 3 uses each, new trim + zoom/pan) and
+            # then adjacent scenes' clips once each. Word alignment moves scene
+            # durations after a render, so a hold-based pass can flip to a
+            # fail; reuse capacity does not depend on the exact duration.
+            own_have = counts.get(sid, 0)
+            pos = ordered_ids.index(sid) if sid in ordered_ids else -1
+            neighbour_counts = [
+                counts.get(ordered_ids[k], 0)
+                for k in (pos - 1, pos + 1) if 0 <= k < len(ordered_ids)
+            ] if pos >= 0 else []
+            if scene_can_fill_by_reuse(own_have, neighbour_counts, ideal):
+                continue
             uncovered.append(sid)
-            missing += max(0, ideal - have)
+            missing += max(0, ideal - max(have, reuse_capacity(own_have, sum(neighbour_counts))))
         # Fail closed: a scene without an id cannot be coverage-checked, so
         # render-readiness is not granted. bool(needs) keeps legacy projects
         # from being waved through with unverifiable footage.
@@ -623,7 +649,8 @@ def validate_prerequisites(project: dict, script: dict | None,
              f"{len(needs) - len(uncovered)}/{len(needs)} scenes covered; "
              f"{missing}/{total_required} visual segments still missing (3-second target); "
              f"{len(uncovered)} scenes need footage. "
-             "Run auto-attach. Fewer clips are held longer so the scene is still covered.")
+             "Run auto-attach. A scene's clips are reused (new trim and zoom/pan) "
+             "so at least one on-topic clip per scene is usually enough.")
 
     return {
         "ok": all(c["ok"] for c in checklist),
@@ -1016,19 +1043,72 @@ def _audio_suffix_for(asset: dict) -> str:
     return ".wav"
 
 
+def _has_storage_key(asset: dict) -> bool:
+    key = asset.get("storage_key") if isinstance(asset, dict) else None
+    return isinstance(key, str) and bool(key.strip())
+
+
+async def _materialize_stored_object(asset: dict, dest: Path, *, max_bytes: int) -> bool:
+    """Copy an asset onto ``dest`` by ``storage_key``.
+
+    The URL saved on the asset is a presigned R2/S3 URL. It expires (default
+    24h) while the object remains. Read through the storage client so a render
+    does not depend on that URL. Returns False when there is no key or the
+    object cannot be read; callers then use a local file or the stored URL.
+    """
+    if not _has_storage_key(asset):
+        return False
+    store = get_storage()
+    download = getattr(store, "download_object", None)
+    if not callable(download):
+        return False
+    key = asset.get("storage_key")
+    try:
+        ok = await asyncio.to_thread(download, key, dest, max_bytes=max_bytes)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("stored object fetch failed for %s: %s", key, type(exc).__name__)
+        ok = False
+    if ok and dest.is_file() and dest.stat().st_size > 0:
+        return True
+    try:
+        dest.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return False
+
+
 async def _ensure_audio_local(asset: dict, work_dir: Path, name: str) -> Optional[Path]:
-    """Return a local Path to the asset's audio file, downloading from remote
-    storage (R2/S3) if needed. Returns None if no usable source."""
+    """Return a local Path to the asset's audio file.
+
+    Order: an on-disk file_path inside the storage root, then the object
+    stored under storage_key, then the saved URL (stock or a still-valid
+    presigned URL). Returns None if no usable source.
+    """
     local = _local_path_for_asset(asset)
     if local:
         return local
+    suffix = _audio_suffix_for(asset)
+    out = work_dir / f"{name}{suffix}"
+    if await _materialize_stored_object(asset, out, max_bytes=80 * 1024 * 1024):
+        logger.info("audio loaded from storage_key %s", asset.get("storage_key"))
+        return out
     url = asset.get("preview_url") or asset.get("download_url")
     if not url:
         return None
-    suffix = _audio_suffix_for(asset)
-    out = work_dir / f"{name}{suffix}"
     ok = await _download_to(url, out, max_bytes=80 * 1024 * 1024, allow_audio=True)
     return out if ok else None
+
+
+def _write_thumbnail_png(src: Path, out: Path) -> bool:
+    """Resize ``src`` to the render frame and save it as PNG. False if not an image."""
+    try:
+        img = Image.open(src).convert("RGB")
+        img = img.resize((WIDTH, HEIGHT), Image.LANCZOS)
+        img.save(out, format="PNG")
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Thumbnail image load failed (%s)", type(exc).__name__)
+        return False
 
 
 async def _resolve_thumbnail(asset: dict, project: dict, work_dir: Path) -> Path:
@@ -1042,26 +1122,28 @@ async def _resolve_thumbnail(asset: dict, project: dict, work_dir: Path) -> Path
     out = work_dir / "intro_fallback.png"
     local = _local_path_for_asset(asset)
     if local and local.suffix.lower() in (".png", ".jpg", ".jpeg"):
-        try:
-            img = Image.open(local).convert("RGB")
-            img = img.resize((WIDTH, HEIGHT), Image.LANCZOS)
-            img.save(out, format="PNG")
+        if _write_thumbnail_png(local, out):
             return out
-        except Exception as e:
-            logger.warning("Thumbnail PIL load failed (%s) — using caption frame", e)
-    elif asset.get("download_url") or asset.get("preview_url"):
-        url = asset.get("download_url") or asset.get("preview_url")
-        tmp = work_dir / "intro_dl.bin"
-        ok = await _download_to(url, tmp, max_bytes=20 * 1024 * 1024)
-        if ok:
+        logger.warning("Thumbnail PIL load failed — using caption frame")
+    else:
+        stored = work_dir / "intro_stored.bin"
+        if await _materialize_stored_object(asset, stored, max_bytes=20 * 1024 * 1024):
             try:
-                img = Image.open(tmp).convert("RGB")
-                img = img.resize((WIDTH, HEIGHT), Image.LANCZOS)
-                img.save(out, format="PNG")
-                tmp.unlink(missing_ok=True)
-                return out
-            except Exception:
-                tmp.unlink(missing_ok=True)
+                if _write_thumbnail_png(stored, out):
+                    logger.info("thumbnail loaded from storage_key %s", asset.get("storage_key"))
+                    return out
+            finally:
+                stored.unlink(missing_ok=True)
+        url = asset.get("download_url") or asset.get("preview_url")
+        if url:
+            tmp = work_dir / "intro_dl.bin"
+            ok = await _download_to(url, tmp, max_bytes=20 * 1024 * 1024)
+            if ok:
+                try:
+                    if _write_thumbnail_png(tmp, out):
+                        return out
+                finally:
+                    tmp.unlink(missing_ok=True)
     # Fallback caption frame
     title = (asset.get("brief_snapshot") or {}).get("thumbnail_title_text") or project.get("name") or "FacelessForge"
     return _pil_caption_frame(
@@ -1168,10 +1250,36 @@ def _asset_dedupe_id(asset: dict, url: Optional[str] = None,
     return "url-" + hashlib.sha1(basis.encode("utf-8")).hexdigest()[:12]
 
 
+class AttachedFootageUnavailable(RuntimeError):
+    """Every attached candidate failed and a stock retry was not wanted."""
+
+
+_STORED_VISUAL_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".mp4", ".mov", ".webm"}
+
+
+async def _fetch_stored_visual(asset: dict, out_dir: Path, idx: int) -> Optional[Path]:
+    """Download a client/generated visual from object storage by storage_key.
+
+    Provider stock keeps using its own URL. Only our objects (uploads,
+    generated thumbnails used as footage) have a storage_key, and the URL
+    stored next to it expires.
+    """
+    key = str(asset.get("storage_key") or "")
+    suffix = Path(key.split("?", 1)[0]).suffix.lower()
+    if suffix not in _STORED_VISUAL_SUFFIXES:
+        return None
+    digest = hashlib.sha256(key.encode()).hexdigest()[:24]
+    target = out_dir / f"scene_{idx:03d}_obj_{digest}{suffix}"
+    if await _materialize_stored_object(asset, target, max_bytes=MAX_VIDEO_DOWNLOAD_BYTES):
+        return target
+    return None
+
+
 async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
                                  project: dict, work_dir: Path, idx: int,
                                  used_ext_ids: Optional[set] = None,
-                                 allow_fallback: bool = True) -> tuple[Path, str, Optional[str]]:
+                                 allow_fallback: bool = True,
+                                 stock_retry: bool = True) -> tuple[Path, str, Optional[str]]:
     """Return (local_path, kind, external_id) where kind is 'image' or 'video'
     and external_id is the stock provider id (None for fallback frames).
     Always succeeds — falls back to caption frame on any error.
@@ -1206,7 +1314,6 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
             continue
         url = a.get("download_url") or a.get("preview_url") or a.get("source_url")
         local = _local_path_for_asset(a)
-        ext = (Path(local).suffix.lower() if local else "")
         ext_id = _asset_dedupe_id(a, url, local)
         if ext_id and str(ext_id) in used_ext_ids:
             logger.info(
@@ -1214,6 +1321,11 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
                 idx + 1, ext_id,
             )
             continue
+        if local is None and _has_storage_key(a):
+            fetched = await _fetch_stored_visual(a, out_dir, idx)
+            if fetched is not None:
+                local = fetched
+        ext = (Path(local).suffix.lower() if local else "")
         # ── Local static images: return as 'image' for Ken Burns (not skip) ──
         if local and ext in (".png", ".jpg", ".jpeg", ".webp"):
             logger.info("scene=%02d FOOTAGE_SELECT type=local_image ext_id=%s path=%s",
@@ -1287,6 +1399,12 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
                 "no valid stock video/image available — render failed, not completed"
             )
         raise RuntimeError(f"Client asset for scene {idx + 1} is unavailable or invalid; no stock substitution is permitted")
+
+    if not stock_retry:
+        # Option 1 (reuse): a failed attached clip is skipped. The scene's
+        # other on-topic clips are reused instead of searching stock here.
+        raise AttachedFootageUnavailable(
+            f"scene {idx + 1}: attached candidate unavailable (candidates={len(candidates)})")
 
     # ---- Pexels retry: query for fresh results when attached candidates fail ----
     queries: list[str] = []
@@ -1363,11 +1481,84 @@ async def _resolve_scene_visual(scene: dict, attached_assets: list[dict],
     )
 
 
+async def _topup_scene_visuals(scene: dict, project: dict, work_dir: Path, idx: int,
+                               visuals: list, seen: set, used_ext_ids: set,
+                               max_visuals: int) -> None:
+    """Search stock until ``visuals`` holds ``max_visuals`` distinct sources.
+
+    Appends to ``visuals``/``seen``/``used_ext_ids`` in place. Narration-driven
+    queries only, most specific first.
+    """
+    from .visual_query import build_scene_query, extract_visual_keywords
+    visual_tone = (project or {}).get("visual_tone") or ""
+    queries: list[str] = []
+    for q in (
+        build_scene_query(scene, visual_tone=visual_tone or None),
+        build_scene_query(scene),
+    ):
+        if q and q not in queries:
+            queries.append(q)
+    # B-roll keywords come from the LLM (caption NEVER used verbatim — it is
+    # only context for visual-keyword generation).
+    # Keep render-critical stock selection deterministic. Optional LLM
+    # providers must not add a timeout before a usable Pexels query.
+    kws = extract_visual_keywords(str(scene.get("narration_text") or ""), top_n=6)
+    # No single-keyword query: one bare word ("water", "pan") is where
+    # off-topic filler came from. Reuse fills the gap instead.
+    for n in (3, 2):
+        q = " ".join(kws[:n]).strip()
+        if q and q not in queries:
+            queries.append(q)
+
+    for q in queries:
+        if len(visuals) >= max_visuals:
+            break
+        logger.info("scene=%02d FOOTAGE_TOPUP query=%r have=%d need=%d",
+                    idx + 1, q[:60], len(visuals), max_visuals)
+        try:
+            results = await stock_service.search_stock_videos(q, per_page=30)
+        except stock_service.RateLimitError as rle:
+            logger.warning("scene=%02d FOOTAGE_TOPUP_RATE_LIMITED query=%r — stopping Pexels for this scene (%s)",
+                           idx + 1, q[:60], rle)
+            break
+        except Exception as e:  # noqa: BLE001
+            logger.warning("scene=%02d FOOTAGE_TOPUP_ERROR query=%r err=%s",
+                           idx + 1, q[:60], e)
+            continue
+        if not results:
+            logger.info("scene=%02d FOOTAGE_TOPUP_EMPTY query=%r — trying next keyword",
+                        idx + 1, q[:60])
+            continue
+        for r in results:
+            if len(visuals) >= max_visuals:
+                break
+            r_id = _asset_dedupe_id(r, r.get("download_url"))
+            if r_id and r_id in used_ext_ids:
+                logger.info("scene=%02d FOOTAGE_SKIP reason=duplicate_ext_id ext_id=%s",
+                            idx + 1, r_id)
+                continue
+            try:
+                path, kind, ext_id = await _resolve_scene_visual(
+                    scene, [r], project, work_dir, idx, used_ext_ids=used_ext_ids)
+            except RuntimeError as ffe:
+                # A single top-up candidate failing must not fail the render —
+                # it only skips that clip and tries the next one.
+                logger.warning("scene=%02d FOOTAGE_TOPUP_SKIP query=%r err=%s",
+                               idx + 1, q[:60], ffe)
+                continue
+            if kind not in ("video", "image") or str(path) in seen:
+                continue  # rejected/fell back — try the next fresh result
+            seen.add(str(path))
+            visuals.append((path, kind))
+            used_ext_ids.add(str(ext_id or r_id))
+
+
 async def _resolve_scene_visuals(scene: dict, attached_assets: list[dict],
                                  project: dict, work_dir: Path, idx: int,
                                  max_visuals: int = 4,
                                  used_ext_ids: Optional[set] = None,
-                                 allow_fallback: bool = True) -> list[tuple[Path, str]]:
+                                 allow_fallback: bool = True,
+                                 topup: bool = True) -> list[tuple[Path, str]]:
     """Resolve up to ``max_visuals`` distinct visuals for one scene.
 
     Verify check d needs a hard cut every ~8s; seek-offset jump cuts within
@@ -1385,8 +1576,11 @@ async def _resolve_scene_visuals(scene: dict, attached_assets: list[dict],
     until the quota is met or every variant runs out. Both video and image
     (stock_image/unsplash/jpg/png) visuals are kept — images are rendered
     with Ken Burns via apply_ken_burns_effect() so they are not static holds.
+
+    ``topup=False`` returns only the attached visuals (possibly none). The
+    render then fills the plan by reusing them (``footage_reuse``) and calls
+    ``_topup_scene_visuals`` only when reuse cannot fill the gap.
     """
-    from .visual_query import build_scene_query, extract_visual_keywords
     if used_ext_ids is None:
         used_ext_ids = set()
     visuals: list[tuple[Path, str]] = []
@@ -1406,8 +1600,12 @@ async def _resolve_scene_visuals(scene: dict, attached_assets: list[dict],
             logger.info("scene=%02d FOOTAGE_SKIP reason=ext_id_used_project_wide ext_id=%s",
                         idx + 1, ext)
             continue
-        path, kind, ext_id = await _resolve_scene_visual(
-            scene, [a], project, work_dir, idx, used_ext_ids=used_ext_ids, allow_fallback=allow_fallback)
+        try:
+            path, kind, ext_id = await _resolve_scene_visual(
+                scene, [a], project, work_dir, idx, used_ext_ids=used_ext_ids,
+                allow_fallback=allow_fallback, stock_retry=topup)
+        except AttachedFootageUnavailable:
+            continue  # reuse the scene's other clips rather than search stock
         # Allow both video and image (Ken Burns) — previously was video-only
         if kind not in ("video", "image") or str(path) in seen:
             continue  # rejected/fallback already handled — try the next candidate
@@ -1415,69 +1613,13 @@ async def _resolve_scene_visuals(scene: dict, attached_assets: list[dict],
         visuals.append((path, kind))
         used_ext_ids.add(str(ext_id or ext))
 
-    # 2) Top up from Pexels until we hold >= max_visuals DISTINCT visuals (video preferred).
-    #    Iterates query variants (narration/keyword-driven) so a 0-result keyword
-    #    falls through to the next one instead of giving up.
-    if allow_fallback and len(visuals) < max_visuals:
-        visual_tone = (project or {}).get("visual_tone") or ""
-        queries: list[str] = []
-        for q in (
-            build_scene_query(scene, visual_tone=visual_tone or None),
-            build_scene_query(scene),
-        ):
-            if q and q not in queries:
-                queries.append(q)
-        # B-roll keywords come from the LLM (caption NEVER used verbatim — it is
-        # only context for visual-keyword generation).
-        # Keep render-critical stock selection deterministic. Optional LLM
-        # providers must not add a timeout before a usable Pexels query.
-        kws = extract_visual_keywords(str(scene.get("narration_text") or ""), top_n=6)
-        for n in (3, 2, 1):
-            q = " ".join(kws[:n]).strip()
-            if q and q not in queries:
-                queries.append(q)
+    if not topup:
+        return visuals
 
-        for q in queries:
-            if len(visuals) >= max_visuals:
-                break
-            logger.info("scene=%02d FOOTAGE_TOPUP query=%r have=%d need=%d",
-                        idx + 1, q[:60], len(visuals), max_visuals)
-            try:
-                results = await stock_service.search_stock_videos(q, per_page=30)
-            except stock_service.RateLimitError as rle:
-                logger.warning("scene=%02d FOOTAGE_TOPUP_RATE_LIMITED query=%r — stopping Pexels for this scene (%s)",
-                               idx + 1, q[:60], rle)
-                break
-            except Exception as e:  # noqa: BLE001
-                logger.warning("scene=%02d FOOTAGE_TOPUP_ERROR query=%r err=%s",
-                               idx + 1, q[:60], e)
-                continue
-            if not results:
-                logger.info("scene=%02d FOOTAGE_TOPUP_EMPTY query=%r — trying next keyword",
-                            idx + 1, q[:60])
-                continue
-            for r in results:
-                if len(visuals) >= max_visuals:
-                    break
-                r_id = _asset_dedupe_id(r, r.get("download_url"))
-                if r_id and r_id in used_ext_ids:
-                    logger.info("scene=%02d FOOTAGE_SKIP reason=duplicate_ext_id ext_id=%s",
-                                idx + 1, r_id)
-                    continue
-                try:
-                    path, kind, ext_id = await _resolve_scene_visual(
-                        scene, [r], project, work_dir, idx, used_ext_ids=used_ext_ids)
-                except RuntimeError as ffe:
-                    # A single top-up candidate failing must not fail the render —
-                    # it only skips that clip and tries the next one.
-                    logger.warning("scene=%02d FOOTAGE_TOPUP_SKIP query=%r err=%s",
-                                   idx + 1, q[:60], ffe)
-                    continue
-                if kind not in ("video", "image") or str(path) in seen:
-                    continue  # rejected/fell back — try the next fresh result
-                seen.add(str(path))
-                visuals.append((path, kind))
-                used_ext_ids.add(str(ext_id or r_id))
+    # 2) Top up from Pexels until we hold >= max_visuals DISTINCT visuals (video preferred).
+    if allow_fallback and len(visuals) < max_visuals:
+        await _topup_scene_visuals(scene, project, work_dir, idx, visuals, seen,
+                                   used_ext_ids, max_visuals)
 
     if len(visuals) < max_visuals:
         logger.warning("scene=%02d FOOTAGE_TOPUP_SHORTFALL have=%d need=%d",
@@ -1490,6 +1632,72 @@ async def _resolve_scene_visuals(scene: dict, attached_assets: list[dict],
             scene, attached_assets, project, work_dir, idx, used_ext_ids=used_ext_ids)
         visuals.append((path, kind))
     return visuals
+
+
+def _pick_borrowed_sources(scene_index: int, own_sources: list[list], own: int,
+                           slots: int, exclude: list) -> list:
+    """Adjacent scenes' own clips to borrow (once each) until reuse fills ``slots``.
+
+    Only when the scene has at least one clip of its own: a scene made
+    entirely of a neighbour's footage would be off-topic.
+    """
+    borrowed: list = []
+    if own <= 0:
+        return borrowed
+    for k, src_i in borrow_order(scene_index, own_sources):
+        if reuse_capacity(own, len(borrowed)) >= slots:
+            break
+        item = own_sources[k][src_i]
+        if item not in exclude and item not in borrowed:
+            borrowed.append(item)
+    return borrowed
+
+
+async def _fill_scenes_by_reuse(scene_visuals: list, own_counts: list, plan_by_idx: dict,
+                                assets: list[dict], project: dict, work_dir: Path,
+                                used_ext_ids: set, commercial: bool) -> None:
+    """Pass 2 of scene visuals (option 1). Mutates ``scene_visuals`` lists
+    (own sources first, borrowed appended) and ``own_counts`` in place.
+    """
+    # Pass 2: fill each scene's plan by reuse (own clips up to 3 uses,
+    # then adjacent scenes' own clips once each). Stock is searched only
+    # when even that cannot fill the plan.
+    own_sources = [list(v) if own_counts[k] is not None else []
+                   for k, (v, _s) in enumerate(scene_visuals)]
+    for i, (visuals, scene) in enumerate(scene_visuals):
+        if own_counts[i] is None:
+            continue
+        n_clips = max(1, len(plan_by_idx.get(i, {"subclips": [4.0]})["subclips"]))
+        own = own_counts[i]
+        borrowed: list[tuple[Path, str]] = []
+        if not commercial and reuse_capacity(own) < n_clips:
+            borrowed = _pick_borrowed_sources(i, own_sources, own, n_clips, visuals)
+            if reuse_capacity(own, len(borrowed)) < n_clips:
+                # Even reuse cannot fill the gap: search stock (narration
+                # queries only) for more of this scene's own sources.
+                seen = {str(p) for p, _k in visuals}
+                await _topup_scene_visuals(
+                    scene, project, work_dir, i, visuals, seen, used_ext_ids,
+                    own_sources_needed(n_clips))
+                own = len(visuals)
+                own_sources[i] = list(visuals)
+                borrowed = _pick_borrowed_sources(i, own_sources, own, n_clips, visuals)
+        if not visuals:
+            if commercial:
+                raise RuntimeError(f"No usable client visual assigned to scene {i + 1}")
+            # Nothing usable: the legacy retry, which fails the render
+            # rather than ship a caption card.
+            path, kind, _ext = await _resolve_scene_visual(
+                scene, assets, project, work_dir, i, used_ext_ids=used_ext_ids)
+            visuals.append((path, kind))
+            own = 1
+            own_sources[i] = list(visuals)
+        own_counts[i] = own
+        visuals.extend(borrowed)
+        if own < n_clips:
+            logger.info(
+                "scene=%02d FOOTAGE_REUSE own=%d borrowed=%d slots=%d capacity=%d",
+                i + 1, own, len(borrowed), n_clips, reuse_capacity(own, len(borrowed)))
 
 
 async def _resolve_audio(project: dict, scenes: list[dict], assets: list[dict],
@@ -1893,15 +2101,44 @@ def _ffmpeg_normalise_image(src: Path, duration: float, out: Path, w: int = None
     ]
 
 
+def _video_motion_vf(motion: str, duration: float, W: int, H: int) -> str:
+    """Slow zoom/pan over a crop-filled video frame (any output aspect).
+
+    Used when a scene reuses one of its clips, so the repeat does not look
+    like the same shot. 15% headroom, linear over the segment.
+    """
+    D = max(0.1, float(duration))
+    pre = (f"scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,"
+           f"crop={W}:{H},scale=trunc(iw*1.15/2)*2:trunc(ih*1.15/2)*2:flags=bicubic")
+    if motion == "pan_left":
+        xy = f"x='(iw-ow)*(1-min(t/{D:.3f},1))':y='(ih-oh)/2'"
+    elif motion == "pan_down":
+        xy = f"x='(iw-ow)/2':y='(ih-oh)*min(t/{D:.3f},1)'"
+    elif motion == "pan_up":
+        xy = f"x='(iw-ow)/2':y='(ih-oh)*(1-min(t/{D:.3f},1))'"
+    elif motion == "push_in":
+        # Push in from full frame to 1.15x, centred.
+        return (f"scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,"
+                f"crop={W}:{H},setsar=1,fps={FPS},"
+                f"zoompan=z='1+0.15*min(on/({D:.3f}*{FPS}),1)':d=1:"
+                f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={W}x{H}:fps={FPS}")
+    else:  # pan_right
+        xy = f"x='(iw-ow)*min(t/{D:.3f},1)':y='(ih-oh)/2'"
+    return f"{pre},crop={W}:{H}:{xy},setsar=1"
+
+
 def _ffmpeg_normalise_video(src: Path, duration: float, out: Path,
                             *, start_offset: float = 0.0,
-                            punch_in: bool = False, w: int = None, h: int = None) -> list[str]:
+                            punch_in: bool = False, w: int = None, h: int = None,
+                            motion: Optional[str] = None) -> list[str]:
     W = w or WIDTH
     H = h or HEIGHT
     cmd = [FFMPEG_BIN, "-y"]
     if start_offset > 0:
         cmd += ["-ss", f"{start_offset:.2f}"]
-    if punch_in and W >= H:
+    if motion:
+        vf = _video_motion_vf(motion, duration, W, H) + f",format=yuv420p,fps={FPS}"
+    elif punch_in and W >= H:
         # Punch-in: split first so the blurred background uses the full frame
         # while only the focused foreground is zoomed.
         vf = (
@@ -2649,14 +2886,16 @@ async def _run_render(job_id: str, project_id: str):
 
         await _set_job(job_id, current_step="preparing_scenes", progress=35)
         scene_visuals: list[tuple[list[tuple[Path, str]], dict]] = []
+        # Own (non-borrowed) source count per scene for the reuse schedule;
+        # None for Visual Director scenes, which keep their shot mapping.
+        own_counts: list[Optional[int]] = []
         used_ext_ids: set[str] = set()  # project-wide external_id uniqueness
         for i, scene in enumerate(scenes):
             n_clips = len(plan_by_idx.get(i, {"subclips": [4.0]})["subclips"])
-            # One distinct source per emitted sub-clip is sufficient. Requiring
-            # twenty sources for a short scene turns transient stock-download
-            # failures into a long, unnecessary retry loop before fallback.
-            # A split must reuse the accepted visual. One source per piece
-            # would search for an unrelated picture.
+            # Ideally one distinct source per emitted sub-clip (real cuts).
+            # When a scene has fewer accepted clips, they are reused at new
+            # trims with a slow zoom/pan (footage_reuse) instead of searching
+            # stock for unjudged, often off-topic filler.
             required_visuals = max(n_clips, 1)
             if directed_by_scene.get(scene.get("id")):
                 try:
@@ -2669,12 +2908,20 @@ async def _run_render(job_id: str, project_id: str):
                     )
                 except DirectorError as exc:
                     raise RuntimeError(str(exc)) from None
+                own_counts.append(None)
             else:
+                # Pass 1: attached (judged, on-topic) clips only. No stock.
                 visuals = await _resolve_scene_visuals(scene, assets, project, work_dir, i,
                                                        max_visuals=required_visuals,
                                                        used_ext_ids=used_ext_ids,
-                                                       allow_fallback=not commercial)
+                                                       allow_fallback=not commercial,
+                                                       topup=False)
+                own_counts.append(len(visuals))
             scene_visuals.append((visuals, scene))
+
+        # Pass 2: reuse fills each plan; stock only when reuse cannot.
+        await _fill_scenes_by_reuse(scene_visuals, own_counts, plan_by_idx, assets,
+                                    project, work_dir, used_ext_ids, commercial)
 
         # CONSTITUTION §5: Select hook footage — first video clip for intro background.
         hook_path: Optional[Path] = None
@@ -2719,6 +2966,12 @@ async def _run_render(job_id: str, project_id: str):
             use_count: dict[int, int] = {}
             last_used: dict[int, float] = {}
             t_cursor = 0.0
+            # Reuse schedule: (source, pass) per sub-clip. Own clips first,
+            # borrowed neighbours once, never back to back when avoidable.
+            reuse_plan = None
+            if not directed_by_scene and i < len(own_counts) and own_counts[i] is not None:
+                own_n = min(own_counts[i], len(visuals))
+                reuse_plan = schedule_reuse(own_n, len(visuals) - own_n, len(subclips))
             for j, dur in enumerate(subclips):
                 emitted += 1
                 await _set_job(
@@ -2737,6 +2990,8 @@ async def _run_render(job_id: str, project_id: str):
                     chosen = min(range(len(visuals)), key=lambda vi: last_used.get(vi, -1e9))
                 if directed_by_scene:
                     chosen = min(j, len(visuals) - 1)
+                if reuse_plan:
+                    chosen = reuse_plan[j][0]
                 path, kind = visuals[chosen]
                 # Seek pass advances each time the same source repeats
                 pass_num = use_count.get(chosen, 0)
@@ -2757,18 +3012,31 @@ async def _run_render(job_id: str, project_id: str):
                     if str(path) not in dur_cache:
                         dur_cache[str(path)] = await _probe_duration_seconds(path)
                     src_dur = dur_cache[str(path)]
-                    if src_dur and src_dur > dur:
+                    motion = None
+                    if reuse_plan:
+                        # A repeat gets a new in-point and a slow zoom/pan,
+                        # so the boundary is still a visible cut.
+                        offset = reuse_offset(pass_num, dur, src_dur)
+                        motion = video_reuse_motion(pass_num, chosen)
+                    elif src_dur and src_dur > dur:
                         offset = (pass_num * dur) % max(0.1, src_dur - dur)
                     else:
                         offset = 0.0
                     cmd = _ffmpeg_normalise_video(path, dur, out, start_offset=offset,
-                                                   punch_in=(j % 2 == 1), w=W, h=H)
+                                                   punch_in=(j % 2 == 1), w=W, h=H,
+                                                   motion=motion)
+                    if motion:
+                        logger.info("FOOTAGE_REUSE_CLIP scene=%02d clip=%02d source=%d pass=%d offset=%.2f motion=%s",
+                                    i + 1, j + 1, chosen, pass_num, offset, motion)
                 elif is_image:
                     # Ken Burns: duration = scene duration chunk, direction random per clip
                     # Example ffmpeg: -vf "scale=iw*2:ih*2,zoompan=d=1:s=1280x720:z='min(pzoom+0.0015,1.5)'..."
                     # We use WIDTHxHEIGHT for 1920x1080 output, 30fps, keep aspect.
                     # Randomize direction: zoom_in, zoom_out, pan_left, pan_right
                     direction = KEN_BURNS_DIRECTIONS[(i + j) % len(KEN_BURNS_DIRECTIONS)]
+                    if reuse_plan:
+                        # Each use of the same still moves a different way.
+                        direction = ken_burns_direction(KEN_BURNS_DIRECTIONS, i, chosen, pass_num)
                     # Also support explicit check as per task wiring pseudocode:
                     # if is_image: clip = apply_ken_burns_effect(downloaded_path, scene_duration)
                     # Here we call the builder:

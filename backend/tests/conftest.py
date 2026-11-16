@@ -12,6 +12,12 @@ import os
 
 import pytest
 
+# longform.py creates STORAGE_DIR as soon as it is imported. Default that
+# directory to a writable temp path before test modules import the app.
+# An explicit STORAGE_DIR in the environment still wins.
+_STORAGE_DIR = os.environ.setdefault("STORAGE_DIR", "/tmp/ff-storage")
+os.makedirs(_STORAGE_DIR, exist_ok=True)
+
 _LIVE_CREDENTIALS = (
     "GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_API_KEY",
     "GOOGLE_APPLICATION_CREDENTIALS", "DEEPSEEK_API_KEY", "KIMI_API_KEY",
