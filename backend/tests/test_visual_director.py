@@ -383,7 +383,8 @@ def test_directed_plan_covers_pacing_without_stock(monkeypatch):
     assert pacing(unplanned) is False
 
     def shots(_plan, _scenes, _script):
-        return {"s1": [{"kind": "stock_video", "frames": 75}]}
+        # A 2.5s scene still needs the floor of 3 distinct pictures.
+        return {"s1": [{"kind": "stock_video", "frames": 25} for _ in range(3)]}
 
     monkeypatch.setattr("app.visual_director.checked_shots", shots)
     covered = validate_prerequisites(enabled, script, scenes, metadata, assets)
@@ -473,10 +474,11 @@ def test_frame_judgment_requires_the_queried_action_and_setting():
     import inspect
     from app import asset_relevance
 
-    source = inspect.getsource(asset_relevance.judge_frame)
-    assert "A kettle matches a kettle" not in source
-    assert "queried action" in source
-    assert "queried setting" in source
-    assert "outdoor kettle" in source
+    source = inspect.getsource(asset_relevance.frame_judge_prompt)
+    assert "outdoor kettle" not in source
+    assert "ink pour" not in source
+    assert "oranges" not in source
+    assert "narration" in source
+    assert "footage query" in source
     assert asset_relevance._JUDGE_MODEL == "gemini-3.8-flash"
     assert asset_relevance.MIN_RELEVANCE_SCORE == 70

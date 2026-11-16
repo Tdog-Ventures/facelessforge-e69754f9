@@ -135,17 +135,22 @@ def _pacing(check):
 
 def test_preflight_accepts_pr33_holds_and_visual_director_clip_count():
     project, script, scenes, base = _preflight_base()
-    # PR #33: two 15s holds cover a 30s scene with fewer than 10 cuts.
+    # Two long holds no longer cover a 30s scene. The floor is 8 distinct clips.
     holds = [
         {"id": "a", "asset_type": "stock_video", "scene_id": "s1", "source": "pexels",
+         "external_id": "a", "download_url": "https://stock.example/a.mp4",
          "duration": 15, "status": "attached"},
         {"id": "b", "asset_type": "stock_video", "scene_id": "s1", "source": "pexels",
+         "external_id": "b", "download_url": "https://stock.example/b.mp4",
          "duration": 15, "status": "attached"},
     ]
-    assert _pacing(render.validate_prerequisites(dict(project), script, scenes, {"id": "m"}, base + holds))["ok"] is True
-    # Visual Director: ceil(30/3) = 10 distinct pictures, even with tiny stored durations.
+    short = _pacing(render.validate_prerequisites(dict(project), script, scenes, {"id": "m"}, base + holds))
+    assert short["ok"] is False
+    assert "Scene 1 has 2 of 8 required distinct clips" in short["hint"]
+    # Ten distinct pictures still clear a 30s scene (floor 8, target 10).
     ten = [
         {"id": f"a{i}", "asset_type": "stock_video", "scene_id": "s1", "source": "pexels",
+         "external_id": f"ext-{i}", "download_url": f"https://stock.example/{i}.mp4",
          "duration": 1, "status": "attached"}
         for i in range(10)
     ]

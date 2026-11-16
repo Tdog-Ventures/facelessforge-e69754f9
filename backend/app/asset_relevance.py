@@ -261,6 +261,26 @@ async def _representative_image(video: Path, candidate: dict, work: Path) -> tup
     return raw, _image_mime(raw)
 
 
+def frame_judge_prompt(narration: str, query: str) -> str:
+    """Judge the frame against the term that found it and against the narration.
+
+    A frying pan matches a scene whose narration is about frying, even when the
+    search term that returned the clip was a different cooking phrase. Project
+    examples from other videos are not part of the question.
+    """
+    return (
+        "Does this frame show the subject named by the footage query, "
+        "or the action the scene narration describes? "
+        "Accept the frame when the queried subject is visible. "
+        "Also accept the frame when it shows what the narration is describing, "
+        "even if the footage query used different words for that same action. "
+        "Reject a frame that shares only a generic word and does not show "
+        "the queried subject or the narrated action. "
+        "Return JSON {\"same_subject\": true or false, \"score\": 0-100, \"reason\": \"short phrase\"}. "
+        f"Narration: {narration[:400]}\nFootage query: {query[:200]}"
+    )
+
+
 async def judge_frame(image: bytes, mime: str, narration: str, query: str) -> dict:
     """Same-subject judgment. Any failed call is a rejection, never a pass."""
     from . import api_limits
@@ -272,18 +292,7 @@ async def judge_frame(image: bytes, mime: str, narration: str, query: str) -> di
     if not key or not image:
         return {"accepted": False, "score": None, "reason": "vision_unconfigured"}
     model = (os.getenv("DIRECTOR_GEMINI_MODEL") or _JUDGE_MODEL).strip() or _JUDGE_MODEL
-    prompt = (
-        "Does this video frame show the queried action happening in the queried setting? "
-        "Both the action and the setting named in the footage query must be visible. "
-        "One shared object word is not a match. "
-        "An outdoor kettle, or a kettle on a cafe or park table, does not match steam over a kitchen counter. "
-        "Generic shared words are not a match: kitchen, counter, counters, countertop, cup, cups, "
-        "water, food, orange, oranges, rain, rainy, raindrop, raindrops, window, windows, or glass. "
-        "A scoreboard, gull, laptop, egg, ink pour, or ocean does not match a kettle, "
-        "an orange fruit, a cup, or rain on a window. "
-        "Return JSON {\"same_subject\": true or false, \"score\": 0-100, \"reason\": \"short phrase\"}. "
-        f"Narration: {narration[:400]}\nFootage query: {query[:200]}"
-    )
+    prompt = frame_judge_prompt(narration, query)
     try:
         from google import genai
         from google.genai import types

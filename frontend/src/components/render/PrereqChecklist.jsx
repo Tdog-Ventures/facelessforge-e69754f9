@@ -33,7 +33,11 @@ export default function PrereqChecklist({ preflight, onRefresh }) {
             )}
             <div className="flex-1 min-w-0">
               <div className="text-sm text-[var(--ff-text)]">{c.label}</div>
-              <div className="font-mono text-[10px] text-[var(--ff-text-muted)] mt-1">{c.hint}</div>
+              {c.hint && (
+                <div className={`mt-1 whitespace-pre-line ${c.ok ? "font-mono text-[10px] text-[var(--ff-text-muted)]" : "text-sm text-[var(--ff-text)] leading-relaxed"}`}>
+                  {c.hint}
+                </div>
+              )}
             </div>
           </div>
         ))}

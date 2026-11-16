@@ -256,7 +256,14 @@ export default function RenderPanel({
           setCreditState({ status: "ready", remaining, unmetered: false });
         }
       } else if (typeof detail === "object" && detail?.issues) {
-        toast.error("Cannot start render", { description: detail.issues.join(" · ") + ` | VO vs Scenes check: ${msg}` });
+        const footage = detail.issues.filter((item) => String(item).includes("required distinct clips"));
+        if (footage.length) {
+          toast.error("Not enough footage", { description: footage.join(" ") });
+        }
+        const other = detail.issues.filter((item) => !String(item).includes("required distinct clips"));
+        if (other.length) {
+          toast.error("Cannot start render", { description: other.join(" · ") });
+        }
       } else if (err.response?.status === 409) {
         toast.error("Render already running", { description: msg });
       } else {
@@ -311,6 +318,8 @@ export default function RenderPanel({
   const creditsAllowNow = creditState.status === "ready"
     && (creditState.unmetered || creditState.remaining >= RENDER_CREDIT_COST);
   const canRender = preflight.ok && !preflightStale && jobsKnown && !ACTIVE_STATES.has(String(activeJob?.status || "").toLowerCase() || "") && creditsAllowNow;
+  const footageItem = (preflight.checklist || []).find((item) => item.key === "scene_assets" && item.ok === false);
+  const footageMessage = footageItem?.hint || (preflight.issues || []).filter((item) => String(item).includes("required distinct clips")).join(" ");
   const completed = String(activeJob?.status || "").toLowerCase() === "completed";
   const inProgress = activeJob && ACTIVE_STATES.has(String(activeJob.status || "").toLowerCase());
   const creditStop = inProgress
@@ -366,6 +375,17 @@ export default function RenderPanel({
         <div className="border border-amber-500/40 bg-amber-500/10 text-amber-200 text-sm px-4 py-3 rounded-sm" data-testid="render-jobs-warning">
           Render history did not load. {jobsWarning}
           <button type="button" onClick={refreshAll} className="ml-3 underline">Retry</button>
+        </div>
+      )}
+      {footageMessage && (
+        <div
+          data-testid="footage-gate"
+          className="border border-[#FF3366]/50 bg-[#FF3366]/10 text-[var(--ff-text)] rounded-sm px-4 py-3 space-y-1"
+        >
+          <div className="font-mono text-[11px] uppercase tracking-widest text-[#FF3366]">
+            Render stays off until every scene has enough clips
+          </div>
+          <p className="text-sm leading-relaxed whitespace-pre-line">{footageMessage}</p>
         </div>
       )}
       <PrereqChecklist preflight={preflight} onRefresh={refreshAll} />

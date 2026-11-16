@@ -211,11 +211,15 @@ def test_preflight_music_states():
                "end_time": 27.5}]
     assets = [{"id": "v1", "asset_type": "voiceover_audio", "duration": 27.2,
                "status": "selected"},
-              {"id": "t1", "asset_type": "generated_thumbnail"},
-              {"id": "s1", "asset_type": "stock_video", "scene_id": "scene-1",
-               "source": "pexels", "duration": 13.75, "status": "attached"},
-              {"id": "s2", "asset_type": "stock_video", "scene_id": "scene-1",
-               "source": "pexels", "duration": 13.75, "status": "attached"}]
+              {"id": "t1", "asset_type": "generated_thumbnail"}]
+    # 27.5s needs 7 distinct downloadable clips. Music state is what this checks.
+    assets.extend(
+        {"id": f"s{n}", "asset_type": "stock_video", "scene_id": "scene-1",
+         "source": "pexels", "external_id": f"ext-{n}",
+         "download_url": f"https://stock.example/{n}.mp4",
+         "duration": 3.9, "status": "attached"}
+        for n in range(1, 8)
+    )
     off = render.validate_prerequisites(dict(base), script, scenes, {"id": "m"}, assets)
     assert off["music_state"]["enabled"] is False
     assert off["ok"] is True
