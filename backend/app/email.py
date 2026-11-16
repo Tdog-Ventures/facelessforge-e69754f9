@@ -4,9 +4,16 @@ Template preserves ABN 60 578 933 517.
 """
 from __future__ import annotations
 
+import asyncio
+import html as html_lib
 import os
 import logging
+import smtplib
+import ssl
+from email.message import EmailMessage
 from typing import Optional
+
+import httpx
 
 logger = logging.getLogger("facelessforge.email")
 
@@ -147,6 +154,36 @@ GCS Mirror (R2):
     return {"subject": subject, "html": html, "text": text, "first_name": first, "company": company}
 
 
+def render_password_reset_email(
+    *,
+    recipient: str,
+    reset_url: str,
+    expires_in_minutes: int,
+) -> dict:
+    """Render the transactional password-reset message."""
+    safe_url = html_lib.escape(reset_url, quote=True)
+    subject = "Reset your FacelessForge password"
+    text = f"""We received a request to reset the password for {recipient}.
+
+Reset your password:
+{reset_url}
+
+This link expires in {expires_in_minutes} minutes and can only be used once.
+If you did not request this reset, you can ignore this email.
+
+— FacelessForge
+"""
+    html = f"""<!doctype html><html><body style="font-family:Arial,sans-serif;background:#0b0f14;color:#e2e8f0;margin:0;padding:24px">
+<div style="max-width:600px;margin:0 auto;border:1px solid #1c2a3a;background:#121212;padding:24px;border-radius:8px">
+<h1 style="color:#00E5FF;font-size:22px;margin:0 0 16px">Reset your password</h1>
+<p style="font-size:14px;line-height:1.6">We received a request to reset your FacelessForge password.</p>
+<p style="margin:24px 0"><a href="{safe_url}" style="display:inline-block;background:#00E5FF;color:#000;padding:12px 20px;border-radius:4px;font-weight:700;text-decoration:none">Reset password</a></p>
+<p style="font-size:13px;line-height:1.6">This link expires in {expires_in_minutes} minutes and can only be used once.</p>
+<p style="font-size:13px;line-height:1.6;color:#94a3b8">If you did not request this reset, you can ignore this email.</p>
+</div></body></html>"""
+    return {"subject": subject, "html": html, "text": text}
+
+
 def get_email_service_status() -> dict:
     """Check email service config from env."""
     smtp_host = os.environ.get("SMTP_HOST") or os.environ.get("MAIL_HOST") or os.environ.get("SES_HOST")
@@ -168,6 +205,125 @@ def get_email_service_status() -> dict:
         "template": "Your video IS ready — {FirstName} {company.com} + MP4 + GCS mirror + posting guidance",
         "warning": None if configured else "No SMTP/SendGrid/SES configured — emails log to stdout (DEV_MODE). Set SMTP_HOST/SENDGRID_API_KEY to enable live delivery.",
     }
+
+
+def _send_password_reset_smtp(*, recipient: str, message: dict, status: dict) -> None:
+    smtp_host = status["smtp_host"]
+    smtp_port = int(os.environ.get("SMTP_PORT") or os.environ.get("MAIL_PORT") or "587")
+    smtp_user = os.environ.get("SMTP_USER") or os.environ.get("MAIL_USER")
+    smtp_password = os.environ.get("SMTP_PASSWORD") or os.environ.get("MAIL_PASSWORD")
+    use_ssl = os.environ.get("SMTP_USE_SSL", "").lower() in ("1", "true", "yes") or smtp_port == 465
+    starttls = os.environ.get("SMTP_STARTTLS", "true").lower() in ("1", "true", "yes")
+
+    email_message = EmailMessage()
+    email_message["Subject"] = message["subject"]
+    email_message["From"] = status["mail_from"]
+    email_message["To"] = recipient
+    email_message.set_content(message["text"])
+    email_message.add_alternative(message["html"], subtype="html")
+
+    tls_context = ssl.create_default_context()
+    if use_ssl:
+        connection = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=15, context=tls_context)
+    else:
+        connection = smtplib.SMTP(smtp_host, smtp_port, timeout=15)
+    with connection as smtp:
+        if starttls and not use_ssl:
+            smtp.starttls(context=tls_context)
+        if smtp_user and smtp_password:
+            smtp.login(smtp_user, smtp_password)
+        smtp.send_message(email_message)
+
+
+async def send_password_reset_email(
+    *,
+    recipient: str,
+    reset_url: str,
+    expires_in_minutes: int,
+) -> dict:
+    """Deliver a password-reset email through the configured transactional transport."""
+    message = render_password_reset_email(
+        recipient=recipient,
+        reset_url=reset_url,
+        expires_in_minutes=expires_in_minutes,
+    )
+    status = get_email_service_status()
+    mode = "resend" if os.environ.get("RESEND_API_KEY") else status["mode"]
+
+    try:
+        if mode == "resend":
+            async with httpx.AsyncClient(timeout=15) as client:
+                response = await client.post(
+                    "https://api.resend.com/emails",
+                    headers={
+                        "Authorization": f"Bearer {os.environ['RESEND_API_KEY']}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "from": status["mail_from"],
+                        "to": [recipient],
+                        "subject": message["subject"],
+                        "html": message["html"],
+                        "text": message["text"],
+                    },
+                )
+                if response.status_code in (200, 201, 202):
+                    return {"ok": True, "mode": mode}
+                return {"ok": False, "mode": mode, "error": f"provider returned HTTP {response.status_code}"}
+
+        if mode == "smtp":
+            await asyncio.to_thread(
+                _send_password_reset_smtp,
+                recipient=recipient,
+                message=message,
+                status=status,
+            )
+            return {"ok": True, "mode": mode}
+
+        if mode == "sendgrid":
+            async with httpx.AsyncClient(timeout=15) as client:
+                response = await client.post(
+                    "https://api.sendgrid.com/v3/mail/send",
+                    headers={
+                        "Authorization": f"Bearer {os.environ['SENDGRID_API_KEY']}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "personalizations": [{"to": [{"email": recipient}]}],
+                        "from": {"email": status["mail_from"]},
+                        "subject": message["subject"],
+                        "content": [
+                            {"type": "text/plain", "value": message["text"]},
+                            {"type": "text/html", "value": message["html"]},
+                        ],
+                    },
+                )
+                if response.status_code in (200, 202):
+                    return {"ok": True, "mode": mode}
+                return {"ok": False, "mode": mode, "error": f"provider returned HTTP {response.status_code}"}
+
+        if mode == "ses":
+            import boto3
+
+            client = boto3.client("ses", region_name=status["ses_region"])
+            await asyncio.to_thread(
+                client.send_email,
+                Source=status["mail_from"],
+                Destination={"ToAddresses": [recipient]},
+                Message={
+                    "Subject": {"Data": message["subject"], "Charset": "UTF-8"},
+                    "Body": {
+                        "Text": {"Data": message["text"], "Charset": "UTF-8"},
+                        "Html": {"Data": message["html"], "Charset": "UTF-8"},
+                    },
+                },
+            )
+            return {"ok": True, "mode": mode}
+
+        return {"ok": False, "mode": mode, "error": "email transport is not configured"}
+    except Exception as exc:
+        logger.error("[EMAIL] Password-reset delivery failed via %s: %s", mode, type(exc).__name__)
+        return {"ok": False, "mode": mode, "error": type(exc).__name__}
 
 
 async def send_video_ready_email(
