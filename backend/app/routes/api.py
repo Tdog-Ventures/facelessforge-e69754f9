@@ -14,7 +14,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, Body, UploadFile, File, Form
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, Body, UploadFile, File, Form
 from fastapi.responses import RedirectResponse, StreamingResponse, PlainTextResponse
 
 from ..auth import (
@@ -42,6 +42,7 @@ from ..grounding import CLIENT_VISUAL_TYPES
 from ..timing import build_timing_status, narration_fits_budget, suggest_fitted_duration
 from ..grounding import commercial_project_errors
 from ..storage import resolve_asset_url, resolve_delivery_url
+from ..email import send_password_reset_email
 from .. import generation as gen
 from .. import stock as stock_service
 from .. import thumbnail_images as thumb_images
@@ -316,7 +317,7 @@ def _dev_mode() -> bool:
 
 
 @router.post("/auth/forgot-password")
-async def forgot_password(body: ForgotPasswordRequest, request: Request):
+async def forgot_password(body: ForgotPasswordRequest, request: Request, background_tasks: BackgroundTasks):
     """Always returns 200 — never reveals whether the email exists.
     Rate-limited per-IP+email to 5 requests per 15 minutes.
     In DEV_MODE, returns the reset token + reset_url in the response and logs it.
@@ -369,8 +370,16 @@ async def forgot_password(body: ForgotPasswordRequest, request: Request):
             "used_at": None,
         })
         # Build reset link (frontend route)
-        frontend = os.environ.get("FRONTEND_URL") or request.headers.get("origin") or ""
-        reset_url = f"{frontend}/reset-password?token={token}" if frontend else f"/reset-password?token={token}"
+        frontend = (
+            os.environ.get("PASSWORD_RESET_URL_BASE")
+            or os.environ.get("FRONTEND_URL")
+            or "https://facelessforge.ethinx.solutions"
+        ).rstrip("/")
+        reset_url = f"{frontend}/reset-password?token={token}"
+        background_tasks.add_task(
+            _deliver_password_reset, db, user["id"], email, token, reset_url, ttl_minutes,
+            _dev_mode(),
+        )
         if _dev_mode():
             logger.warning("[DEV reset] %s -> %s", email, reset_url)
             response_payload["dev_reset_token"] = token
@@ -378,6 +387,26 @@ async def forgot_password(body: ForgotPasswordRequest, request: Request):
             response_payload["dev_expires_in_minutes"] = ttl_minutes
 
     return response_payload
+
+
+async def _deliver_password_reset(db, user_id, email, token, reset_url, ttl_minutes, dev_mode):
+    logger = logging.getLogger("facelessforge.auth")
+    try:
+        delivery = await send_password_reset_email(
+            recipient=email, reset_url=reset_url, expires_in_minutes=ttl_minutes,
+        )
+    except Exception as exc:
+        logger.error("Password-reset mailer raised for user_id=%s: %s", user_id, type(exc).__name__)
+        delivery = {"ok": False, "mode": "unknown"}
+    if not delivery.get("ok") and not dev_mode:
+        await db.password_reset_tokens.update_one(
+            {"user_id": user_id, "token": token, "used_at": None},
+            {"$set": {"used_at": _now()}},
+        )
+        logger.error(
+            "Password-reset email delivery failed for user_id=%s via %s",
+            user_id, delivery.get("mode", "unknown"),
+        )
 
 
 @router.post("/auth/reset-password")
@@ -402,13 +431,16 @@ async def reset_password(body: ResetPasswordRequest):
         raise HTTPException(status_code=400, detail="This reset link is invalid or has already been used.")
 
     new_hash = hash_password(body.new_password)
+    claimed_at = _now()
+    claimed = await db.password_reset_tokens.update_one(
+        {"token": body.token, "used_at": None, "expires_at": {"$gt": claimed_at}},
+        {"$set": {"used_at": claimed_at}},
+    )
+    if not claimed.modified_count:
+        raise HTTPException(status_code=400, detail="This reset link is invalid or has already been used.")
     await db.users.update_one(
         {"id": user["id"]},
-        {"$set": {"password_hash": new_hash, "updated_at": now}},
-    )
-    await db.password_reset_tokens.update_one(
-        {"token": body.token},
-        {"$set": {"used_at": now}},
+        {"$set": {"password_hash": new_hash, "updated_at": claimed_at}},
     )
     # Invalidate any other outstanding tokens for this user
     await db.password_reset_tokens.update_many(
