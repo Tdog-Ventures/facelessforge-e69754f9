@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from fastapi import Depends, FastAPI
+from fastapi import BackgroundTasks, Depends, FastAPI
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
@@ -53,7 +53,7 @@ async def test_production_reset_never_returns_token(monkeypatch):
                          users=SimpleNamespace(find_one=AsyncMock(return_value={'id': 'customer'})))
     monkeypatch.setattr(api, 'get_db', lambda: db)
     request = Request({'type': 'http', 'method': 'POST', 'path': '/', 'headers': [], 'client': ('127.0.0.1', 1)})
-    response = await api.forgot_password(ForgotPasswordRequest(email='test@example.com'), request)
+    response = await api.forgot_password(ForgotPasswordRequest(email='test@example.com'), request, BackgroundTasks())
     assert set(response) == {'ok', 'message'}
 
 
