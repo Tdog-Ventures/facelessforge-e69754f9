@@ -2,7 +2,7 @@ import React, { useState, useEffect } from "react";
 import { toast } from "sonner";
 import { Sparkles, Loader2, Download, Search, X as XIcon, Wand2, CreditCard, Zap, Film } from "lucide-react";
 import { api, formatApiError, API, UNBOUNDED_TIMEOUT } from "../lib/api";
-import { listRenderJobs, reconnectRender, shouldReconnectRender } from "../lib/renderJobs";
+import { checkRenderConflict, listRenderJobs, reconnectRender, shouldReconnectRender } from "../lib/renderJobs";
 import { formatDuration, sceneBudgetLabel } from "../lib/format";
 import StockAssetModal from "./StockAssetModal";
 import { useConfirm } from "./ConfirmDialog";
@@ -22,6 +22,7 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, onR
   const [showPricingModal, setShowPricingModal] = useState(false);
   const [fullRenderLoading, setFullRenderLoading] = useState(false);
   const [renderUnconfirmed, setRenderUnconfirmed] = useState(false);
+  const [renderError, setRenderError] = useState("");
   const [directing, setDirecting] = useState(false);
   const [innerProject, setInnerProject] = useState(project || null);
   const confirm = useConfirm();
@@ -119,6 +120,7 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, onR
 
   const fullRender = async () => {
     setFullRenderLoading(true);
+    setRenderError("");
     try {
       const previousJobs = await listRenderJobs(projectId);
       try {
@@ -128,7 +130,27 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, onR
           return api.post(`/projects/${projectId}/render/start`, {}, options);
         });
         toast.success("Render queued");
+        setRenderUnconfirmed(false);
       } catch (error) {
+        if (error.response?.status === 409) {
+          let found = null;
+          try {
+            found = await checkRenderConflict(projectId, previousJobs);
+          } catch {
+            found = null;
+          }
+          if (found?.job) {
+            setRenderUnconfirmed(false);
+            toast.success("Reconnected to render", { id: "full-render", description: `Current status: ${found.job.status}.` });
+            onRenderRecovered?.();
+          } else {
+            const message = formatApiError(error.response?.data?.detail);
+            setRenderUnconfirmed(false);
+            setRenderError(message);
+            toast.error(message, { id: "full-render" });
+          }
+          return;
+        }
         if (!shouldReconnectRender(error)) throw error;
         toast.loading("Reconnecting to the render…", { id: "full-render" });
         const recovered = await reconnectRender(projectId, previousJobs);
@@ -324,6 +346,9 @@ export default function ScenePlanner({ projectId, scenes, canEdit, onChange, onR
             {fullRenderLoading ? <Loader2 size={14} className="animate-spin" /> : <Film size={16} />}
             {renderUnconfirmed ? "CHECK RENDER STATUS" : "FULL RENDER - START TO FINISH"}
           </button>
+        )}
+        {renderError && (
+          <p data-testid="full-render-error" className="text-sm text-[#FF3366]">{renderError}</p>
         )}
         <BillingBar />
         {canEdit && scenes.length > 0 && project?.production_mode !== "commercial_ad" && (

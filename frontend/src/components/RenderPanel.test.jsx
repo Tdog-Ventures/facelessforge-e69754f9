@@ -2,6 +2,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import RenderPanel from "./RenderPanel";
 import { api } from "../lib/api";
+import { toast } from "sonner";
 
 jest.mock("../lib/api", () => ({
   api: { get: jest.fn(), post: jest.fn() },
@@ -182,6 +183,56 @@ test("a 524 reconnects to the queued job without sending a second start request"
   expect(api.post).toHaveBeenCalledTimes(1);
   expect(element.querySelector("[data-testid='render-job-rendering']").textContent).toContain("42%");
   expect(element.querySelector("[data-testid='render-start-btn']").disabled).toBe(true);
+});
+
+const REFUSAL = "Project settings changed while the render was being prepared; re-check the project and retry.";
+
+function jobReads() {
+  return api.get.mock.calls.filter(([path]) => String(path).endsWith("/render/jobs"));
+}
+
+test("a 409 with an active job resumes that job", async () => {
+  let jobsReads = 0;
+  api.get.mockImplementation(async (path) => {
+    if (path === "/billing/credits") return { data: { remaining: 3 } };
+    if (String(path).endsWith("/render/jobs")) {
+      jobsReads += 1;
+      return { data: jobsReads === 1 ? [] : [{ id: "live", status: "rendering", progress: 18 }] };
+    }
+    return { data: { ok: true, issues: [], checklist: [] } };
+  });
+  api.post.mockRejectedValue({ response: { status: 409, data: { detail: "A render is already in progress for this project." } } });
+
+  await mount();
+  await act(async () => { element.querySelector("[data-testid='render-start-btn']").click(); });
+
+  expect(api.post).toHaveBeenCalledTimes(1);
+  expect(jobReads()).toHaveLength(2);
+  expect(element.querySelector("[data-testid='render-job-rendering']").textContent).toContain("18%");
+  expect(element.querySelector("[data-testid='render-start-btn']").disabled).toBe(true);
+  expect(element.querySelector("[data-testid='render-start-error']")).toBeNull();
+  expect(element.textContent).not.toContain("Render start is unconfirmed");
+});
+
+test("a 409 without a job shows the server message and leaves Start enabled", async () => {
+  api.get.mockImplementation(async (path) => {
+    if (path === "/billing/credits") return { data: { remaining: 3 } };
+    if (String(path).endsWith("/render/jobs")) return { data: [] };
+    return { data: { ok: true, issues: [], checklist: [] } };
+  });
+  api.post.mockRejectedValue({ response: { status: 409, data: { detail: REFUSAL } } });
+
+  await mount();
+  const button = element.querySelector("[data-testid='render-start-btn']");
+  expect(button.disabled).toBe(false);
+  await act(async () => { button.click(); });
+
+  expect(api.post).toHaveBeenCalledTimes(1);
+  expect(jobReads()).toHaveLength(2);
+  expect(toast.error).toHaveBeenCalledWith(REFUSAL);
+  expect(element.querySelector("[data-testid='render-start-error']").textContent).toBe(REFUSAL);
+  expect(element.querySelector("[data-testid='render-start-btn']").disabled).toBe(false);
+  expect(element.textContent).not.toContain("Render start is unconfirmed");
 });
 
 test("a portrait render uses a narrow player and omits the landscape poster", async () => {

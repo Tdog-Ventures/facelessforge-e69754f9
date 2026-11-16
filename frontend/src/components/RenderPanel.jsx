@@ -4,7 +4,7 @@ import { Play, Loader2, Film } from "lucide-react";
 import { api, formatApiError, API } from "../lib/api";
 import { RENDER_CREDIT_COST } from "../lib/credits";
 import {
-  ACTIVE_RENDER_STATES as ACTIVE_STATES, listRenderJobs, normalizeRenderJob,
+  ACTIVE_RENDER_STATES as ACTIVE_STATES, checkRenderConflict, listRenderJobs, normalizeRenderJob,
   reconnectRender, shouldReconnectRender,
 } from "../lib/renderJobs";
 import PrereqChecklist from "./render/PrereqChecklist";
@@ -39,6 +39,7 @@ export default function RenderPanel({
   const [jobs, setJobs] = useState([]);
   const [activeJob, setActiveJob] = useState(null);
   const [starting, setStarting] = useState(false);
+  const [startError, setStartError] = useState(null);
   const [cancelling, setCancelling] = useState(false);
   const [fitting, setFitting] = useState(false);
   const [creditState, setCreditState] = useState({ status: "loading", remaining: 0, unmetered: false });
@@ -174,6 +175,18 @@ export default function RenderPanel({
   const creditsAllow = creditState.status === "ready"
     && (creditState.unmetered || creditState.remaining >= RENDER_CREDIT_COST);
 
+  const showRecoveredJob = async (recovered) => {
+    const { job, jobs: recoveredJobs } = recovered;
+    setJobs(recoveredJobs);
+    setActiveJob(PROMOTABLE.has(job.status) ? job : null);
+    setJobsKnown(true);
+    setJobsWarning(null);
+    setStartError(null);
+    toast.success("Reconnected to render", { description: `Current status: ${job.status}.` });
+    if (TERMINAL.has(job.status)) void refreshProject();
+    await loadCredits();
+  };
+
   const start = async () => {
     if (!creditsAllow) {
       const description = creditState.status === "ready"
@@ -183,6 +196,7 @@ export default function RenderPanel({
       return;
     }
     setStarting(true);
+    setStartError(null);
     // Pre-render validation: VO vs scenes total mismatch
     try {
       const voAssets = (assets || []).filter(a => a.asset_type === "voiceover_audio" && a.status !== "rejected");
@@ -229,19 +243,29 @@ export default function RenderPanel({
       toast.success("Render queued");
       await loadCredits();
     } catch (err) {
+      if (err.response?.status === 409) {
+        try {
+          const found = await checkRenderConflict(projectId, jobs);
+          if (found?.job) {
+            await showRecoveredJob(found);
+            return;
+          }
+        } catch {
+          // One status read failed. The 409 detail is the refusal.
+        }
+        setJobsKnown(true);
+        setJobsWarning(null);
+        const message = formatApiError(err.response?.data?.detail);
+        setStartError(message);
+        toast.error(message);
+        return;
+      }
       if (shouldReconnectRender(err)) {
         setJobsKnown(false);
         setJobsWarning("Reconnecting to check whether the render was queued…");
         const recovered = await reconnectRender(projectId, jobs);
         if (recovered) {
-          const { job, jobs: recoveredJobs } = recovered;
-          setJobs(recoveredJobs);
-          setActiveJob(PROMOTABLE.has(job.status) ? job : null);
-          setJobsKnown(true);
-          setJobsWarning(null);
-          toast.success("Reconnected to render", { description: `Current status: ${job.status}.` });
-          if (TERMINAL.has(job.status)) void refreshProject();
-          await loadCredits();
+          await showRecoveredJob(recovered);
         } else {
           setJobsWarning("Render start is unconfirmed. Check status before starting another render.");
         }
@@ -481,6 +505,9 @@ export default function RenderPanel({
       )}
 
       {/* Action bar */}
+      {startError && (
+        <p data-testid="render-start-error" className="text-sm text-[#FF3366]">{startError}</p>
+      )}
       {creditStop && (
         <p
           data-testid="render-credit-stop"
