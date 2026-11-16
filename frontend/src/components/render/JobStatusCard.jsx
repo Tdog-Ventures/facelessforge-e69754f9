@@ -27,6 +27,9 @@ export default function JobStatusCard({
   const completed = status === "completed";
   const inProgress = ACTIVE_STATES.has(status);
   const deliveryUrl = downloadUrl || job.delivery_url || job.output_url;
+  const downloadHref = deliveryUrl
+    ? `${deliveryUrl}${deliveryUrl.includes("?") ? "&" : "?"}download=1`
+    : deliveryUrl;
   // Label and player follow the render's real aspect (default 9:16), not a fixed 16:9.
   const aspect = job.aspect_ratio || project?.aspect_ratio || "9:16";
   const dims = { "16:9": "1920×1080", "1:1": "1080×1080" }[aspect] || "1080×1920";
@@ -110,7 +113,7 @@ export default function JobStatusCard({
           <div className="flex flex-wrap items-center gap-2">
             <a
               data-testid="render-download-btn"
-              href={deliveryUrl}
+              href={downloadHref}
               download={`${(project.name || "facelessforge").replace(/[^a-z0-9_-]/gi, "_")}.mp4`}
               className="inline-flex items-center gap-2 bg-[#00FF66] text-black font-semibold text-sm px-4 py-2 rounded-sm hover:bg-[#33FF80] transition-colors"
             >
