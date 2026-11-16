@@ -213,6 +213,13 @@ def _render_job_payload(job: dict | None) -> dict | None:
     return payload
 
 
+def _download_filename(project: dict | None) -> str:
+    """Build a friendly, header-safe MP4 filename from the project name."""
+    raw = (project or {}).get("name") or "facelessforge"
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", raw).strip("._-")[:80]
+    return f"{stem or 'facelessforge'}.mp4"
+
+
 def _ensure_project_access(project: dict, user: dict, *, write: bool = False):
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -4028,8 +4035,17 @@ async def render_get_job(project_id: str, job_id: str, user=Depends(get_current_
 
 
 @router.get("/projects/{project_id}/render/jobs/{job_id}/download")
-async def download_render_job(project_id: str, job_id: str, user=Depends(get_current_user)):
-    """Redirect to a freshly resolved URL for one completed render job."""
+async def download_render_job(
+    project_id: str,
+    job_id: str,
+    download: bool = False,
+    user=Depends(get_current_user),
+):
+    """Redirect to a freshly resolved URL for one completed render job.
+
+    ``download=1`` signs the object with an attachment disposition so the MP4
+    is saved by the browser. Without it the URL stays inline for the player.
+    """
     db = get_db()
     project = await db.projects.find_one({"id": project_id}, {"_id": 0})
     _ensure_project_access(project, user)
@@ -4040,7 +4056,8 @@ async def download_render_job(project_id: str, job_id: str, user=Depends(get_cur
     }, {"_id": 0})
     if not job:
         raise HTTPException(status_code=404, detail="Completed render not found")
-    delivery_url = resolve_delivery_url(job)
+    attachment = _download_filename(project) if download else None
+    delivery_url = resolve_delivery_url(job, download_filename=attachment)
     if not delivery_url:
         raise HTTPException(status_code=404, detail="Render artifact is unavailable")
     return RedirectResponse(url=delivery_url, status_code=302)

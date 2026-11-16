@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import threading
 from dataclasses import dataclass
@@ -59,6 +60,15 @@ def clean_storage_key(key: object) -> Optional[str]:
     if not clean or any(part in ("", ".", "..") for part in parts):
         return None
     return clean
+
+
+def _attachment_filename(filename: str) -> str:
+    """Return a header-safe ASCII filename for Content-Disposition."""
+    stem = Path(filename or "").name
+    clean = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._-")
+    if not clean.lower().endswith(".mp4"):
+        clean = f"{clean or 'facelessforge'}.mp4"
+    return clean[:120]
 
 
 def _safe_error(exc: BaseException, max_len: int = 240) -> str:
@@ -300,11 +310,22 @@ class S3Storage(StorageBackend):
                 return f"{self.public_base}/{key.lstrip('/')}"
             raise
 
-    def get_presigned_url(self, key: str, expires_in: Optional[int] = None) -> str:
+    def get_presigned_url(
+        self,
+        key: str,
+        expires_in: Optional[int] = None,
+        download_filename: Optional[str] = None,
+    ) -> str:
         client = self._client_or_raise()
+        params = {"Bucket": self.bucket, "Key": key}
+        if download_filename:
+            params["ResponseContentDisposition"] = (
+                f'attachment; filename="{_attachment_filename(download_filename)}"'
+            )
+            params["ResponseContentType"] = "video/mp4"
         return client.generate_presigned_url(
             "get_object",
-            Params={"Bucket": self.bucket, "Key": key},
+            Params=params,
             ExpiresIn=expires_in or self.signed_ttl,
         )
 
@@ -510,19 +531,23 @@ def resolve_asset_url(asset: Optional[dict]) -> Optional[str]:
     return None
 
 
-def resolve_delivery_url(job: Optional[dict]) -> Optional[str]:
+def resolve_delivery_url(
+    job: Optional[dict],
+    download_filename: Optional[str] = None,
+) -> Optional[str]:
     """Return a currently usable URL for a persisted render job.
 
     Object-storage URLs are signed when requested rather than trusting the
     time-limited URL saved when the render originally completed. Local storage
-    keeps using its stable FastAPI preview path.
+    keeps using its stable FastAPI preview path. Passing ``download_filename``
+    signs the object with an attachment disposition so a browser saves it.
     """
     if not job:
         return None
     backend = get_storage()
     key = job.get("output_storage_key")
     if key and backend.mode == "object" and hasattr(backend, "get_presigned_url"):
-        return backend.get_presigned_url(key)
+        return backend.get_presigned_url(key, download_filename=download_filename)
     if backend.mode == "local" and job.get("output_relative_url"):
         return job["output_relative_url"]
     return job.get("output_url")

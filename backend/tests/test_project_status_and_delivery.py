@@ -64,7 +64,7 @@ def test_delivery_url_is_refreshed_from_storage_key(monkeypatch):
     class FakeObjectStorage:
         mode = "object"
 
-        def get_presigned_url(self, key):
+        def get_presigned_url(self, key, **_kwargs):
             return f"fresh://{key}"
 
     monkeypatch.setattr(storage, "_BACKEND", FakeObjectStorage())
@@ -133,7 +133,7 @@ async def test_job_download_endpoint_refreshes_the_delivery_url(monkeypatch):
         })
 
     monkeypatch.setattr(api_routes, "get_db", lambda: FakeDB())
-    monkeypatch.setattr(api_routes, "resolve_delivery_url", lambda _job: "fresh://signed-url", raising=False)
+    monkeypatch.setattr(api_routes, "resolve_delivery_url", lambda _job, **_kwargs: "fresh://signed-url", raising=False)
     endpoint = getattr(api_routes, "download_render_job", None)
 
     assert callable(endpoint), "API must expose a per-job download endpoint"
@@ -174,7 +174,7 @@ async def test_public_share_refreshes_video_and_download_urls(monkeypatch):
         provider_settings = _FakeCollection()
 
     monkeypatch.setattr(api_routes, "get_db", lambda: FakeDB())
-    monkeypatch.setattr(api_routes, "resolve_delivery_url", lambda _job: "fresh://signed-url")
+    monkeypatch.setattr(api_routes, "resolve_delivery_url", lambda _job, **_kwargs: "fresh://signed-url")
 
     payload = await api_routes.public_share("share-token-1")
 
@@ -209,7 +209,7 @@ async def test_export_package_refreshes_render_manifest_url(monkeypatch):
         render_jobs = _FakeCollection(final)
 
     monkeypatch.setattr(api_routes, "get_db", lambda: FakeDB())
-    monkeypatch.setattr(api_routes, "resolve_delivery_url", lambda _job: "fresh://signed-url")
+    monkeypatch.setattr(api_routes, "resolve_delivery_url", lambda _job, **_kwargs: "fresh://signed-url")
 
     response = await api_routes.export_package_zip(
         "project-1", user={"id": "user-1", "role": "creator"}
@@ -238,7 +238,7 @@ async def test_email_preview_refreshes_render_url(monkeypatch):
         render_jobs = _FakeCollection(final)
 
     monkeypatch.setattr(api_routes, "get_db", lambda: FakeDB())
-    monkeypatch.setattr(api_routes, "resolve_delivery_url", lambda _job: "fresh://signed-url")
+    monkeypatch.setattr(api_routes, "resolve_delivery_url", lambda _job, **_kwargs: "fresh://signed-url")
     monkeypatch.setattr(email_module, "get_email_service_status", lambda: {"configured": True})
     monkeypatch.setattr(
         email_module,
@@ -275,7 +275,7 @@ async def test_email_send_refreshes_render_url(monkeypatch):
         return {"sent": True, "mp4_url": kwargs["mp4_url"]}
 
     monkeypatch.setattr(api_routes, "get_db", lambda: FakeDB())
-    monkeypatch.setattr(api_routes, "resolve_delivery_url", lambda _job: "fresh://signed-url")
+    monkeypatch.setattr(api_routes, "resolve_delivery_url", lambda _job, **_kwargs: "fresh://signed-url")
     monkeypatch.setattr(email_module, "send_video_ready_email", fake_send_video_ready_email)
 
     payload = await api_routes.email_send(
@@ -384,7 +384,7 @@ async def test_job_download_endpoint_handles_uppercase_completed(monkeypatch):
         render_jobs = FakeRenderJobs()
 
     monkeypatch.setattr(api_routes, "get_db", lambda: FakeDB())
-    monkeypatch.setattr(api_routes, "resolve_delivery_url", lambda _job: "fresh://signed-url", raising=False)
+    monkeypatch.setattr(api_routes, "resolve_delivery_url", lambda _job, **_kwargs: "fresh://signed-url", raising=False)
     endpoint = getattr(api_routes, "download_render_job", None)
 
     assert callable(endpoint), "API must expose a per-job download endpoint"
@@ -400,6 +400,115 @@ async def test_job_download_endpoint_handles_uppercase_completed(monkeypatch):
     assert captured, "download must query render_jobs"
     allowed = captured[0].get("status", {}).get("$in", [])
     assert "completed" in allowed and "COMPLETED" in allowed
+
+
+def test_presigned_download_sets_attachment_disposition():
+    class FakeClient:
+        def generate_presigned_url(self, operation, Params, ExpiresIn):
+            return Params
+
+    store = storage.S3Storage()
+    store.bucket = "bucket"
+    store._client = FakeClient()
+
+    params = store.get_presigned_url(
+        "renders/project-1/job-1.mp4",
+        download_filename="My Video: final.mp4",
+    )
+
+    assert params["ResponseContentDisposition"] == (
+        'attachment; filename="My_Video_final.mp4"'
+    )
+    assert params["ResponseContentType"] == "video/mp4"
+
+
+def test_presigned_preview_stays_inline():
+    class FakeClient:
+        def generate_presigned_url(self, operation, Params, ExpiresIn):
+            return Params
+
+    store = storage.S3Storage()
+    store.bucket = "bucket"
+    store._client = FakeClient()
+
+    params = store.get_presigned_url("renders/project-1/job-1.mp4")
+
+    assert "ResponseContentDisposition" not in params
+    assert "ResponseContentType" not in params
+
+
+@pytest.mark.asyncio
+async def test_job_download_endpoint_marks_link_as_attachment(monkeypatch):
+    captured = {}
+
+    class FakeCollection:
+        def __init__(self, document):
+            self.document = document
+
+        async def find_one(self, *_args, **_kwargs):
+            return dict(self.document)
+
+    class FakeDB:
+        projects = FakeCollection({"id": "project-1", "user_id": "user-1", "name": "Project One"})
+        render_jobs = FakeCollection({
+            "id": "job-1",
+            "project_id": "project-1",
+            "status": "completed",
+            "output_storage_key": "renders/project-1/job-1.mp4",
+        })
+
+    def fake_resolve(_job, download_filename=None):
+        captured["filename"] = download_filename
+        return "fresh://signed-url"
+
+    monkeypatch.setattr(api_routes, "get_db", lambda: FakeDB())
+    monkeypatch.setattr(api_routes, "resolve_delivery_url", fake_resolve)
+
+    response = await api_routes.download_render_job(
+        "project-1",
+        "job-1",
+        download=True,
+        user={"id": "user-1", "role": "creator"},
+    )
+
+    assert response.status_code == 302
+    assert captured["filename"] == "Project_One.mp4"
+
+
+@pytest.mark.asyncio
+async def test_job_download_endpoint_keeps_preview_inline(monkeypatch):
+    captured = {}
+
+    class FakeCollection:
+        def __init__(self, document):
+            self.document = document
+
+        async def find_one(self, *_args, **_kwargs):
+            return dict(self.document)
+
+    class FakeDB:
+        projects = FakeCollection({"id": "project-1", "user_id": "user-1", "name": "Project One"})
+        render_jobs = FakeCollection({
+            "id": "job-1",
+            "project_id": "project-1",
+            "status": "completed",
+            "output_storage_key": "renders/project-1/job-1.mp4",
+        })
+
+    def fake_resolve(_job, download_filename=None):
+        captured["filename"] = download_filename
+        return "fresh://signed-url"
+
+    monkeypatch.setattr(api_routes, "get_db", lambda: FakeDB())
+    monkeypatch.setattr(api_routes, "resolve_delivery_url", fake_resolve)
+
+    await api_routes.download_render_job(
+        "project-1",
+        "job-1",
+        user={"id": "user-1", "role": "creator"},
+    )
+
+    assert captured["filename"] is None
 
 
 @pytest.mark.asyncio

@@ -22,7 +22,7 @@ test("completed render uses the stable authenticated delivery URL", () => {
   );
 
   expect(html).toContain('src="/api/projects/project-1/render/jobs/job-1/download"');
-  expect(html).toContain('href="/api/projects/project-1/render/jobs/job-1/download"');
+  expect(html).toContain('href="/api/projects/project-1/render/jobs/job-1/download?download=1"');
   expect(html).not.toContain("expired-signed-url");
 });
 
