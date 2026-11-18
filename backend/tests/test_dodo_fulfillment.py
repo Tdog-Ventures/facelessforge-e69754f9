@@ -24,6 +24,14 @@ from starlette.requests import Request
 
 from app import billing_dodo
 
+@pytest.fixture(autouse=True)
+def _pin_starter_credits_to_100(monkeypatch):
+    monkeypatch.setenv("DODO_CREDITS_STARTER", "100")
+    monkeypatch.setenv("DODO_PRODUCT_STARTER", "pdt_starter")
+    if hasattr(billing_dodo, "CREDIT_MAP") and isinstance(billing_dodo.CREDIT_MAP, dict):
+        monkeypatch.setitem(billing_dodo.CREDIT_MAP, "pdt_starter", 100)
+
+
 
 class FakeRedis:
     """In-memory Redis sufficient for the Dodo fulfillment path."""
