@@ -229,7 +229,7 @@ async def _refresh_access_token(refresh_token: str) -> Optional[str]:
 @router.get("/connect")
 async def youtube_connect(
     request: Request,
-    tenant_id: str = Query(..., regex=r"^forge_[A-Za-z0-9]{6,32}$"),
+    tenant_id: str = Query(..., pattern=r"^forge_[A-Za-z0-9]{6,32}$"),
     jwt: Optional[str] = Query(None, description="Optional JWT (else use Authorization header)"),
     authorization: Optional[str] = Header(None),
 ):
@@ -349,7 +349,7 @@ async def youtube_callback(
 
 @router.get("/status")
 async def youtube_status(
-    tenant_id: str = Query(..., regex=r"^forge_[A-Za-z0-9]{6,32}$"),
+    tenant_id: str = Query(..., pattern=r"^forge_[A-Za-z0-9]{6,32}$"),
     jwt: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
@@ -376,7 +376,7 @@ async def youtube_status(
 
 @router.get("/tenant-teaser")
 async def youtube_tenant_teaser(
-    tenant_id: str = Query(..., regex=r"^forge_[A-Za-z0-9]{6,32}$"),
+    tenant_id: str = Query(..., pattern=r"^forge_[A-Za-z0-9]{6,32}$"),
     service_token: Optional[str] = Query(None),
 ):
     """Service-to-service: return latest teaser URL for tenant.
@@ -428,7 +428,7 @@ async def youtube_tenant_teaser(
 
 @router.post("/disconnect")
 async def youtube_disconnect(
-    tenant_id: str = Query(..., regex=r"^forge_[A-Za-z0-9]{6,32}$"),
+    tenant_id: str = Query(..., pattern=r"^forge_[A-Za-z0-9]{6,32}$"),
     authorization: Optional[str] = Header(None),
 ):
     auth = authorization

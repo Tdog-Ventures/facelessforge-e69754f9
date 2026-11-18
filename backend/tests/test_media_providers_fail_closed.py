@@ -19,9 +19,16 @@ def test_tts_provider_info_reports_the_real_live_provider(monkeypatch):
 
 
 def test_thumbnail_provider_info_reports_missing_configuration(monkeypatch):
+    # Clear every env var thumbnail_images.provider_info() may consult so the
+    # test passes even in containers with real provider credentials set.
     monkeypatch.delenv("EMERGENT_LLM_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_GENAI_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("PEXELS_API_KEY", raising=False)
+    monkeypatch.delenv("PEXELS_KEY", raising=False)
+    monkeypatch.delenv("THUMBNAIL_IMAGE_PROVIDER", raising=False)
+    monkeypatch.delenv("THUMBNAIL_IMAGE_MODEL", raising=False)
     monkeypatch.setenv("USE_MOCK_THUMBNAIL_IMAGES", "false")
 
     info = thumbnail_images.provider_info()
