@@ -309,7 +309,7 @@ class ShareUpdate(BaseModel):
 """Billing models - Paddle subscription & credit transactions."""
 from datetime import datetime, timezone
 from typing import Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 
 def _now():
@@ -329,8 +329,7 @@ class Subscription(BaseModel):
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 class CreditTransaction(BaseModel):
@@ -339,8 +338,7 @@ class CreditTransaction(BaseModel):
     reason: str = Field(description="e.g. purchase starter, auto-attach scene 02, monthly reset")
     created_at: datetime = Field(default_factory=_now)
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 # --- Release Contract (v6.2) ---
