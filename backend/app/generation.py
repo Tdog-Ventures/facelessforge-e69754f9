@@ -411,9 +411,60 @@ def _coerce_script(result: dict) -> dict:
     return out
 
 
+# Spoken narration must contain no digit strings, phone numbers, or URLs.
+# The renderer's word aligner matches Whisper's spoken words to the script,
+# and Whisper hears "08 7073 5044" as merged digit groups ("808", "-70073",
+# "-5044") that can never match the script tokens, so the render fails at
+# 34% ("Scene 1 does not match the spoken words at '08'") — and the
+# voiceover speaks a wrong number. Contact details belong in cta_block
+# (shown on screen / in metadata), never in the spoken narration.
+_PHONE_RE = re.compile(r"\(?\d[\d\s().-]{5,}\d")
+_URL_RE = re.compile(r"(?:https?://|www\.)\S+|\b[\w-]+(?:\.[\w-]+)+\.[a-z]{2,}\b", re.IGNORECASE)
+_DIGIT_TOKEN_RE = re.compile(r"\S*\d\S*")
+_TLD_TOKEN_RE = re.compile(r"\b(?:com|net|org|io|au)\b", re.IGNORECASE)
+
+
+def _sanitize_narration(text: str) -> str:
+    """Strip phone numbers, URLs and digit tokens from spoken narration.
+
+    A trailing contact clause left dangling by the removal ("Call or visit
+    today.") is replaced with a speakable call to action.
+    """
+    if not text:
+        return text
+    cleaned = _PHONE_RE.sub(" ", text)
+    cleaned = _URL_RE.sub(" ", cleaned)
+    cleaned = _DIGIT_TOKEN_RE.sub(" ", cleaned)
+    # A bare domain split across two tokens ("texasdiner com") — drop both.
+    cleaned = re.sub(r"\b[\w-]+\s+(?:com|net|org|io|au)\b", " ", cleaned)
+    cleaned = _TLD_TOKEN_RE.sub(" ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    cleaned = re.sub(r"\s+([,.!?])", r"\1", cleaned)
+    cleaned = re.sub(
+        r"\b[Cc]all\s+or\s+visit\b(?:\s+today)?\s*\.",
+        "Call us today or visit our website.",
+        cleaned,
+    )
+    cleaned = re.sub(r"\b[Cc]all\s+or\s+visit\b[^.]*$", "Call us today or visit our website.", cleaned)
+    cleaned = re.sub(r"\bor\s+visit\s*$", "or visit our website.", cleaned)
+    cleaned = re.sub(r"\b[Cc]all\s*\.\s*$", "Call us today.", cleaned)
+    cleaned = re.sub(r"\b[Cc]all\s*$", "Call us today.", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    cleaned = re.sub(r"\s+([,.!?])", r"\1", cleaned)
+    if cleaned != text:
+        logger.info("Narration sanitized for alignment: %r -> %r", text[:200], cleaned[:200])
+    return cleaned
+
+
 def _finalize_script(out: dict, narration_duration: float = None) -> dict:
     """Attach derived stats so API consumers never see missing fields. Enforce target duration if given."""
     full = out.get("full_script") or ""
+    # Narration must be speakable AND alignable: strip phone numbers, URLs
+    # and digit tokens before any truncation/stats (see _sanitize_narration).
+    sanitized = _sanitize_narration(full)
+    if sanitized != full:
+        out["full_script"] = sanitized
+        full = sanitized
     # Enforce target duration: truncate to target words if too long (LLM often ignores word count)
     if narration_duration is not None:
         try:
@@ -586,7 +637,9 @@ Tone: {project.get('tone', 'documentary')}
 
 CRITICAL: full_script must be ONE continuous string of ~{target_words} words, not a list or object. Count words before responding.
 Write specifically about the Topic above. Do NOT fall back to a generic entrepreneur/startup origin story (instant noodles, sleeping in the office, investors saying no, first 100 customers) unless the Topic explicitly asks for one.
-Do not include BEAT markers, section headers, or structural labels (such as "BEAT 1", "INTRO:", "HOOK:", "CTA:", "SCENE 1:", etc.) in the output. All text must read as continuous voiceover."""
+Do not include BEAT markers, section headers, or structural labels (such as "BEAT 1", "INTRO:", "HOOK:", "CTA:", "SCENE 1:", etc.) in the output. All text must read as continuous voiceover.
+Never put a phone number, email address, website URL, or any number written as digits in full_script. Contact details belong in cta_block only. If you mention a year, write it out in words. End the narration with a speakable call to action that contains no digits, for example "Call us today or visit our website."
+"""
 
         result = await _llm_json(SCRIPT_SYSTEM, user, f"script-{project.get('id', uuid.uuid4())}")
         if result:
