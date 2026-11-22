@@ -60,6 +60,25 @@ async def lifespan(app: FastAPI):
         print(f"render stale-job recovery: {recovered} recovered")
     except Exception as e:
         print(f"render stale-job recovery failed: {e}")
+    # object-storage round-trip probe: surface bad/mismatched credentials at
+    # boot instead of on the first failed voiceover/render upload
+    try:
+        import asyncio as _asyncio
+        from app.storage import get_storage
+        _store = get_storage()
+        if _store.mode == "object":
+            _probe = await _asyncio.to_thread(_store.probe)
+            if _probe.get("ok"):
+                logging.getLogger("facelessforge.storage").info(
+                    "storage probe ok (%sms, credentials=%s)",
+                    _probe.get("latency_ms"), getattr(_store, "cred_source", None))
+            else:
+                logging.getLogger("facelessforge.storage").error(
+                    "storage probe FAILED at startup (credentials=%s endpoint=%s): %s",
+                    getattr(_store, "cred_source", None),
+                    getattr(_store, "endpoint_url", None), _probe.get("error"))
+    except Exception as e:
+        logging.getLogger("facelessforge.storage").error("storage probe crashed at startup: %s", e)
     yield
     # shutdown
     try:
@@ -239,13 +258,12 @@ def health_detailed():
     r2_status = {"reachable": False}
     try:
         import boto3
-        from botocore.config import Config
-        endpoint = os.getenv("STORAGE_ENDPOINT") or ""
+        from app.storage import resolve_storage_credentials, s3_client_config
+        endpoint = os.getenv("STORAGE_ENDPOINT_URL") or os.getenv("STORAGE_ENDPOINT") or ""
         bucket = os.getenv("STORAGE_BUCKET") or ""
-        key = os.getenv("STORAGE_ACCESS_KEY") or ""
-        secret = os.getenv("STORAGE_SECRET_KEY") or ""
+        key, secret, _cred_source = resolve_storage_credentials()
         if endpoint and bucket and key and secret:
-            client = boto3.client("s3", endpoint_url=endpoint, aws_access_key_id=key, aws_secret_access_key=secret, region_name=os.getenv("STORAGE_REGION","auto"), config=Config(signature_version="s3v4", connect_timeout=3, read_timeout=3))
+            client = boto3.client("s3", endpoint_url=endpoint, aws_access_key_id=key, aws_secret_access_key=secret, region_name=os.getenv("STORAGE_REGION","auto"), config=s3_client_config(endpoint, connect_timeout=3, read_timeout=3))
             client.head_bucket(Bucket=bucket)
             r2_status = {"reachable": True, "bucket": bucket, "endpoint": endpoint}
         else:
@@ -343,14 +361,12 @@ _TEASER_DIR.mkdir(parents=True, exist_ok=True)
 # also check local 8081's own /tmp and /app/teasers equivalent for container? Use both
 _R2_BUCKET_PATCH = _os.getenv("STORAGE_BUCKET","facelessforge-prod")
 _R2_ENDPOINT_PATCH = _os.getenv("STORAGE_ENDPOINT","https://9d1310958fd8b19bb31d13f6ebe66581.r2.cloudflarestorage.com")
-_R2_KEY_PATCH = _os.getenv("STORAGE_ACCESS_KEY", "")
-_R2_SECRET_PATCH = _os.getenv("STORAGE_SECRET_KEY", "")
-
 def _r2_client_patch():
     try:
         import boto3
-        from botocore.config import Config
-        return boto3.client("s3", endpoint_url=_R2_ENDPOINT_PATCH, aws_access_key_id=_R2_KEY_PATCH, aws_secret_access_key=_R2_SECRET_PATCH, region_name="auto", config=Config(signature_version="s3v4"))
+        from app.storage import resolve_storage_credentials, s3_client_config
+        _key, _secret, _src = resolve_storage_credentials()
+        return boto3.client("s3", endpoint_url=_R2_ENDPOINT_PATCH, aws_access_key_id=_key or "", aws_secret_access_key=_secret or "", region_name="auto", config=s3_client_config(_R2_ENDPOINT_PATCH))
     except: return None
 
 @app.api_route("/teasers/{jobId}.mp4", methods=["GET","HEAD"])
