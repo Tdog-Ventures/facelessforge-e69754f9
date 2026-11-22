@@ -88,9 +88,6 @@ export default function SettingsPage() {
               <option value="anthropic/claude-sonnet-4-5-20250929">anthropic / claude-sonnet-4.5</option>
               <option value="gemini/gemini-3-flash-preview">gemini / 3-flash-preview</option>
             </select>
-            <p className="font-mono text-[10px] text-[var(--ff-text-dim)] mt-2">
-              Powered by Emergent LLM key · generation falls back to deterministic output if the provider is unavailable.
-            </p>
           </div>
           <div>
             <L>Monthly cost limit (USD)</L>
