@@ -24,11 +24,8 @@ export default function AppShell({ children }) {
       >
         {open ? <X size={18} /> : <Menu size={18} />}
       </button>
-      <div className={`min-h-screen flex flex-col transition-all duration-200 ${open ? "ml-0 md:ml-60" : "ml-0 md:ml-60"} w-full md:w-auto`}>
-        {/* when sidebar closed on mobile, main takes w-full; sidebar uses translateX(-100%) so no overlap */}
-        <div className="md:ml-0 ml-0 w-full">
-          {children}
-        </div>
+      <div className="min-h-screen flex flex-col transition-all duration-200 ml-0 md:ml-60 w-full md:w-auto">
+        {children}
       </div>
     </div>
   );
