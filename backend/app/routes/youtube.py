@@ -24,6 +24,7 @@ from pydantic import BaseModel
 
 from ..auth import get_current_user
 from ..db import get_db
+from ..publish_gate import PublicationBlocked, assert_publishable, find_approved_job, resolve_approved_artifact
 from ..publishing_access import ensure_operator
 
 logger = logging.getLogger("facelessforge.youtube")
@@ -188,29 +189,16 @@ class YoutubeUploadRequest(BaseModel):
     made_for_kids: bool = False
 
 def _resolve_video_path(project_id: str) -> Optional[Path]:
-    """Find rendered mp4 for project. Checks multiple locations."""
-    candidates = [
-        Path(f"/opt/facelessforge/storage/{project_id}.mp4"),
-        Path(f"/opt/facelessforge/deploy/backend/static/renders/{project_id}.mp4"),
-        Path(f"/opt/facelessforge/deploy/backend/static/renders/{project_id}/final.mp4"),
-    ]
-    # Also scan renders dir for any mp4 containing project_id
-    base = Path("/opt/facelessforge/deploy/backend/static/renders")
-    if base.exists():
-        for p in base.rglob("*.mp4"):
-            if project_id in str(p):
-                candidates.append(p)
-            if len(candidates) > 20:
-                break
-        # Also check subdirs named by project_id
-        sub = base / project_id
-        if sub.exists():
-            for p in sub.glob("*.mp4"):
-                candidates.append(p)
-    for c in candidates:
-        if c.exists() and c.stat().st_size > 0:
-            return c
-    return None
+    """Removed: arbitrary project-wide file selection is not a valid source.
+
+    Publication resolves its artifact through publish_gate.resolve_approved_artifact,
+    which binds the file to one approved render job. This stub remains only so
+    legacy callers fail loudly instead of silently picking an unrelated file.
+    """
+    raise RuntimeError(
+        "Arbitrary project-wide video resolution is removed; "
+        "use publish_gate.resolve_approved_artifact"
+    )
 
 def _get_youtube_credentials():
     """Build Credentials from env/DB refresh_token. Returns google.oauth2.credentials.Credentials or None."""
@@ -269,7 +257,17 @@ async def youtube_upload(body: YoutubeUploadRequest, user=Depends(get_current_us
     if privacy not in ("public", "private", "unlisted"):
         privacy = "public"
 
-    video_path = _resolve_video_path(body.project_id)
+    # Publication requires the same release gate and the same artifact binding
+    # as every other upload channel: an approved render job and that job's own
+    # artifact, never an arbitrary project-wide file found by a directory scan.
+    try:
+        approved_job = await find_approved_job(db=db, project_id=body.project_id)
+        if approved_job:
+            assert_publishable(approved_job)
+        video_path = (resolve_approved_artifact(job=approved_job, project_id=body.project_id)
+                      if approved_job else None)
+    except PublicationBlocked as blocked:
+        raise HTTPException(status_code=409, detail=str(blocked)[:300]) from None
     if not video_path:
         raise HTTPException(
             status_code=409,

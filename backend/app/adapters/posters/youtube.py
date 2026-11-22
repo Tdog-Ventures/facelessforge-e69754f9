@@ -26,16 +26,27 @@ class YoutubePoster(PlatformPoster):
             raise RuntimeError("YouTube upload failed — not configured, mock IDs forbidden per BOOT.md HARD RULE 3")
         # Real upload - reuse existing logic from routes/youtube.py
         try:
-            from ...routes.youtube import _get_youtube_credentials, _resolve_video_path
+            from ...publish_gate import (
+                PublicationBlocked, assert_publishable, find_approved_job, resolve_approved_artifact,
+            )
+            from ...routes.youtube import _get_youtube_credentials
             from googleapiclient.discovery import build
             from googleapiclient.http import MediaFileUpload
             from google.auth.transport.requests import Request as GoogleRequest
+            # Publication is bound to the approved render job's own artifact.
+            # A completed-but-QA-blocked render is never published, and no
+            # arbitrary project-wide file may be substituted for it. The gate
+            # runs before any provider interaction.
+            from ...db import get_db
+            db = get_db()
+            approved_job = await find_approved_job(db=db, project_id=project["id"])
+            assert_publishable(approved_job)
+            video_path = resolve_approved_artifact(job=approved_job, project_id=project["id"])
+            if not video_path:
+                raise RuntimeError("video_path not found")
             creds = _get_youtube_credentials()
             creds.refresh(GoogleRequest())
             service = build("youtube","v3", credentials=creds, cache_discovery=False)
-            video_path = _resolve_video_path(project["id"])
-            if not video_path:
-                raise RuntimeError("video_path not found")
             media = MediaFileUpload(str(video_path), mimetype="video/mp4", resumable=True)
             body = {"snippet":{"title":title,"description":description[:5000],"tags": metadata.get("tags",[])[:15],"categoryId":"28"},"status":{"privacyStatus":"public","selfDeclaredMadeForKids":False}}
             req = service.videos().insert(part="snippet,status", body=body, media_body=media)
@@ -49,6 +60,9 @@ class YoutubePoster(PlatformPoster):
             res={"platform":"youtube","status":"uploaded","video_id":vid,"url":url,"title":title}
             log_analytics("youtube", tenant_id, project.get("id"), res)
             return res
+        except PublicationBlocked:
+            # Keep the release-gate reason distinct from a provider failure.
+            raise
         except Exception as e:
             logger.warning("YT real upload failed (%s)", type(e).__name__)
             raise RuntimeError("YouTube upload failed — provider rejected the upload") from None
