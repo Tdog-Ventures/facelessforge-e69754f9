@@ -5,9 +5,18 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+ARTIFACT_ROOT = Path(__file__).resolve().parent.parent / "static"
+
+
 def file_hash(path: Path) -> str:
+    # Manifest inputs can include persisted client asset metadata. Never hash
+    # arbitrary host paths, directories, or symlink escapes from artifact storage.
+    candidate = Path(path).resolve(strict=True)
+    root = ARTIFACT_ROOT.resolve()
+    if not candidate.is_relative_to(root) or not candidate.is_file():
+        raise ValueError("Manifest input is not a stored artifact")
     h = hashlib.sha256()
-    with open(path, "rb") as f:
+    with candidate.open("rb") as f:
         for chunk in iter(lambda: f.read(1<<20), b""):
             h.update(chunk)
     return f"sha256:{h.hexdigest()}"
