@@ -13,3 +13,4 @@ Write a 7-minute script (1000-1100 words) about the TOPIC only.
 - Keep it cinematic b-roll friendly
 
 Do not include BEAT markers, section headers, or structural labels (such as "BEAT 1", "INTRO:", "HOOK:", "SCENE 1:", etc.) in the output. The text must read as a continuous voiceover.
+Never put a phone number, email address, website URL, or any number written as digits in the narration. Contact details belong in the CTA only. If you mention a year, write it out in words.
