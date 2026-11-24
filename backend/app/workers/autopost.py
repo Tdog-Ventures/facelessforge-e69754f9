@@ -13,22 +13,25 @@ try:
     from ..adapters.posters.youtube import YoutubePoster
     from ..adapters.posters.tiktok import TiktokPoster
     from ..adapters.posters.instagram import InstagramPoster
+    from ..adapters.posters.facebook import FacebookPoster
     from ..adapters.posters.x_twitter import XPoster
 except ImportError:
     from app.adapters.posters.youtube import YoutubePoster  # type: ignore
     from app.adapters.posters.tiktok import TiktokPoster
     from app.adapters.posters.instagram import InstagramPoster
+    from app.adapters.posters.facebook import FacebookPoster
     from app.adapters.posters.x_twitter import XPoster
 
 ADAPTERS = {
     "youtube": YoutubePoster(),
     "tiktok": TiktokPoster(),
     "instagram": InstagramPoster(),
+    "facebook": FacebookPoster(),
     "x": XPoster(),
     "twitter": XPoster(),
 }
 
-SUPPORTED_PLATFORMS = ["youtube","tiktok","instagram","x","linkedin","reddit","product_hunt"]
+SUPPORTED_PLATFORMS = ["youtube","tiktok","instagram","facebook","x","linkedin","reddit","product_hunt"]
 # LinkedIn/Reddit/Product Hunt use generic mock via same pattern
 def _now():
     return datetime.now(timezone.utc)
@@ -49,6 +52,7 @@ async def autopost_after_render(project: dict, render_job: dict, metadata: dict)
         pp = str(p).lower().strip()
         if pp in ("yt","youtube"): norm.append("youtube")
         elif pp in ("ig","instagram"): norm.append("instagram")
+        elif pp in ("fb","facebook"): norm.append("facebook")
         elif pp in ("tt","tiktok"): norm.append("tiktok")
         elif pp in ("x","twitter"): norm.append("x")
         else: norm.append(pp)
