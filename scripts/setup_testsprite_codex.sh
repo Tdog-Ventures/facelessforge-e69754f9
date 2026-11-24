@@ -38,4 +38,3 @@ npx --yes @testsprite/testsprite-cli agent status
 
 echo
 echo "TestSprite/Codex setup complete."
-echo "Next: give Codex the instructions in TESTSPRITE_FIRST_AUDIT.md"
