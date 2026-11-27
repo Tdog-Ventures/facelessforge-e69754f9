@@ -206,7 +206,7 @@ except Exception as e:
 
 @app.get("/api/health")
 def health():
-    return {"status":"ok","forge":"active","redis":"ethinx-redis","tenant_isolation":"enforced via JWT tenant_id"}
+    return {"status":"ok","forge":"active"}
 
 @app.get("/healthz")
 def healthz():

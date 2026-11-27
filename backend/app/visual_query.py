@@ -1,22 +1,4 @@
-"""Visual query helpers for stock footage selection.
-
-Two layers:
-
-1. **Deterministic keyword extractor** (ported from `video_engine.py`) —
-   stopword-based, returns the top N visual keywords from a script segment.
-   No external dependencies, always available, used as a fallback.
-
-2. **LLM-driven visual tone derivation** — one Emergent-LLM call analyses
-   the full project script and returns a short 3-5 word modifier
-   (e.g. ``"cinematic moody slow-motion neon-lit"``) that gets appended to
-   every per-scene Pexels query so all clips share a consistent visual
-   world. Cached on the project row so it only runs once per script.
-
-Constitution fix v2.7: Preserve full Visual field including commas,
-append "4k slow motion b-roll cinematic", generate 3 ordered queries
-[pexels_video, pixabay_video, unsplash_image] video preferred first.
-Stop leaking script words like "might", "obsolete", "coming", "year".
-"""
+"""Visual query helpers for stock footage selection."""
 from __future__ import annotations
 
 import json

@@ -63,55 +63,6 @@ def _now():
     return datetime.now(timezone.utc)
 
 
-CINEMATIC_SUFFIX = "4k slow motion b-roll cinematic"
-_SCENE_LEAK_STOP = {"might","obsolete","coming","year","years","small","businesses","drowning","imagine","software","shift","machine","impact","simulate","will","shall","could","should","would","may","might","about","hear","story","cover","converts","alter","the","and","a","an","of","to","in","on","for","with","about","is","are","was","were","be","as","it","its","this","that","what","you","about","to","hear","story","will","cover","how","it","converts","alter","will"}
-
-def _clean_visual_full(visual: str) -> str:
-    """Preserve full Visual including commas, normalize whitespace only. No split on comma, no truncation."""
-    if not visual:
-        return ""
-    return " ".join((visual or "").strip().split())
-
-def _extract_core_query(scene: dict) -> str:
-    """Extract 3-4 word core for Pixabay/Unsplash fallback, e.g. crystal ball forecast.
-    Prefers search_terms multi-word, else visual keywords, filters leak words.
-    """
-    terms = scene.get("search_terms") or []
-    if terms:
-        for t in terms:
-            clean = " ".join(str(t or "").split()).strip()
-            if not clean:
-                continue
-            words = clean.split()
-            if len(words) == 1 and words[0].lower() in _SCENE_LEAK_STOP:
-                continue
-            if len(words) == 1 and len(words[0]) < 4:
-                continue
-            if len(words) >= 2:
-                filtered = [w for w in words if w.lower() not in _SCENE_LEAK_STOP and len(w) >= 3]
-                if len(filtered) >= 2:
-                    return " ".join(filtered[:4])
-                return " ".join(words[:4])
-    visual = (scene.get("visual_direction") or "").strip()
-    if visual:
-        import re
-        words = re.findall(r"[a-z]{3,}", visual.lower())
-        kw = [w for w in words if w not in _SCENE_LEAK_STOP]
-        kw = [w for w in kw if 3 <= len(w) <= 20]
-        seen=set()
-        out=[]
-        for w in kw:
-            if w not in seen:
-                seen.add(w)
-                out.append(w)
-            if len(out)>=4:
-                break
-        if len(out)>=2:
-            return " ".join(out[:4])
-        if out:
-            return " ".join(out)
-    return "nature cinematic"
-
 def _build_scene_stock_query(scene: dict, project: dict, override: str | None = None) -> str:
     """Use visible stock-footage subjects, not complete cinematic instructions.
 
@@ -137,40 +88,6 @@ def _build_scene_stock_query(scene: dict, project: dict, override: str | None = 
         if concise:
             return concise
     return "nature landscape"
-
-
-def _build_ordered_stock_queries(scene: dict, project: dict) -> list[dict]:
-    """Generate exactly 3 ordered query objects per scene: pexels_video (cinematic full), pixabay_video (shorter core), unsplash_image (shortest).
-    Preference order video first. Used by auto-attach fallback chain.
-    """
-    visual = _clean_visual_full(scene.get("visual_direction") or "")
-    if not visual:
-        terms = scene.get("search_terms") or []
-        if terms and isinstance(terms, list):
-            for t in terms:
-                if t and len(str(t).split()) >= 2:
-                    visual = str(t)
-                    break
-            if not visual:
-                visual = str(terms[0]) if terms else ""
-        elif isinstance(terms, str):
-            visual = terms
-        else:
-            visual = (project.get("topic") if project and project.get("topic") else "") or "nature cinematic"
-        visual = _clean_visual_full(visual) or "nature cinematic"
-    pexels_q = f"{visual} {CINEMATIC_SUFFIX}".strip()
-    core = _extract_core_query(scene)
-    pixabay_q = core if core else "nature cinematic"
-    if len(pixabay_q.split()) < 2:
-        pixabay_q = "nature cinematic b-roll"
-    unsplash_q = " ".join(core.split()[:3]).strip() if core else "nature cinematic"
-    if len(unsplash_q.split()) < 2:
-        unsplash_q = "nature cinematic"
-    return [
-        {"source": "pexels", "type": "video", "media_type": "videos", "query": pexels_q},
-        {"source": "pixabay", "type": "video", "media_type": "videos", "query": pixabay_q},
-        {"source": "unsplash", "type": "image", "media_type": "photos", "query": unsplash_q},
-    ]
 
 
 def _ser(doc: dict) -> dict:
