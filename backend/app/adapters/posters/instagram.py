@@ -1,17 +1,4 @@
-"""Instagram Reels adapter - vault INSTAGRAM_ACCESS_TOKEN + INSTAGRAM_BUSINESS_ACCOUNT_ID, 90s max.
-
-Real upload via the Instagram Graph API content-publishing flow
-(Meta Graph API v26.0):
-  1. create container - POST /{ig-user-id}/media
-     media_type=REELS, video_url, caption, share_to_feed=true
-     -> {id: <container-id>}
-  2. poll - GET /{container-id}?fields=status_code until FINISHED
-  3. publish - POST /{ig-user-id}/media_publish creation_id=<container-id>
-     -> {id: <media-id>}, then a best-effort permalink lookup.
-
-No mock IDs: unconfigured returns not_configured, provider failure raises
-(BOOT.md HARD RULE 3 - same fail-loud posture as the YouTube adapter).
-"""
+"""Instagram Reels via the Graph API (90s max). Unconfigured returns not_configured; provider failure raises."""
 from __future__ import annotations
 
 import asyncio
@@ -19,14 +6,12 @@ import logging
 
 import httpx
 
-from .base import PlatformPoster, compliance_check, rate_limit_check, log_analytics
+from .base import GRAPH_BASE, PlatformPoster, compliance_check, rate_limit_check, log_analytics
 
 logger = logging.getLogger("autopost.instagram")
 
-GRAPH_VERSION = "v26.0"
-GRAPH_BASE = f"https://graph.facebook.com/{GRAPH_VERSION}"
-_POLL_INTERVAL = 10     # seconds between container status checks
-_POLL_TIMEOUT = 300     # seconds max waiting for the container (Meta guidance)
+_POLL_INTERVAL = 10
+_POLL_TIMEOUT = 300  # Meta's guidance for container processing
 
 
 class InstagramPoster(PlatformPoster):
@@ -43,7 +28,6 @@ class InstagramPoster(PlatformPoster):
         duration = metadata.get("duration") or project.get("target_duration") or 60
         ok, reason = compliance_check("instagram", title, metadata.get("description", ""), duration)
         if not ok:
-            # Auto-trim to 90s would be needed - for now block if >90
             return {"platform": "instagram", "status": "blocked", "reason": reason}
         allowed, remaining = rate_limit_check("instagram", tenant_id)
         if not allowed:
@@ -63,7 +47,6 @@ class InstagramPoster(PlatformPoster):
         ig_id = self.vault_tokens["instagram_account_id"]
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
-                # 1. Create the media container
                 create = await client.post(
                     f"{GRAPH_BASE}/{ig_id}/media",
                     data={
@@ -79,7 +62,6 @@ class InstagramPoster(PlatformPoster):
                 if not container_id:
                     raise RuntimeError("Instagram returned no container id")
 
-                # 2. Poll until Meta finishes processing the container
                 waited = 0
                 while True:
                     status_resp = await client.get(
@@ -97,7 +79,6 @@ class InstagramPoster(PlatformPoster):
                     await asyncio.sleep(_POLL_INTERVAL)
                     waited += _POLL_INTERVAL
 
-                # 3. Publish the container
                 publish = await client.post(
                     f"{GRAPH_BASE}/{ig_id}/media_publish",
                     data={"creation_id": container_id, "access_token": token},

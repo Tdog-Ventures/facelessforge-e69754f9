@@ -1,36 +1,17 @@
-"""Facebook Reels adapter - vault FACEBOOK_PAGE_ACCESS_TOKEN + FACEBOOK_PAGE_ID.
-
-Publishes the 15s vertical video as a Page Reel via the Graph API
-video_reels 3-phase flow (Meta Graph API v26.0):
-  1. start  - POST /{page-id}/video_reels upload_phase=start
-              -> {video_id, upload_url}
-  2. upload - POST the bytes to the returned upload_url
-              (rupload.facebook.com) with Authorization: OAuth <token>,
-              offset: 0, file_size: <bytes>
-  3. poll   - GET /{video-id}?fields=status until upload_complete/ready
-  4. finish - POST /{page-id}/video_reels upload_phase=finish,
-              video_state=PUBLISHED, description=<caption>
-
-No mock IDs: unconfigured returns not_configured, provider failure raises
-(BOOT.md HARD RULE 3 - same fail-loud posture as the YouTube adapter).
-"""
+"""Facebook Page Reels via the Graph API. Unconfigured returns not_configured; provider failure raises."""
 from __future__ import annotations
 
 import asyncio
 import logging
-import os
-import tempfile
 
 import httpx
 
-from .base import PlatformPoster, compliance_check, rate_limit_check, log_analytics
+from .base import GRAPH_BASE, PLATFORM_LIMITS, PlatformPoster, compliance_check, rate_limit_check, log_analytics
 
 logger = logging.getLogger("autopost.facebook")
 
-GRAPH_VERSION = "v26.0"
-GRAPH_BASE = f"https://graph.facebook.com/{GRAPH_VERSION}"
-_POLL_INTERVAL = 5      # seconds between status checks
-_POLL_TIMEOUT = 120     # seconds max waiting for upload to be ready
+_POLL_INTERVAL = 5
+_POLL_TIMEOUT = 120
 
 
 class FacebookPoster(PlatformPoster):
@@ -66,25 +47,19 @@ class FacebookPoster(PlatformPoster):
         page_id = self.vault_tokens["facebook_page_id"]
         caption = description or title
 
-        tmp_path = None
         try:
             async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
-                # Download to a temp file (Meta ingests bytes we send, not the URL)
-                fd, tmp_path = tempfile.mkstemp(suffix=".mp4", prefix="fb-reel-")
-                os.close(fd)
-                async with client.stream("GET", video_url) as resp:
-                    resp.raise_for_status()
-                    with open(tmp_path, "wb") as f:
-                        async for chunk in resp.aiter_bytes():
-                            f.write(chunk)
-                file_size = os.path.getsize(tmp_path)
-                max_bytes = 650 * 1024 * 1024
-                if file_size > max_bytes:
+                # Meta ingests the bytes we send, not the source URL.
+                download = await client.get(video_url)
+                download.raise_for_status()
+                video_bytes = download.content
+                file_size = len(video_bytes)
+                max_mb = PLATFORM_LIMITS["facebook"]["max_size_mb"]
+                if file_size > max_mb * 1024 * 1024:
                     raise RuntimeError(
-                        f"Facebook upload failed - video {file_size} bytes > 650 MB limit"
+                        f"Facebook upload failed - video {file_size} bytes > {max_mb} MB limit"
                     )
 
-                # 1. Start an upload session
                 start = await client.post(
                     f"{GRAPH_BASE}/{page_id}/video_reels",
                     data={"upload_phase": "start", "access_token": token},
@@ -97,9 +72,6 @@ class FacebookPoster(PlatformPoster):
                 if not video_id or not upload_url:
                     raise RuntimeError("Facebook start returned no video_id/upload_url")
 
-                # 2. Upload the bytes to Meta's upload host
-                with open(tmp_path, "rb") as f:
-                    video_bytes = f.read()
                 upload = await client.post(
                     upload_url,
                     headers={
@@ -112,7 +84,6 @@ class FacebookPoster(PlatformPoster):
                 )
                 upload.raise_for_status()
 
-                # 3. Poll until Meta has the whole file
                 waited = 0
                 while True:
                     status_resp = await client.get(
@@ -135,7 +106,6 @@ class FacebookPoster(PlatformPoster):
                     await asyncio.sleep(_POLL_INTERVAL)
                     waited += _POLL_INTERVAL
 
-                # 4. Finish and publish
                 finish = await client.post(
                     f"{GRAPH_BASE}/{page_id}/video_reels",
                     data={
@@ -165,9 +135,3 @@ class FacebookPoster(PlatformPoster):
         except httpx.HTTPError as e:
             logger.warning("FB real upload failed (%s)", type(e).__name__)
             raise RuntimeError("Facebook upload failed - provider rejected the upload") from None
-        finally:
-            if tmp_path and os.path.exists(tmp_path):
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
