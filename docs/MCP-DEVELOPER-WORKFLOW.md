@@ -19,12 +19,11 @@ Project scope and build conventions: see the repo `AGENTS.md`.
 
 1. **Orient** — `connection_status` then `ops_status`. Note deployed revision, container
    health, backend health, active work and mutation guards before touching anything.
-2. **Frontend trace** — reproduce in the UI, note the failing route; the React dashboard is
-   built to `backend/static/frontend/`.
+2. **Frontend trace** — reproduce in the UI, note the failing route.
 3. **Backend evidence** — `ops_logs` with `lines: 200` (redacted, bounded). Correlate the
    timestamp of the user-visible failure with container log lines.
 4. **Localise** — `backend/` (FastAPI: `external_api.py`, `generation.py`, `render.py`,
-   `billing*.py`), `remotion-renderer/` (Remotion worker), operations bridge at
+   `billing*.py`), operations bridge at
    `/opt/ethinx/facelessforge-ops/` (loopback 7012, source copies at
    `/opt/ethinx/facelessforge-ops-source/`).
 5. **Scene/asset/voiceover defects** — asset search must originate from the actual scene
@@ -36,12 +35,9 @@ Project scope and build conventions: see the repo `AGENTS.md`.
    `billing_dodo.py`); write-off only through the authorised admin flow.
 7. **Fix minimally** — smallest safe modification; add a regression test next to the
    failing behaviour or under `backend/tests/`.
-8. **Build** — frontend: `cd /root/facelessforge-deploy/frontend && npm run build &&
-   cp -r build/* /root/facelessforge-deploy/backend/static/frontend/`. The production
-   container is rebuilt by the deploy pipeline, not by hand.
-9. **Test** — `python3 -m pytest backend/tests -k <area>` and the connector tests
+8. **Test** — `python3 -m pytest backend/tests -k <area>` and the connector tests
    (`python3 -m unittest discover -s tools/mcp/tests`).
-10. **Commit** — never bundle unrelated changes; reference the defect; never commit
+9. **Commit** — never bundle unrelated changes; reference the defect; never commit
     secrets (`.env`, keys) — the vault files are outside Git.
 
 ## Rendering protocols
