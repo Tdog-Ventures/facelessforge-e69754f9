@@ -64,8 +64,8 @@ async def autopost_after_render(project: dict, render_job: dict, metadata: dict)
     results: List[Dict[str,Any]] = []
     for plat in norm:
         if plat not in ADAPTERS:
-            # Generic mock for linkedin/reddit/product_hunt
-            results.append({"platform":plat,"status":"mock_uploaded","url":f"https://{plat}.com/mock/{uuid.uuid4().hex[:8]}","note":"generic mock - adapter not yet specialized"})
+            # No real adapter for this platform — never record a fake "posted" result.
+            results.append({"platform":plat,"status":"not_supported","note":"no autopost adapter for this platform yet"})
             continue
         adapter = ADAPTERS[plat]
         try:

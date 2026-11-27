@@ -782,10 +782,11 @@ async def repair_scene_timeline(project_id: str, user=Depends(get_current_user))
 
 
 @router.post("/projects/generate-scenes")
-async def generate_scenes_shim(request: Request):
+async def generate_scenes_shim(request: Request, user=Depends(get_current_user)):
     """Shim for POST /api/projects/generate-scenes — accepts JSON {project_id, script, topic, niche, target_duration}.
 
-    Public (no auth) so health checks and external callers can test auto-gen without a full project lifecycle.
+    Requires a logged-in user so anonymous callers cannot spend LLM API keys.
+    Never 500: falls back to deterministic generation if LLM times out or keys missing.
     Never 500: falls back to deterministic generation if LLM times out or keys missing.
     Returns {"scenes": [...]} where scenes is always an array.
     """
@@ -1649,13 +1650,15 @@ async def stock_search(
     source: str = "pexels",
     type: str = "both",
     per_page: int = 12,
+    user=Depends(get_current_user),
 ):
-    """Public stock search for scene picker — GET /api/stock/search?q=&source=pexels|pixabay|unsplash&type=video|image
+    """Authenticated stock search for scene picker — GET /api/stock/search?q=&source=pexels|pixabay|unsplash&type=video|image
 
     Calls Pexels Video API (preferred), Pixabay Video API, or Unsplash API
     depending on source param. Falls back to deterministic mock if provider
-    key missing or rate-limited. No auth required so scene picker can query
-    quickly; still respects mock mode when keys absent.
+    key missing or rate-limited. Requires a logged-in user so anonymous
+    callers cannot spend provider API keys; still respects mock mode when
+    keys absent.
 
     Query params:
       q: search keywords

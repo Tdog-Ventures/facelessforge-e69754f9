@@ -10,7 +10,6 @@ import LengthFader from "../components/LengthFader";
 const PLATFORMS = [
   { key: "instagram", label: "Instagram" },
   { key: "facebook", label: "Facebook" },
-  { key: "threads", label: "Threads" },
 ];
 
 const TONES = ["calm-authoritative", "curious-expert", "cinematic", "energetic", "mysterious", "warm-narrative"];
