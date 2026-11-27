@@ -456,7 +456,7 @@ def _verify_service_token(token: Optional[str]) -> bool:
     """Compare against FORGE_INTERNAL_SECRET (set in env, used by sovereign-loop hook)."""
     expected = _env("FORGE_INTERNAL_SECRET")
     if not expected:
-        return True  # no service token configured = allow
+        return False  # no service token configured = deny (fail closed)
     if not token:
         return False
     return secrets.compare_digest(token, expected)

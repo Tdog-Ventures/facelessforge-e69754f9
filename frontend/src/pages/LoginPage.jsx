@@ -6,8 +6,8 @@ import { Loader2, ArrowRight } from "lucide-react";
 export default function LoginPage() {
   const { login } = useAuth();
   const navigate = useNavigate();
-  const [email, setEmail] = useState("creator@facelessforge.io");
-  const [password, setPassword] = useState("creator123");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -96,9 +96,6 @@ export default function LoginPage() {
             </Link>
           </div>
 
-          <div className="pt-3 text-[10px] font-mono text-[var(--ff-text-dim)] text-center tracking-wider">
-            DEMO · creator@facelessforge.io / creator123
-          </div>
         </form>
       </div>
     </div>
