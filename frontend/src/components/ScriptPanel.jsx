@@ -12,39 +12,19 @@ export default function ScriptPanel({ projectId, script, canEdit, onChange }) {
   const [manualMode, setManualMode] = useState(false);
   const [confirmOverwrite, setConfirmOverwrite] = useState(false);
   const [autoSelectFirst, setAutoSelectFirst] = useState(true);
-  const [draft, setDraft] = useState(() => {
-    // Persist script immediately: check localStorage first, don't init as '' if saved exists
-    try {
-      const saved = localStorage.getItem(`script-${projectId}`);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (parsed?.id === script?.id || (!script?.id && parsed?.full_script)) {
-          return {
-            selected_hook: parsed.selected_hook || script?.selected_hook || "",
-            full_script: parsed.full_script || script?.full_script || "",
-            cta_block: parsed.cta_block || script?.cta_block || "",
-          };
-        }
-      }
-    } catch {}
-    return {
-      selected_hook: script?.selected_hook || "",
-      full_script: script?.full_script || "",
-      cta_block: script?.cta_block || "",
-    };
-  });
+  const [draft, setDraft] = useState(() => ({
+    selected_hook: script?.selected_hook || "",
+    full_script: script?.full_script || "",
+    cta_block: script?.cta_block || "",
+  }));
 
   useEffect(() => {
-    if (!script?.id) return; // don't clear if fetch returns null — keep persisted draft
-    const next = {
+    if (!script?.id) return;
+    setDraft({
       selected_hook: script?.selected_hook || "",
       full_script: script?.full_script || "",
       cta_block: script?.cta_block || "",
-    };
-    setDraft(next);
-    try {
-      localStorage.setItem(`script-${projectId}`, JSON.stringify({ id: script.id, ...next }));
-    } catch {}
+    });
   }, [script?.id]);
 
   // Auto-select the first hook if the user hasn't picked one within 5 seconds.
@@ -66,12 +46,8 @@ export default function ScriptPanel({ projectId, script, canEdit, onChange }) {
     toast.loading("Generating with DeepSeek…", { id: "gen-script" });
     try {
       const { data } = await api.post(`/projects/${projectId}/generate-script`, {}, UNBOUNDED_TIMEOUT);
-      // Persist immediately to store + backend + localStorage
       const newScript = data?.script || data;
       if (newScript?.full_script) {
-        try {
-          localStorage.setItem(`script-${projectId}`, JSON.stringify(newScript));
-        } catch {}
         setDraft({
           selected_hook: newScript.selected_hook || "",
           full_script: newScript.full_script || "",
@@ -126,21 +102,6 @@ export default function ScriptPanel({ projectId, script, canEdit, onChange }) {
           <div className="h-6 bg-[var(--ff-surface-2)] rounded w-1/3" />
           <div className="h-32 bg-[var(--ff-surface-2)] rounded" />
           <div className="h-6 bg-[var(--ff-surface-2)] rounded w-1/4" />
-        </div>
-      );
-    }
-    // Try localStorage fallback before showing empty
-    let hasLocal = false;
-    try {
-      const saved = localStorage.getItem(`script-${projectId}`);
-      hasLocal = !!(saved && JSON.parse(saved)?.full_script);
-    } catch {}
-    if (hasLocal) {
-      // Will be picked up by useEffect on next render — show skeleton briefly
-      return (
-        <div className="border border-[var(--ff-border)] p-10 text-center rounded-sm">
-          <Loader2 size={18} className="animate-spin text-[#00E5FF] mx-auto mb-3" />
-          <p className="text-sm text-[var(--ff-text-muted)]">Restoring script…</p>
         </div>
       );
     }

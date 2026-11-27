@@ -48,12 +48,6 @@ export default function ProjectDetailPage() {
         if (prev?.script && !data?.script) {
           return { ...data, script: prev.script };
         }
-        // Also persist script to localStorage for ScriptPanel recovery
-        if (data?.script?.full_script) {
-          try {
-            localStorage.setItem(`script-${id}`, JSON.stringify(data.script));
-          } catch {}
-        }
         return data;
       });
     } catch (err) {

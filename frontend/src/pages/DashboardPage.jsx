@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useMemo } from "react";
 import { Link } from "react-router-dom";
-import { ArrowUpRight, Plus, FileVideo, CheckCircle2, Activity, DollarSign, TrendingUp, TrendingDown } from "lucide-react";
+import { ArrowUpRight, Plus, FileVideo, CheckCircle2, Activity, DollarSign, TrendingUp } from "lucide-react";
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts";
 import AppShell from "../components/AppShell";
 import TopBar from "../components/TopBar";
@@ -9,9 +9,7 @@ import BillingBar from "../components/BillingBar";
 import { api } from "../lib/api";
 import { formatCurrency, STATUS_META } from "../lib/format";
 
-function StatCard({ label, value, icon: Icon, context, contextUp, delay = 0 }) {
-  const TrendIcon = contextUp ? TrendingUp : TrendingDown;
-  const trendColor = contextUp ? "text-[var(--ff-success)]" : contextUp === false ? "text-[var(--ff-error)]" : "text-[var(--ff-text-muted)]";
+function StatCard({ label, value, icon: Icon, delay = 0 }) {
   return (
     <div
       className="bg-[var(--ff-surface)] border border-[var(--ff-border)] rounded-lg p-5 ff-rise"
@@ -24,12 +22,6 @@ function StatCard({ label, value, icon: Icon, context, contextUp, delay = 0 }) {
       <div className="flex items-baseline gap-2">
         <span className="font-mono text-3xl font-semibold tabular-nums text-[var(--ff-text)]">{value}</span>
       </div>
-      {context && (
-        <div className={`mt-2 flex items-center gap-1 text-xs ${trendColor}`}>
-          {contextUp !== null && <TrendIcon size={12} />}
-          <span>{context}</span>
-        </div>
-      )}
     </div>
   );
 }
@@ -152,10 +144,10 @@ export default function DashboardPage() {
       <div className="p-8 space-y-8 bg-[var(--ff-bg)] min-h-[calc(100vh-64px)]">
         {/* Metrics row */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          <StatCard label="Total Projects" value={analytics?.total_projects ?? "—"} icon={FileVideo} context="+12% vs last month" contextUp={true} delay={0} />
-          <StatCard label="Completed" value={analytics?.completed ?? "—"} icon={CheckCircle2} context="+8% vs last month" contextUp={true} delay={40} />
-          <StatCard label="In Progress" value={analytics?.in_progress ?? "—"} icon={Activity} context="-8% drop" contextUp={false} delay={80} />
-          <StatCard label="Avg Quality" value={analytics ? Math.round(analytics.average_quality_score) : "—"} icon={TrendingUp} context="+3 pts vs last week" contextUp={true} delay={120} />
+          <StatCard label="Total Projects" value={analytics?.total_projects ?? "—"} icon={FileVideo} delay={0} />
+          <StatCard label="Completed" value={analytics?.completed ?? "—"} icon={CheckCircle2} delay={40} />
+          <StatCard label="In Progress" value={analytics?.in_progress ?? "—"} icon={Activity} delay={80} />
+          <StatCard label="Avg Quality" value={analytics ? Math.round(analytics.average_quality_score) : "—"} icon={TrendingUp} delay={120} />
         </div>
 
         {/* Charts row */}
