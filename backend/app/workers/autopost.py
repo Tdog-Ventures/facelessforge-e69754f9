@@ -32,7 +32,6 @@ ADAPTERS = {
 }
 
 SUPPORTED_PLATFORMS = ["youtube","tiktok","instagram","facebook","x","linkedin","reddit","product_hunt"]
-# LinkedIn/Reddit/Product Hunt use generic mock via same pattern
 def _now():
     return datetime.now(timezone.utc)
 

@@ -30,6 +30,9 @@ PLATFORM_LIMITS = {
     "product_hunt": {"max_duration": 600, "max_size_mb": 500, "daily_cap": 1},
 }
 
+GRAPH_VERSION = "v26.0"
+GRAPH_BASE = f"https://graph.facebook.com/{GRAPH_VERSION}"
+
 def compliance_check(platform: str, title: str, description: str, duration: Optional[float] = None) -> tuple[bool, str]:
     text = f"{title} {description}".lower()
     for phrase in BANNED_PHRASES:
