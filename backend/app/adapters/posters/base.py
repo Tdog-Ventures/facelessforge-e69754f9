@@ -23,6 +23,7 @@ PLATFORM_LIMITS = {
     "youtube": {"max_duration": 43200, "max_size_mb": 2048, "daily_cap": 6},
     "tiktok": {"max_duration": 600, "max_size_mb": 500, "daily_cap": 10},
     "instagram": {"max_duration": 90, "max_size_mb": 650, "daily_cap": 6},
+    "facebook": {"max_duration": 90, "max_size_mb": 650, "daily_cap": 6},
     "x": {"max_duration": 140, "max_size_mb": 512, "daily_cap": 10},
     "linkedin": {"max_duration": 600, "max_size_mb": 500, "daily_cap": 5},
     "reddit": {"max_duration": 600, "max_size_mb": 500, "daily_cap": 5},
@@ -78,6 +79,9 @@ class PlatformPoster:
             "youtube_client_id": os.getenv("YOUTUBE_CLIENT_ID",""),
             "tiktok_access": os.getenv("TIKTOK_ACCESS_TOKEN",""),
             "instagram_token": os.getenv("INSTAGRAM_ACCESS_TOKEN",""),
+            "instagram_account_id": os.getenv("INSTAGRAM_BUSINESS_ACCOUNT_ID",""),
+            "facebook_token": os.getenv("FACEBOOK_PAGE_ACCESS_TOKEN",""),
+            "facebook_page_id": os.getenv("FACEBOOK_PAGE_ID",""),
             "x_bearer": os.getenv("X_BEARER_TOKEN","") or os.getenv("TWITTER_BEARER_TOKEN",""),
             "reddit_client": os.getenv("REDDIT_CLIENT_ID",""),
         }
