@@ -4,7 +4,7 @@ import { Check, Loader2, Crown, Zap, Building } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "../lib/auth";
 import { createDodoCheckout, DODO_PRODUCT_IDS } from "../lib/dodo";
-import { api, BACKEND_URL } from "../lib/api";
+import { api } from "../lib/api";
 import AppShell from "../components/AppShell";
 import TopBar from "../components/TopBar";
 
@@ -13,7 +13,6 @@ const FALLBACK_PLANS = [
     key: "basic",
     name: "Basic",
     priceMonthly: "$29",
-    priceYearly: "$290",
     credits: 150,
     desc: "150 credits, 10 clips/30s scene, 3s each",
     icon: Zap,
@@ -24,7 +23,6 @@ const FALLBACK_PLANS = [
     key: "pro",
     name: "Pro",
     priceMonthly: "$79",
-    priceYearly: "$790",
     credits: 600,
     desc: "600 credits, 4K, all features",
     icon: Crown,
@@ -36,7 +34,6 @@ const FALLBACK_PLANS = [
     key: "advanced",
     name: "Advanced",
     priceMonthly: "$299",
-    priceYearly: "$2990",
     credits: 2000,
     desc: "2000 credits + white-label",
     icon: Building,
@@ -46,10 +43,9 @@ const FALLBACK_PLANS = [
 ];
 
 export default function PricingPage() {
-  const [yearly, setYearly] = useState(false);
   const [loading, setLoading] = useState(null);
-  const [plans, setPlans] = useState(FALLBACK_PLANS);
   const [providerInfo, setProviderInfo] = useState(null);
+  const plans = FALLBACK_PLANS;
   const { user } = useAuth();
 
   useEffect(() => {
@@ -70,7 +66,7 @@ export default function PricingPage() {
     setLoading(plan.key);
     try {
       const { checkout_url } = await createDodoCheckout(plan.product_id, 1);
-      toast.success(`Redirecting to checkout for ${plan.name} ${yearly ? "Yearly" : "Monthly"}`);
+      toast.success(`Redirecting to checkout for ${plan.name} Monthly`);
       window.location.href = checkout_url;
     } catch (e) {
       const msg = e?.response?.data?.detail || e?.message || String(e);
@@ -87,17 +83,6 @@ export default function PricingPage() {
         <div className="max-w-5xl mx-auto text-center space-y-3">
           <h1 className="text-3xl font-bold tracking-tight">Choose your plan</h1>
           <p className="text-[var(--ff-text-muted)] text-sm">{providerInfo ? `${providerInfo.provider} · live` : "Dodo"} · 3 plans · 14d trial · credits for 3s assets {providerInfo?.provider ? `· ${providerInfo.provider}` : ""}</p>
-          <div className="flex items-center justify-center gap-3 pt-2">
-            <span className={`text-xs ${!yearly ? "text-[var(--ff-text)]" : "text-[var(--ff-text-muted)]"}`}>Monthly</span>
-            <button
-              data-testid="billing-toggle"
-              onClick={() => setYearly(!yearly)}
-              className={`w-12 h-6 rounded-full p-1 transition-colors ${yearly ? "bg-[#00E5FF]" : "bg-[var(--ff-surface-2)]"}`}
-            >
-              <div className={`w-4 h-4 bg-white rounded-full transition-transform ${yearly ? "translate-x-6" : ""}`} />
-            </button>
-            <span className={`text-xs ${yearly ? "text-[var(--ff-text)]" : "text-[var(--ff-text-muted)]"}`}>Yearly</span>
-          </div>
         </div>
 
         <div className="max-w-5xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -109,8 +94,8 @@ export default function PricingPage() {
                 {p.hero && <span className="ml-auto text-[9px] uppercase bg-[#00E5FF] text-black px-1.5 py-0.5 rounded-sm">Most Popular</span>}
               </div>
               <div className="flex items-baseline gap-1">
-                <span className="text-3xl font-bold">{yearly ? p.priceYearly : p.priceMonthly}</span>
-                <span className="text-xs text-[var(--ff-text-muted)]">/{yearly ? "yr" : "mo"}</span>
+                <span className="text-3xl font-bold">{p.priceMonthly}</span>
+                <span className="text-xs text-[var(--ff-text-muted)]">/mo</span>
               </div>
               <div className="text-xs text-[var(--ff-text-muted)]">{p.desc}</div>
               <div className="font-mono text-[11px] text-[#00FF66]">{p.credits} credits</div>
@@ -128,7 +113,7 @@ export default function PricingPage() {
                 className={`w-full flex items-center justify-center gap-2 font-mono text-[11px] uppercase tracking-widest px-4 py-2 rounded-sm transition-colors disabled:opacity-60 ${p.hero ? "bg-[#00E5FF] text-black hover:bg-[#33EFFF]" : "border border-[var(--ff-input-border)] text-[var(--ff-text)] hover:border-[#00E5FF] hover:text-[#00E5FF]"}`}
               >
                 {loading === p.key ? <Loader2 size={12} className="animate-spin" /> : null}
-                {yearly ? `Choose ${p.name} Yearly` : `Choose ${p.name}`}
+                Choose {p.name}
               </button>
             </div>
           ))}
