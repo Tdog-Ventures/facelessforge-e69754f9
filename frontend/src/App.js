@@ -56,12 +56,6 @@ import PrivacyPage from "@/pages/PrivacyPage";
 import TermsPage from "@/pages/TermsPage";
 import LicensePage from "@/pages/LicensePage";
 
-function WaitlistGate({ children }) {
-  const hasInvite = typeof window !== "undefined" && !!localStorage.getItem("forge_invite");
-  if (!hasInvite) return <Navigate to="/" replace />;
-  return children;
-}
-
 function Protected({ children, adminOnly = false }) {
   const { user } = useAuth();
   // handle ?invite=FORGE on any /app route — sets localStorage before gate check
