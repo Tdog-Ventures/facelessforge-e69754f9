@@ -17,12 +17,6 @@ scheduler_logger = logging.getLogger("facelessforge.scheduler")
 from app.routes import router as api_router
 from app.billing_secure import router as billing_router
 import os
-# Revenue unblock - Invite bypass for agency sales (FORGE)
-DISABLE_GOOGLE_OAUTH = os.getenv("DISABLE_GOOGLE_OAUTH", "false").lower() == "true"
-ALLOW_INVITE_BYPASS = os.getenv("ALLOW_INVITE_BYPASS", "false").lower() == "true"
-INVITE_CODE = os.getenv("INVITE_CODE", "FORGE")
-if DISABLE_GOOGLE_OAUTH or ALLOW_INVITE_BYPASS:
-    print(f"Invite bypass active: DISABLE_GOOGLE_OAUTH={DISABLE_GOOGLE_OAUTH} INVITE_CODE={INVITE_CODE}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -285,10 +279,6 @@ def health_detailed():
     }
 
 try:
- print("Dodo mounted")
-except Exception as e:
- print(e)
-try:
  from app.workers.autopost import autopost_router
  app.include_router(autopost_router)
  print("Autopost mounted")
@@ -323,14 +313,6 @@ else:
     @app.get("/")
     def root():
         return {"message": "FacelessForge UI build not found at " + str(frontend_build)}
-try:
- from promo_swarm.app import app as promo_app
- # mount promo swarm under /api/promo for unified health
- from fastapi.responses import JSONResponse
- import httpx
- print("Promo swarm available at :8095")
-except Exception as e:
- print(f"Promo swarm mount check failed {e}")
 
 # === TEASER FALLBACK PATCH (R2 + local) ===
 import pathlib as _pl, os as _os
